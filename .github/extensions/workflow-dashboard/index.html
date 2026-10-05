@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>PR workflows</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header>
+    <div class="eyebrow">trask / copilot-workflows</div>
+    <h1>PR workflows</h1>
+    <p class="muted">Open PRs, dashboard routing, and tasks run by trask/copilot-workflows.</p>
+    <div class="controls">
+      <button id="refresh">Refresh</button>
+      <label><input id="auto" type="checkbox" checked> Auto refresh every 60s</label>
+    </div>
+    <p id="freshness" class="muted" role="status">Loading GitHub metadata...</p>
+    <p id="cost" class="muted"></p>
+    <p id="pause" class="notice" hidden></p>
+    <p id="error" class="error" role="alert" hidden></p>
+  </header>
+  <main>
+    <section aria-label="Recent coordinator failures">
+      <details class="card">
+        <summary>Recent coordinator failures <span id="failures-count" class="badge attention"></span></summary>
+        <p class="muted">Up to 20 failed coordinator dispatches across all repositories, including launches that failed before saving a task checkpoint. Open a run for its error. Older unmatched runs do not identify a PR or task.</p>
+        <div id="failures"></div>
+      </details>
+    </section>
+    <section aria-labelledby="prs-title">
+      <h2 id="prs-title">Open PRs <span id="pr-count" class="badge"></span></h2>
+      <div class="filters">
+        <label>Repository<select id="repo"></select></label>
+        <label class="toggle"><input id="mine" type="checkbox"> My PRs</label>
+        <label class="toggle"><input id="reviewers" type="checkbox"> Waiting on reviewers</label>
+        <label class="search">Search<input id="search" type="search" placeholder="Title, PR number, or author"></label>
+      </div>
+      <p class="muted">Reviewer routing comes from the OpenTelemetry PR dashboard. Unknown or stale classifications stay in All PRs.</p>
+      <div id="warnings" class="notice" hidden></div>
+      <div id="prs"></div>
+    </section>
+    <section aria-labelledby="actions-title">
+      <h2 id="actions-title">In-flight Actions <span id="actions-count" class="badge"></span></h2>
+      <p class="muted">Includes the shared waiter and unmatched runs. Actions success does not mean a review phase is clean.</p>
+      <div id="actions"></div>
+    </section>
+  </main>
+  <dialog id="confirm">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-target"></p>
+      <p id="confirm-effects"></p>
+      <p class="muted">Actions secrets authorize publication. Your local gh account only dispatches the workflow.</p>
+      <div class="controls"><button value="no">Back</button><button id="confirm-submit" value="yes">Confirm</button></div>
+    </form>
+  </dialog>
+  <script type="module" src="/app.mjs"></script>
+</body>
+</html>

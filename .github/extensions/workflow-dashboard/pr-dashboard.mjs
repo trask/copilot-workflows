@@ -1,0 +1,229 @@
+import { createHash } from "node:crypto";
+import { Dashboard } from "./dashboard.mjs";
+import { GitHub } from "./github.mjs";
+import { KIND_LABELS } from "./kinds.mjs";
+import { phaseSummary, TERMINAL } from "./model.mjs";
+import { DEFAULT_REPOSITORY, REPOSITORIES, configuredRepository, dashboardPath, targetParts, LAUNCH_OWNER_ID } from "./repositories.mjs";
+import { actionBlock, checkedPull, normalizePull, taskChoices } from "./prs.mjs";
+
+export function decodeDashboard(response) {
+    if (response?.type !== "file" || response.encoding !== "base64" || typeof response.content !== "string" ||
+        !Number.isSafeInteger(response.size) || response.size < 0 || response.size > 1024 * 1024 ||
+        !/^[0-9a-f]{40}$/.test(response.sha)) throw new Error("Dashboard state file is unsupported or oversized.");
+    const bytes = Buffer.from(response.content, "base64");
+    if (bytes.length !== response.size ||
+        createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex") !== response.sha) {
+        throw new Error("Dashboard state does not match its Git blob identity.");
+    }
+    let state;
+    try {
+        state = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    } catch {
+        throw new Error("Dashboard state contains malformed JSON or UTF-8.");
+    }
+    if (state?.version !== 18 || !state.prs || typeof state.prs !== "object" || Array.isArray(state.prs) ||
+        !Array.isArray(state.draft_pr_numbers) || Object.keys(state.prs).length > 10000 ||
+        !Object.keys(state.prs).every((key) => /^[1-9][0-9]{0,7}$/.test(key))) {
+        throw new Error("Dashboard state has an unsupported version or shape.");
+    }
+    return state;
+}
+
+function viewer(data) {
+    if (!data || !Number.isSafeInteger(data.id) || data.id < 1 || typeof data.login !== "string" || !data.login) {
+        throw new Error("GitHub returned an invalid authenticated account.");
+    }
+    return { id: data.id, login: data.login };
+}
+
+export class PrDashboard extends Dashboard {
+    constructor(github = new GitHub(), now = () => Date.now()) {
+        super(github, now);
+        this.repository = DEFAULT_REPOSITORY;
+        this.prs = [];
+        this.viewer = null;
+        this.prLoadedAt = null;
+        this.prError = null;
+        this.prWarnings = [];
+        this.dispatches = new Map();
+        this.selecting = false;
+    }
+
+    state() {
+        const workflowReady = Boolean(this.value.loadedAt && !this.value.error && !this.value.warnings.length);
+        const ready = Boolean(this.prLoadedAt && !this.prError && workflowReady);
+        const phases = this.value.phases;
+        return {
+            ...super.state(), repository: this.repository, repositories: REPOSITORIES,
+            viewer: this.viewer, prLoadedAt: this.prLoadedAt, prError: this.prError,
+            prWarnings: this.prWarnings, workflowReady,
+            prs: this.prs.map((pr) => {
+                const phase = phases.find((item) => item.target === pr.target);
+                const dispatch = this.dispatches.get(pr.target);
+                return {
+                    ...pr, phase: phase ?? null, dispatch: dispatch ?? null,
+                    tasks: taskChoices(pr, this.viewer),
+                    actionBlock: actionBlock(pr, this.viewer, phase, ready, dispatch),
+                    canCancel: Boolean(ready && this.viewer?.id === LAUNCH_OWNER_ID && !dispatch && phase &&
+                        !phase.historical && !phase.unknownStage && !TERMINAL.has(phase.stage) &&
+                        Number.isSafeInteger(phase.generation) && phase.generation > 0),
+                };
+            }),
+        };
+    }
+
+    async selectRepository(repo) {
+        configuredRepository(repo);
+        if (this.selecting) throw new Error("Repository selection is already refreshing.");
+        this.selecting = true;
+        try {
+            if (this.pending) await this.pending;
+            if (repo !== this.repository) {
+                this.repository = repo;
+                this.prs = [];
+                this.prLoadedAt = null;
+                this.prError = null;
+                this.prWarnings = [];
+            }
+            return await this.refresh();
+        } finally {
+            this.selecting = false;
+        }
+    }
+
+    async update() {
+        const started = this.now();
+        const counted = this.github.counted;
+        const warm = this.prLoadedAt !== null;
+        this.value.loading = true;
+        try {
+            this.viewer = viewer((await this.github.get("user")).data);
+            const pulls = await this.github.pulls(this.repository);
+            let dashboard = null;
+            const warnings = [];
+            try {
+                dashboard = decodeDashboard((await this.github.get(dashboardPath(this.repository))).data);
+            } catch (error) {
+                warnings.push(`Reviewer dashboard unavailable: ${error.message}`);
+            }
+            const prs = pulls.map((pr) => normalizePull(pr, this.repository, dashboard, this.viewer));
+            const incomplete = prs.filter((pr) => !["current", "draft"].includes(pr.dashboardStatus)).length;
+            if (incomplete) warnings.push(`${incomplete} PR(s) have missing, stale or invalid dashboard classifications. They remain in All PRs.`);
+            this.prs = prs;
+            this.prWarnings = warnings;
+            this.prLoadedAt = this.now();
+            this.prError = null;
+            await super.update();
+            this.observeDispatches();
+            this.value.latency = this.now() - started;
+            this.value.cost = this.github.counted - counted;
+            if (!dashboard) {
+                this.auto = false;
+                this.pauseReason = "Reviewer dashboard is unavailable. Refresh manually.";
+            } else if (warm && this.value.cost > 12) {
+                this.auto = false;
+                this.pauseReason = "Refresh used more than 12 primary-counted GitHub requests.";
+            } else if (warm && this.value.latency > 10000) {
+                this.auto = false;
+                this.pauseReason = "Refresh took more than 10 seconds.";
+            }
+        } catch (error) {
+            this.prError = error.message;
+            this.value.loading = false;
+            this.auto = false;
+            this.pauseReason = "Automatic refresh paused after a failed PR read.";
+        }
+        return this.state();
+    }
+
+    observeDispatches() {
+        if (this.value.error || this.value.snapshot !== this.checkpoints.snapshot?.sha) return;
+        for (const [target, entry] of this.dispatches) {
+            if (entry.status === "pending") continue;
+            const phase = this.value.phases.find((item) => item.target === target);
+            if ((entry.operation === "launch" && phase && phase.launchId &&
+                phase.launchId !== entry.previousLaunch && phase.kind === entry.kind &&
+                phase.authorizedActorId === this.viewer?.id) ||
+                (entry.operation === "cancel" && phase?.requestId === entry.requestId &&
+                phase.generation > entry.generation && phase.stage === "cancelled")) {
+                this.dispatches.delete(target);
+            }
+        }
+    }
+
+    async current(target) {
+        const { repo, number } = targetParts(target);
+        const account = viewer((await this.github.get("user")).data);
+        if (account.id !== LAUNCH_OWNER_ID) throw new Error("The workflows only accept the configured personal owner's dispatch.");
+        const pr = checkedPull((await this.github.get(`repos/${repo}/pulls/${number}`)).data, repo);
+        const snapshot = await this.checkpoints.load();
+        const phases = snapshot.current.map(phaseSummary).filter((phase) => phase.target.toLowerCase() === target.toLowerCase());
+        if (phases.length > 1) throw new Error("Multiple checkpoints exist for this PR. Inspect central state before dispatching.");
+        return { pr: normalizePull(pr, repo, null, account), viewer: account, phase: phases[0] };
+    }
+
+    launch(input) {
+        if (!input || Object.keys(input).some((key) => !["target", "kind", "confirmed"].includes(key)) ||
+            input.confirmed !== true || !Object.hasOwn(KIND_LABELS, input.kind)) {
+            return Promise.reject(new Error("Confirm the explicit target and supported task before launch."));
+        }
+        return this.mutate(input.target, "launch", async () => {
+            const current = await this.current(input.target);
+            const blocked = actionBlock(current.pr, current.viewer, current.phase, true, null);
+            if (blocked) throw new Error(blocked);
+            if (!taskChoices(current.pr, current.viewer).includes(input.kind)) throw new Error("This task is not eligible for the PR's author.");
+            return {
+                inputs: { operation: "launch", target: input.target, loop_kind: input.kind, publication_auth: "fine_grained_pat" },
+                kind: input.kind, previousLaunch: current.phase?.launchId ?? null,
+            };
+        }, input.kind);
+    }
+
+    cancel(input) {
+        if (!input || Object.keys(input).some((key) => !["target", "requestId", "generation", "confirmed"].includes(key)) ||
+            input.confirmed !== true || !/^[0-9a-f]{32}$/.test(input.requestId) ||
+            !Number.isSafeInteger(input.generation) || input.generation < 1) {
+            return Promise.reject(new Error("Confirm cancellation with the exact observed request and generation."));
+        }
+        return this.mutate(input.target, "cancel", async () => {
+            const { phase } = await this.current(input.target);
+            if (!phase || phase.historical || phase.unknownStage || TERMINAL.has(phase.stage) ||
+                phase.requestId !== input.requestId || phase.generation !== input.generation) {
+                throw new Error("Cancellation selection is stale or unsupported. Refresh before cancelling.");
+            }
+            return {
+                inputs: { operation: "cancel", target: input.target, previous_request: input.requestId,
+                    previous_generation: String(input.generation) },
+                requestId: input.requestId, generation: input.generation,
+            };
+        });
+    }
+
+    async mutate(target, operation, prepare, kind = null) {
+        targetParts(target);
+        if (this.selecting) throw new Error("Wait for repository selection to finish.");
+        if (this.dispatches.has(target)) throw new Error(this.dispatches.get(target).message);
+        if (!this.prs.some((pr) => pr.target === target) || !this.prLoadedAt || this.prError ||
+            !this.value.loadedAt || this.value.error || this.value.warnings.length) {
+            throw new Error("Refresh this repository successfully before dispatching a task.");
+        }
+        const entry = { operation, kind, status: "pending", message: "Dispatch is pending. Do not submit again." };
+        this.dispatches.set(target, entry);
+        try {
+            if (this.pending) await this.pending;
+            const prepared = await prepare();
+            Object.assign(entry, prepared);
+            delete entry.inputs;
+            await this.github.dispatch(prepared.inputs);
+            entry.status = "accepted";
+            entry.message = "Dispatch accepted. Execution is not yet confirmed; refresh to observe central state.";
+            return { target, operation, status: entry.status, message: entry.message };
+        } catch (error) {
+            if (error.uncertain) {
+                entry.status = "uncertain";
+                entry.message = error.message;
+            } else this.dispatches.delete(target);
+            throw error;
+        }
+    }
+}

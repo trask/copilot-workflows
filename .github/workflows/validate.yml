@@ -1,0 +1,29 @@
+name: Central fast checks
+on:
+  push:
+    branches: [main, "trask-*"]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  deterministic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Offline protocol and hostile-input tests
+        run: python3 -m unittest discover -v
+      - name: Offline PR canvas tests
+        run: node --test .github/extensions/workflow-dashboard/dashboard.test.mjs .github/extensions/workflow-dashboard/pr-dashboard.test.mjs
+      - name: Compile and validate real Markdown without inference
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/compiler.py
+      - name: Lint handwritten controller workflows
+        run: python3 tools/lint.py
+      - name: Inspect compiled security policy and reproducibility
+        run: |
+          python3 tools/audit_lock.py
+          git diff --exit-code -- .github/workflows/copilot-worker.lock.yml .github/aw/actions-lock.json .gitattributes

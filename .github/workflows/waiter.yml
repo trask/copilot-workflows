@@ -1,0 +1,30 @@
+name: Review loop shared waiter
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: [Review loop coordinator, Copilot review worker]
+    types: [in_progress, completed]
+    branches: [main, "review-loop-revisions/**"]
+  schedule:
+    - cron: "*/5 * * * *"
+permissions: {}
+concurrency:
+  group: central-review-loop-waiter
+  cancel-in-progress: false
+jobs:
+  wait:
+    if: github.repository == 'trask/copilot-workflows' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Poll all authorized PRs and wake only ready work
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_READ_TOKEN: ${{ secrets.REVIEW_LOOP_SOURCE_READ_TOKEN }}
+        run: python3 -m loop.waiter

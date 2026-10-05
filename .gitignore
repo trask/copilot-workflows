@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.tools/
+.venv/
+out/
+candidate-package/
+verification-report.json
+objective-validation/

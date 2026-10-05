@@ -1,0 +1,198 @@
+name: Review loop coordinator
+run-name: "${{ inputs.operation == 'launch' && format('Review loop launch {0} {1}', inputs.loop_kind, inputs.target) || format('Review loop {0} {1}', inputs.operation || 'tick', inputs.previous_request || github.run_id) }}"
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Central operation
+        type: choice
+        options: [launch, reconcile-publication, cancel, status, tick]
+        default: status
+      target:
+        description: Explicit owner/repo#number or github.com PR URL
+        type: string
+        default: ""
+      loop_kind:
+        description: Independently launched PR task
+        type: choice
+        options: [copilot_review, self_review, pr_conflict_resolver, ci_fix, pr_description, pr_simplify, pr_review, pr_consistency]
+        default: copilot_review
+      previous_request:
+        description: Exact observed request identity for cancellation or recovery
+        type: string
+        default: ""
+      previous_generation:
+        description: Exact observed generation for cancellation or recovery
+        type: string
+        default: ""
+      publication_auth:
+        description: Explicit publisher credential mode; never falls back to inference auth
+        type: choice
+        options: [disabled, fine_grained_pat]
+        default: disabled
+      restart_unpublished:
+        description: Start a fresh phase after a stopped push at the unchanged original head; requires exact previous identity
+        type: boolean
+        default: false
+  workflow_run:
+    workflows: [Copilot review worker]
+    types: [completed]
+    branches: [main, "review-loop-revisions/**"]
+permissions: {}
+jobs:
+  coordinate:
+    if: github.repository == 'trask/copilot-workflows' && (github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'tick' && startsWith(github.ref, 'refs/heads/review-loop-revisions/')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: central-review-loop-coordinate-${{ inputs.previous_request || inputs.target || github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: write
+    outputs:
+      verify: ${{ steps.control.outputs.verify }}
+      pr: ${{ steps.control.outputs.pr }}
+      request_id: ${{ steps.control.outputs.request_id }}
+      revision: ${{ steps.control.outputs.revision }}
+      generation: ${{ steps.control.outputs.generation }}
+      repo: ${{ steps.control.outputs.repo }}
+      live: ${{ steps.control.outputs.live }}
+      live_pr: ${{ steps.control.outputs.live_pr }}
+      live_repo: ${{ steps.control.outputs.live_repo }}
+      live_request: ${{ steps.control.outputs.live_request }}
+      live_revision: ${{ steps.control.outputs.live_revision }}
+      live_generation: ${{ steps.control.outputs.live_generation }}
+      live_stage: ${{ steps.control.outputs.live_stage }}
+      live_publisher_secret: ${{ steps.control.outputs.live_publisher_secret }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - id: publisher
+        if: inputs.operation == 'launch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ inputs.target }}
+          LOOP_KIND: ${{ inputs.loop_kind || 'copilot_review' }}
+          PUBLISHER_SECRET_MAP: ${{ vars.PUBLISHER_SECRETS }}
+          SOURCE_READ_TOKEN: ${{ secrets.REVIEW_LOOP_SOURCE_READ_TOKEN }}
+        run: python3 -m loop.cli select-publisher --target "$TARGET"
+      - id: control
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPERATION: ${{ inputs.operation || 'tick' }}
+          TARGET: ${{ inputs.target }}
+          LOOP_KIND: ${{ inputs.loop_kind || 'copilot_review' }}
+          INFERENCE_AVAILABLE: ${{ secrets.COPILOT_GITHUB_TOKEN != '' }}
+          PREVIOUS_REQUEST: ${{ inputs.previous_request }}
+          PREVIOUS_GENERATION: ${{ inputs.previous_generation }}
+          RESTART_UNPUBLISHED: ${{ inputs.restart_unpublished }}
+          PUBLICATION_AUTH_MODE: ${{ inputs.publication_auth || 'disabled' }}
+          PUBLISHER_SECRET_MAP: ${{ vars.PUBLISHER_SECRETS }}
+          PUBLISHER_SECRET_NAME: ${{ steps.publisher.outputs.publisher_secret }}
+          PUBLISHER_HEAD_REPO: ${{ steps.publisher.outputs.publisher_head_repo }}
+          PUBLISHER_AVAILABLE: ${{ steps.publisher.outputs.publisher_secret != '' && secrets[steps.publisher.outputs.publisher_secret] != '' }}
+          SOURCE_READ_TOKEN: ${{ secrets.REVIEW_LOOP_SOURCE_READ_TOKEN }}
+        run: python3 -m loop.cli "$OPERATION" --target "$TARGET"
+      - id: source
+        if: steps.control.outputs.source_upload == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: source-${{ steps.control.outputs.source_request }}
+          path: source-package/
+          if-no-files-found: error
+          retention-days: 14
+      - if: steps.control.outputs.source_upload == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_READ_TOKEN: ${{ secrets.REVIEW_LOOP_SOURCE_READ_TOKEN }}
+          SOURCE_ARTIFACT_ID: ${{ steps.source.outputs.artifact-id }}
+          SOURCE_ARTIFACT_DIGEST: sha256:${{ steps.source.outputs.artifact-digest }}
+          REQUEST_ID: ${{ steps.control.outputs.source_request }}
+          PR: ${{ steps.control.outputs.source_pr }}
+          GENERATION: ${{ steps.control.outputs.source_generation }}
+          TARGET_REPO: ${{ steps.control.outputs.source_repo }}
+        run: python3 -m loop.cli attach-source
+  verify:
+    needs: coordinate
+    if: needs.coordinate.outputs.verify == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.coordinate.outputs.revision }}
+          persist-credentials: false
+      - id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.coordinate.outputs.pr }}
+          REQUEST_ID: ${{ needs.coordinate.outputs.request_id }}
+          GENERATION: ${{ needs.coordinate.outputs.generation }}
+          TARGET_REPO: ${{ needs.coordinate.outputs.repo }}
+        run: python3 -m loop.cli verify
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            verification-report.json
+            candidate-package/
+          if-no-files-found: error
+          retention-days: 14
+  finalize:
+    needs: [coordinate, verify]
+    if: always() && needs.coordinate.outputs.verify == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.coordinate.outputs.revision }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.verify.result == 'success'
+        with:
+          name: verification-${{ github.run_id }}-${{ github.run_attempt }}
+      - if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_READ_TOKEN: ${{ secrets.REVIEW_LOOP_SOURCE_READ_TOKEN }}
+          PR: ${{ needs.coordinate.outputs.pr }}
+          REQUEST_ID: ${{ needs.coordinate.outputs.request_id }}
+          GENERATION: ${{ needs.coordinate.outputs.generation }}
+          TARGET_REPO: ${{ needs.coordinate.outputs.repo }}
+        run: python3 -m loop.cli finalize
+  personal_live:
+    needs: coordinate
+    if: needs.coordinate.outputs.live == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.coordinate.outputs.live_revision }}
+          persist-credentials: false
+      - name: Trusted personal publisher and review watcher, never target execution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISHER_SECRET_MAP: ${{ vars.PUBLISHER_SECRETS }}
+          PUBLISHER_SECRET_NAME: ${{ needs.coordinate.outputs.live_publisher_secret }}
+          PUBLISHER_TOKEN: ${{ secrets[needs.coordinate.outputs.live_publisher_secret] }}
+          PR: ${{ needs.coordinate.outputs.live_pr }}
+          TARGET_REPO: ${{ needs.coordinate.outputs.live_repo }}
+          REQUEST_ID: ${{ needs.coordinate.outputs.live_request }}
+          GENERATION: ${{ needs.coordinate.outputs.live_generation }}
+          TRUSTED_REVISION: ${{ needs.coordinate.outputs.live_revision }}
+          EXPECTED_STAGE: ${{ needs.coordinate.outputs.live_stage }}
+        run: python3 -m loop.live
