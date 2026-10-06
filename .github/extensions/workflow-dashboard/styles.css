@@ -73,6 +73,7 @@ dialog::backdrop { background: #0006; }
 .finding-text { white-space: pre-wrap; max-height: 260px; overflow: auto; font-size: 13px; }
 .paths { margin: 6px 0; padding-left: 20px; }
 .notice, .error { padding: 10px; border: 1px solid var(--border-color-default, #d1d9e0); border-radius: 6px; overflow-wrap: anywhere; }
+.loading { display: flex; align-items: center; gap: 8px; color: var(--true-color-blue, #0969da); }
 .error { color: var(--true-color-red, #cf222e); }
 .empty { color: var(--text-color-muted, #59636e); padding: 18px 0; }
 .run { margin-bottom: 8px; }

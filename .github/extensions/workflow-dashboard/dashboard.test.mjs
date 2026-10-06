@@ -799,7 +799,7 @@ test("loopback serves assets and read-only endpoints; cross-origin data reads an
     assert.equal((await stale.json()).phases.length, 1);
 });
 
-test("renderer preserves safe history and shows per-task buttons with confirmation and activity", async () => {
+async function rendererFixture(fetch) {
     class Node {
         constructor(tag = "") { this.tag = tag; this.children = []; this.events = {}; this.value = ""; this.isConnected = true; }
         append(...nodes) { this.children.push(...nodes); }
@@ -809,10 +809,37 @@ test("renderer preserves safe history and shows per-task buttons with confirmati
         setAttribute(name, value) { this[name] = value; }
         showModal() { this.open = true; }
     }
-    const nodes = new Map();
-    for (const id of ["refresh", "auto", "freshness", "cost", "pause", "error", "mine", "reviewers", "pr-count",
-        "repo", "search", "warnings", "prs", "actions", "actions-count", "failures", "failures-count",
-        "confirm", "confirm-title", "confirm-target", "confirm-effects", "confirm-submit"]) nodes.set(id, new Node());
+    const html = await readFile(new URL("index.html", import.meta.url), "utf8");
+    const nodes = new Map(Array.from(html.matchAll(/\bid="([^"]+)"/g), (match) => [match[1], new Node()]));
+    const document = {
+        hidden: false, getElementById: (id) => nodes.get(id), createElement: (tag) => new Node(tag),
+        createElementNS: (_namespace, tag) => new Node(tag),
+        createTextNode: (text) => Object.assign(new Node("#text"), { textContent: text }), addEventListener() {},
+    };
+    const script = await readFile(new URL("app.mjs", import.meta.url), "utf8");
+    const renderer = await runInNewContext(`(async () => { ${script.replace(/^import .+;\r?$/gm, "")} return { render, heartbeat, refresh }; })()`, {
+        KIND_LABELS, filterPulls, taskPresentation, TASK_EFFECTS, document, setInterval() {}, fetch,
+    });
+    return { renderer, nodes, document };
+}
+
+function rendererState(repository = "example/project") {
+    return {
+        repository, repositories: ["example/project", "example/other"],
+        auto: true, loading: false, loadedAt: 2000000, prLoadedAt: 2000000, snapshot: sha("a"),
+        error: null, prError: null, pauseReason: null, warnings: [], prWarnings: [],
+        cost: 0, rate: null, metrics: { requests: 10, cacheHits: 10 },
+        workflowReady: true, viewer: { login: "trask" }, phases: [], actions: [], failures: [],
+        prs: [{
+            target: `${repository}#12`, number: 12, title: `PR in ${repository}`,
+            url: `https://github.com/${repository}/pull/12`, author: "trask", mine: true,
+            sha: sha("a"), draft: false, dashboardStatus: "missing", routeLabel: "Dashboard missing",
+            reviewers: [], tasks: Object.keys(KIND_LABELS), phase: null, canCancel: false, actionBlock: null,
+        }],
+    };
+}
+
+test("renderer preserves safe history and shows per-task buttons with confirmation and activity", async () => {
     const s = fixture({ stage: "blocked", reason: "target_ci_failed",
         publications: [{ request_id: requestId("a"), sha: sha("b"), effect: "push" }],
     }, { findings: [{ key: "one", body: '<img src=x onerror="throw Error()">', path: "src/example.js" }] });
@@ -833,25 +860,17 @@ test("renderer preserves safe history and shows per-task buttons with confirmati
         }],
     });
     const history = await dashboard.history(target);
-    const document = {
-        hidden: false, getElementById: (id) => nodes.get(id), createElement: (tag) => new Node(tag),
-        createElementNS: (_namespace, tag) => new Node(tag),
-        createTextNode: (text) => Object.assign(new Node("#text"), { textContent: text }), addEventListener() {},
-    };
-    const script = await readFile(new URL("app.mjs", import.meta.url), "utf8");
     const launches = [];
     let releaseLaunch;
-    const renderer = await runInNewContext(`(async () => { ${script.replace(/^import .+;\r?$/gm, "")} return { render }; })()`, {
-        KIND_LABELS, filterPulls, taskPresentation, TASK_EFFECTS, document, setInterval() {}, fetch: async (path, options) => {
-            if (path === "/api/launch") {
-                launches.push(JSON.parse(options.body));
-                return new Promise((resolve) => releaseLaunch = () => {
-                    state.prs[0].dispatch = { operation: "launch", kind: "pr_description", status: "accepted", message: "Dispatch accepted" };
-                    resolve({ ok: true, json: async () => state.prs[0].dispatch });
-                });
-            }
-            return { ok: true, json: async () => path.includes("history") ? history : path.includes("visibility") ? {} : state };
-        },
+    const { renderer, nodes } = await rendererFixture(async (path, options) => {
+        if (path === "/api/launch") {
+            launches.push(JSON.parse(options.body));
+            return new Promise((resolve) => releaseLaunch = () => {
+                state.prs[0].dispatch = { operation: "launch", kind: "pr_description", status: "accepted", message: "Dispatch accepted" };
+                resolve({ ok: true, json: async () => state.prs[0].dispatch });
+            });
+        }
+        return { ok: true, json: async () => path.includes("history") ? history : path.includes("visibility") ? {} : state };
     });
     const row = nodes.get("prs").firstChild;
     assert.equal(nodes.get("failures-count").textContent, 1);
@@ -911,4 +930,158 @@ test("renderer preserves safe history and shows per-task buttons with confirmati
     releaseLaunch();
     await accept;
     assert.ok(buttons().some((button) => button["aria-label"] === "PR Description: Starting"));
+});
+
+test("repository selection shows loading before its response and hides old cards until completion", async () => {
+    const previous = rendererState();
+    const next = rendererState("example/other");
+    let release;
+    const selections = [];
+    const { renderer, nodes } = await rendererFixture(async (path, options) => {
+        if (path === "/api/repository") {
+            selections.push(JSON.parse(options.body));
+            return new Promise((resolve) => release = resolve);
+        }
+        return { ok: true, json: async () => structuredClone(previous) };
+    });
+    nodes.get("repo").value = "example/other";
+    const pending = nodes.get("repo").events.change();
+    assert.equal(nodes.get("loading").hidden, false);
+    assert.equal(nodes.get("loading-message").textContent, "Loading example/other...");
+    assert.equal(nodes.get("prs")["aria-busy"], "true");
+    assert.equal(nodes.get("prs").children.length, 1);
+    assert.equal(nodes.get("prs").firstChild.textContent, "Loading open PRs for example/other...");
+    assert.equal(nodes.get("pr-count").textContent, "Loading...");
+    assert.equal(nodes.get("refresh").textContent, "Loading...");
+    for (const id of ["repo", "refresh", "auto"]) assert.equal(nodes.get(id).disabled, true);
+    nodes.get("search").events.input();
+    assert.equal(nodes.get("repo").value, "example/other");
+    assert.equal(nodes.get("prs").firstChild.textContent, "Loading open PRs for example/other...");
+    assert.equal(nodes.get("loading").hidden, false);
+    await renderer.refresh();
+    assert.deepEqual(selections, [{ repo: "example/other" }]);
+    release({ ok: true, json: async () => next });
+    await pending;
+    assert.equal(nodes.get("repo").value, "example/other");
+    assert.equal(nodes.get("prs").firstChild.firstChild.firstChild.textContent, "#12 PR in example/other");
+    assert.equal(nodes.get("pr-count").textContent, "1 / 1");
+    assert.equal(nodes.get("loading").hidden, true);
+    assert.equal(nodes.get("prs")["aria-busy"], "false");
+    assert.equal(nodes.get("refresh").textContent, "Refresh");
+    for (const id of ["repo", "refresh", "auto"]) assert.equal(nodes.get(id).disabled, false);
+});
+
+test("late heartbeat responses cannot replace a pending or completed repository switch", async () => {
+    const previous = rendererState();
+    let releaseSelection;
+    const oldReads = [];
+    let delayed = false;
+    const { renderer, nodes } = await rendererFixture(async (path) => {
+        if (path === "/api/repository") return new Promise((resolve) => releaseSelection = resolve);
+        if (path === "/api/state" && delayed) return new Promise((resolve) => oldReads.push(resolve));
+        return { ok: true, json: async () => structuredClone(previous) };
+    });
+    delayed = true;
+    const before = renderer.heartbeat();
+    const after = renderer.heartbeat();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(oldReads.length, 2);
+    nodes.get("repo").value = "example/other";
+    const pending = nodes.get("repo").events.change();
+    oldReads[0]({ ok: true, json: async () => previous });
+    await before;
+    assert.equal(nodes.get("repo").value, "example/other");
+    assert.equal(nodes.get("loading").hidden, false);
+    assert.equal(nodes.get("prs").firstChild.textContent, "Loading open PRs for example/other...");
+    releaseSelection({ ok: true, json: async () => rendererState("example/other") });
+    await pending;
+    oldReads[1]({ ok: true, json: async () => previous });
+    await after;
+    assert.equal(nodes.get("repo").value, "example/other");
+    assert.equal(nodes.get("prs").firstChild.firstChild.firstChild.textContent, "#12 PR in example/other");
+    assert.equal(nodes.get("loading").hidden, true);
+    assert.equal(nodes.get("prs")["aria-busy"], "false");
+});
+
+test("failed repository reads clear loading, expose the error and recover controls without retrying", async () => {
+    for (const result of [
+        { ok: false, json: async () => ({ ...rendererState("example/other"), prs: [], prLoadedAt: null,
+            prError: "GitHub unavailable", auto: false }) },
+        { ok: false, json: async () => ({ error: "GitHub unavailable" }) },
+        new Error("GitHub unavailable"),
+    ]) {
+        let release;
+        let requests = 0;
+        const { nodes } = await rendererFixture(async (path) => {
+            if (path === "/api/repository") {
+                requests++;
+                const response = await new Promise((resolve) => release = resolve);
+                if (response instanceof Error) throw response;
+                return response;
+            }
+            return { ok: true, json: async () => rendererState() };
+        });
+        nodes.get("repo").value = "example/other";
+        const pending = nodes.get("repo").events.change();
+        release(result);
+        await pending;
+        assert.equal(nodes.get("loading").hidden, true);
+        assert.equal(nodes.get("prs")["aria-busy"], "false");
+        assert.equal(nodes.get("refresh").textContent, "Refresh");
+        for (const id of ["repo", "refresh", "auto"]) assert.equal(nodes.get(id).disabled, false);
+        assert.equal(nodes.get("error").hidden, false);
+        assert.equal(nodes.get("error").textContent, "GitHub unavailable");
+        assert.equal(requests, 1);
+    }
+});
+
+test("a late auto-refresh response cannot restore the previous repository", async () => {
+    let releaseAuto;
+    let releaseSelection;
+    const { nodes } = await rendererFixture(async (path) => {
+        if (path.startsWith("/api/auto?")) return new Promise((resolve) => releaseAuto = resolve);
+        if (path === "/api/repository") return new Promise((resolve) => releaseSelection = resolve);
+        return { ok: true, json: async () => rendererState() };
+    });
+    nodes.get("auto").checked = false;
+    const auto = nodes.get("auto").events.change();
+    nodes.get("repo").value = "example/other";
+    const selection = nodes.get("repo").events.change();
+    releaseSelection({ ok: true, json: async () => ({ ...rendererState("example/other"), auto: false }) });
+    await selection;
+    releaseAuto({ ok: true, json: async () => ({ ...rendererState(), auto: false }) });
+    await auto;
+    assert.equal(nodes.get("repo").value, "example/other");
+    assert.equal(nodes.get("prs").firstChild.firstChild.firstChild.textContent, "#12 PR in example/other");
+    assert.equal(nodes.get("auto").checked, false);
+    assert.equal(nodes.get("loading").hidden, true);
+});
+
+test("manual and background refreshes display busy status without replacing the current PR list", async () => {
+    let current = rendererState();
+    let release;
+    const { renderer, nodes } = await rendererFixture(async (path) => {
+        if (path === "/api/refresh") return new Promise((resolve) => release = resolve);
+        return { ok: true, json: async () => structuredClone(current) };
+    });
+    const pending = renderer.refresh();
+    assert.equal(nodes.get("loading").hidden, false);
+    assert.equal(nodes.get("loading-message").textContent, "Refreshing example/project...");
+    assert.equal(nodes.get("prs")["aria-busy"], "true");
+    assert.equal(nodes.get("prs").firstChild.firstChild.firstChild.textContent, "#12 PR in example/project");
+    assert.equal(nodes.get("repo").disabled, true);
+    assert.equal(nodes.get("refresh").textContent, "Refreshing...");
+    release({ ok: true, json: async () => current });
+    await pending;
+    assert.equal(nodes.get("loading").hidden, true);
+    assert.equal(nodes.get("repo").disabled, false);
+    current = { ...current, loading: true };
+    await renderer.heartbeat();
+    assert.equal(nodes.get("loading").hidden, false);
+    assert.equal(nodes.get("prs")["aria-busy"], "true");
+    assert.equal(nodes.get("prs").firstChild.firstChild.firstChild.textContent, "#12 PR in example/project");
+    current = { ...current, loading: false };
+    await renderer.heartbeat();
+    assert.equal(nodes.get("loading").hidden, true);
+    assert.equal(nodes.get("prs")["aria-busy"], "false");
 });

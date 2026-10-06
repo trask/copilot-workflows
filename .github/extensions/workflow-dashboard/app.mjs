@@ -4,6 +4,8 @@ import { filterPulls, taskPresentation, TASK_EFFECTS } from "./prs.mjs";
 const $ = (id) => document.getElementById(id);
 let state = null;
 let busy = false;
+let loadingRepository = null;
+let stateVersion = 0;
 let expanded = new Set();
 const histories = new Map();
 let inViewport = true;
@@ -41,11 +43,12 @@ function words(value) {
 }
 
 async function api(path, method = "GET", input) {
+    const version = stateVersion;
     const response = await fetch(path, { method, cache: "no-store",
         ...(input ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) } : {}) });
     const value = await response.json();
     if (!response.ok) {
-        if (Array.isArray(value.prs)) {
+        if (Array.isArray(value.prs) && version === stateVersion) {
             state = value;
             render();
         }
@@ -57,6 +60,38 @@ async function api(path, method = "GET", input) {
 function error(message) {
     $("error").hidden = !message;
     $("error").textContent = message ?? "";
+}
+
+function renderLoading() {
+    const loading = busy || Boolean(state?.loading);
+    $("loading").hidden = !loading;
+    $("loading-message").textContent = loading
+        ? `${loadingRepository ? "Loading" : "Refreshing"} ${loadingRepository ?? state?.repository ?? "GitHub data"}...`
+        : "";
+    $("prs").setAttribute("aria-busy", String(loading));
+}
+
+function setBusy(value, repository = null) {
+    busy = value;
+    loadingRepository = value ? repository : null;
+    stateVersion++;
+    for (const id of ["repo", "refresh", "auto"]) $(id).disabled = value;
+    $("refresh").textContent = value ? repository ? "Loading..." : "Refreshing..." : "Refresh";
+    renderLoading();
+}
+
+function renderPulls() {
+    const cards = $("prs");
+    if (loadingRepository) {
+        $("pr-count").textContent = "Loading...";
+        cards.replaceChildren(element("p", `Loading open PRs for ${loadingRepository}...`, "empty"));
+        return;
+    }
+    const rows = filterPulls(state.prs, { mine: $("mine").checked, reviewers: $("reviewers").checked, search: $("search").value });
+    $("pr-count").textContent = `${rows.length} / ${state.prs.length}`;
+    cards.replaceChildren();
+    for (const pr of rows) cards.append(prCard(pr));
+    if (!cards.children.length) cards.append(element("p", state.prLoadedAt ? "No open PRs match these filters." : "No successful open-PR snapshot yet.", "empty"));
 }
 
 function render() {
@@ -75,16 +110,12 @@ function render() {
         option.value = repo;
         $("repo").append(option);
     }
-    $("repo").value = state.repository;
+    $("repo").value = loadingRepository ?? state.repository;
     const warnings = [...state.prWarnings, ...state.warnings];
     $("warnings").hidden = !warnings.length;
     $("warnings").textContent = warnings.join(" ");
-    const rows = filterPulls(state.prs, { mine: $("mine").checked, reviewers: $("reviewers").checked, search: $("search").value });
-    $("pr-count").textContent = `${rows.length} / ${state.prs.length}`;
-    const cards = $("prs");
-    cards.replaceChildren();
-    for (const pr of rows) cards.append(prCard(pr));
-    if (!cards.children.length) cards.append(element("p", state.prLoadedAt ? "No open PRs match these filters." : "No successful open-PR snapshot yet.", "empty"));
+    renderLoading();
+    renderPulls();
     const actions = $("actions");
     actions.replaceChildren();
     $("actions-count").textContent = state.actions.length;
@@ -144,8 +175,12 @@ async function taskAction(pr, kind, cancel = false) {
         failureMessage = failure.message;
     }
     try {
-        state = await api("/api/state");
-        render();
+        const version = stateVersion;
+        const next = await api("/api/state");
+        if (version === stateVersion) {
+            state = next;
+            render();
+        }
         if (failureMessage) error(failureMessage);
     } catch (failure) {
         render();
@@ -411,28 +446,35 @@ function iterationCard(item) {
     return node;
 }
 
-async function refresh() {
+async function load(path, repository = null) {
     if (busy) return;
-    busy = true;
-    $("refresh").disabled = true;
-    $("refresh").textContent = "Refreshing...";
+    setBusy(true, repository);
+    error(null);
+    if (repository) renderPulls();
+    let failureMessage = null;
     try {
-        state = await api("/api/refresh", "POST");
+        state = await api(path, "POST", repository ? { repo: repository } : undefined);
         histories.clear();
-        render();
     } catch (failure) {
-        error(failure.message);
+        failureMessage = failure.message;
     } finally {
-        busy = false;
-        $("refresh").disabled = false;
-        $("refresh").textContent = "Refresh";
+        setBusy(false);
+        render();
+        if (failureMessage) error(failureMessage);
     }
+}
+
+function refresh() {
+    return load("/api/refresh");
 }
 
 $("refresh").addEventListener("click", refresh);
 $("auto").addEventListener("change", async () => {
+    const version = stateVersion;
     try {
-        state = await api(`/api/auto?enabled=${$("auto").checked}`, "POST");
+        const next = await api(`/api/auto?enabled=${$("auto").checked}`, "POST");
+        if (version !== stateVersion) return;
+        state = next;
         render();
     } catch (failure) {
         $("auto").checked = state?.auto ?? false;
@@ -440,29 +482,15 @@ $("auto").addEventListener("change", async () => {
     }
 });
 for (const id of ["mine", "reviewers", "search"]) $(id).addEventListener("input", render);
-$("repo").addEventListener("change", async () => {
-    if (busy) return;
-    busy = true;
-    $("repo").disabled = true;
-    $("refresh").disabled = true;
-    try {
-        state = await api("/api/repository", "POST", { repo: $("repo").value });
-        histories.clear();
-        render();
-    } catch (failure) {
-        error(failure.message);
-    } finally {
-        busy = false;
-        $("repo").disabled = false;
-        $("refresh").disabled = false;
-    }
-});
+$("repo").addEventListener("change", () => load("/api/repository", $("repo").value));
 
 async function heartbeat() {
     try {
         await api(`/api/visibility?visible=${visible()}`, "POST");
         if (!visible() || busy) return;
+        const version = stateVersion;
         const next = await api("/api/state");
+        if (!visible() || busy || version !== stateVersion) return;
         if (JSON.stringify(next) !== JSON.stringify(state)) {
             state = next;
             render();
