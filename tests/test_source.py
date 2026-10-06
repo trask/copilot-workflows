@@ -17,9 +17,11 @@ from loop.cli import attach_source, get_state
 from loop.coordinator import (cancel, dispatch, reconcile)
 from loop.freeze import freeze
 from loop.policy import (Rejected, checkpoint_name, digest, eligible, parse_target, unchanged)
-from loop.source import (SourceAPI, bind_manifest, download_source, gated_request, import_source,
-                         package_source, public_fetch, source_api, source_metadata, target_api)
-from loop.verify import (git)
+from loop.publication import import_candidate
+from loop.source import (MAX_OBJECT, MAX_SOURCE, SourceAPI, bind_manifest, download_source,
+                         gated_request, import_source, package_source, public_fetch,
+                         snapshot_identity, source_api, source_metadata, target_api)
+from loop.verify import git, object_bounds
 from tests.test_loop import (FakeAPI, MemoryState, REVISION, SHA, baseline, pr, request, review)
 
 
@@ -166,6 +168,9 @@ class SourceTests(unittest.TestCase):
             self.assertNotIn("SOURCE_READ_TOKEN", env)
             self.assertNotIn("GIT_CONFIG_VALUE_0", env)
             self.assertEqual("0", env["GIT_CONFIG_COUNT"])
+            self.assertIn("fetch.unpackLimit=1", argv)
+            self.assertIn("pack.threads=1", argv)
+            self.assertIn("--no-auto-maintenance", argv)
             self.assertEqual(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                              child.call_args.kwargs["creationflags"])
         for key in ("source_private", "target_private"):
@@ -173,6 +178,12 @@ class SourceTests(unittest.TestCase):
             with patch("loop.source.subprocess.run") as child, self.assertRaises(Rejected):
                 public_fetch(Path.cwd(), req)
             child.assert_not_called()
+
+    def test_public_fetch_failure_reports_git_error_and_exact_source(self):
+        with patch("loop.source.subprocess.run", return_value=subprocess.CompletedProcess(
+                [], 128, stderr=b"fatal: unable to create pack\n")), self.assertRaisesRegex(
+                Rejected, FIXTURE + "@" + SHA + r" .*exit 128.*fatal: unable to create pack"):
+            public_fetch(Path.cwd(), fixture_request())
 
     def test_public_review_freeze_uses_exact_repo_and_thread_variables(self):
         class Reviews:
@@ -237,6 +248,73 @@ class SourceTests(unittest.TestCase):
             with self.assertRaises(Rejected):
                 import_source(restored, bad_bundle, manifest, req)
 
+    def test_large_two_tree_snapshot_verifies_and_imports_a_fix(self):
+        from tests.test_loop import GOOD_PATCH
+        from tests.test_self_review import SelfRead, self_request
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory, "original")
+            source.mkdir()
+            git(["init", "--bare", "--quiet"], source)
+            stream = bytearray(b"blob\nmark :1\ndata 4\nold\n\n")
+            for index in range(11000):
+                content = str(index).encode().ljust(3072, b"x")
+                stream.extend(f"blob\nmark :{index + 2}\ndata {len(content)}\n".encode())
+                stream.extend(content + b"\n")
+            stream.extend(b"commit refs/heads/review-base\nmark :11002\n"
+                          b"committer T <t@invalid> 0 +0000\ndata 5\nbase\n"
+                          b"M 100644 :1 Foo.java\n")
+            for index in range(11000):
+                stream.extend(f"M 100644 :{index + 2} file-{index}.txt\n".encode())
+            stream.extend(b"\ncommit refs/heads/snapshot\ncommitter T <t@invalid> 0 +0000\n"
+                          b"data 5\nhead\nfrom :11002\n\ndone\n")
+            git(["fast-import", "--quiet"], source, bytes(stream))
+            del stream
+            req = self_request()
+            req["frozen_sha"] = git(["rev-parse", "snapshot"], source).decode().strip()
+            req["base_sha"] = req["merge_base_sha"] = git(
+                ["rev-parse", "review-base"], source).decode().strip()
+            sizes = object_bounds(source)
+            self.assertGreater(len(sizes), 10000)
+            self.assertGreater(sum(sizes.values()), MAX_SOURCE // 2)
+
+            def fetch(destination):
+                git(["-c", "protocol.file.allow=always", "fetch", "--quiet",
+                     "--no-auto-maintenance", str(source),
+                     "refs/heads/review-base:refs/heads/review-base",
+                     "refs/heads/snapshot:refs/heads/snapshot"], destination)
+                Path(destination, "FETCH_HEAD").write_text(req["frozen_sha"] + "\n", encoding="ascii")
+
+            with patch.dict(os.environ, {"GITHUB_RUN_ID": "99", "GITHUB_RUN_ATTEMPT": "1"}), \
+                    patch("loop.source.time.time", return_value=100):
+                manifest = package_source(req, 6, SelfRead(req), Path(directory, "source"), fetch)
+            self.assertEqual(2, manifest["history_count"])
+
+            def snapshot(destination):
+                import_source(destination, Path(directory, "source", "source.bundle"), manifest, req)
+
+            package = Path(directory, "candidate")
+            candidate = reconstruct({"candidate.patch": GOOD_PATCH}, req, snapshot, package)
+            imported = Path(directory, "imported")
+            imported.mkdir()
+            import_candidate(imported, package / "candidate.bundle", req, candidate, snapshot)
+            self.assertEqual(b"new\n", git(["show", candidate["commit"] + ":Foo.java"], imported))
+            self.assertGreater(len(object_bounds(imported)), 10000)
+
+    def test_expanded_tree_limit_counts_repeated_blob_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            git(["init", "--bare", "--quiet"], directory)
+            blob = git(["hash-object", "-w", "--stdin"], directory,
+                       b"x" * MAX_OBJECT).decode().strip()
+            tree = git(["mktree"], directory, "".join(
+                f"100644 blob {blob}\tfile-{index}.txt\n"
+                for index in range(MAX_SOURCE // MAX_OBJECT + 1)).encode()).decode().strip()
+            sha = git(["hash-object", "-t", "commit", "-w", "--stdin"], directory,
+                      (f"tree {tree}\nauthor T <t@invalid> 0 +0000\n"
+                       "committer T <t@invalid> 0 +0000\n\nsnapshot\n").encode()).decode().strip()
+            git(["update-ref", "refs/heads/snapshot", sha], directory)
+            with self.assertRaisesRegex(Rejected, "tree exceeds expanded limit"):
+                snapshot_identity(directory, sha)
+
     def test_snapshot_reconstruction_uses_only_credential_free_git_without_checkout_or_tests(self):
         with tempfile.TemporaryDirectory() as directory:
             req, source_manifest, source_package = self.package(directory)
@@ -252,6 +330,7 @@ class SourceTests(unittest.TestCase):
             self.assertGreater(child.call_count, 0)
             for call in child.call_args_list:
                 self.assertEqual("git", call.args[0][0])
+                self.assertIn("pack.threads=1", call.args[0])
                 self.assertNotIn("checkout", call.args[0])
                 self.assertFalse(any("https://github.com/" in arg for arg in call.args[0]))
                 self.assertFalse(any("TOKEN" in key for key in call.kwargs["env"]))

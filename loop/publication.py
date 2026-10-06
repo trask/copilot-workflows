@@ -15,23 +15,17 @@ from loop.api import API
 from loop.policy import (BOT_IDENTITY_PATH, CENTRAL, PROFILE, SHA, digest,
                          candidate_outcome, check_target, commit_author, loop_kind, pipeline_limit, require, source_effect, staged_source,
                          timestamp, unchanged)
-from loop.verify import (artifact_metadata, git as object_git, parse_json, safe_path, verify)
+from loop.verify import (artifact_metadata, git as object_git, object_bounds, parse_json, safe_path, verify)
 from loop.candidates import current_request
+from loop.source import MAX_SOURCE
 
 SECRET = "TEST_PUBLISH_TOKEN"
-MAX_PACKAGE = 20 * 1024 * 1024
+MAX_PACKAGE = MAX_SOURCE + 20 * 1024 * 1024
 
 
 def git(args, directory):
     from loop.source import source_limits
     return object_git(args, directory, limits=source_limits)
-
-
-def object_bounds(directory):
-    objects = git(["cat-file", "--batch-all-objects", "--batch-check=%(objectsize)"], directory)
-    sizes = [int(line) for line in objects.splitlines()]
-    require(len(sizes) <= 10000 and all(n <= 4 * 1024 * 1024 for n in sizes)
-            and sum(sizes) <= 16 * 1024 * 1024, "Target Git object expansion exceeds limits")
 
 
 class PublisherAPI(API):
@@ -284,7 +278,7 @@ def evidence(api, state, destination):
             source_bundle.write_bytes(package["candidate-package/source.bundle"])
             import_source(directory, source_bundle, state["source"]["manifest"], request)
         else:
-            git(["fetch", "--quiet", "--depth=1", "--no-tags",
+            git(["fetch", "--quiet", "--no-auto-maintenance", "--depth=1", "--no-tags",
                  "https://github.com/" + request["head_repo"] + ".git", request["frozen_sha"]], directory)
         object_bounds(directory)
     reconstructed = verify(payload, request, run, artifact, fetch_source)
@@ -320,7 +314,7 @@ def import_candidate(directory, bundle, request, candidate, fetch_source=None):
         fetch_source(directory)
     else:
         require(not staged_source(request), "Review import requires a bound source bundle")
-        git(["fetch", "--quiet", "--depth=1", "--no-tags",
+        git(["fetch", "--quiet", "--no-auto-maintenance", "--depth=1", "--no-tags",
              "https://github.com/" + request["head_repo"] + ".git", request["frozen_sha"]], directory)
     chain(candidate, request)
     if not candidate["changed"]:
@@ -335,7 +329,8 @@ def import_candidate(directory, bundle, request, candidate, fetch_source=None):
         heads = git(["bundle", "list-heads", str(Path(bundle).resolve())], directory).decode().splitlines()
         require(heads == [candidate["commit"] + " refs/heads/candidate"], "Unexpected merge bundle refs")
         git(["bundle", "verify", str(Path(bundle).resolve())], directory)
-        git(["-c", "protocol.file.allow=always", "fetch", "--quiet", str(Path(bundle).resolve()),
+        git(["-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-auto-maintenance",
+             str(Path(bundle).resolve()),
              "refs/heads/candidate:refs/heads/candidate"], directory)
         require(git(["rev-list", "--parents", "-1", candidate["commit"]], directory).decode().strip()
                 == candidate["commit"] + " " + request["frozen_sha"] + " " + request["base_sha"]
@@ -353,7 +348,8 @@ def import_candidate(directory, bundle, request, candidate, fetch_source=None):
         git(["show", "-s", "--format=%s", request["frozen_sha"]], directory).decode().strip(),
         candidate["commit"] + " refs/heads/candidate"], "Unexpected bundle refs/prerequisites")
     git(["bundle", "verify", str(Path(bundle).resolve())], directory)
-    git(["-c", "protocol.file.allow=always", "fetch", "--quiet", str(Path(bundle).resolve()),
+    git(["-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-auto-maintenance",
+         str(Path(bundle).resolve()),
          "refs/heads/candidate:refs/heads/candidate"], directory)
     object_bounds(directory)
     require(git(["rev-list", "--reverse", candidate["commit"], "^" + request["frozen_sha"]],

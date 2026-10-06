@@ -89,13 +89,15 @@ def git(args, cwd, input_data=None, limits=None, allowed=(0,)):
     proc = subprocess.run(
         ["git", "-c", "core.hooksPath=" + os.devnull, "-c", "credential.helper=",
          "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
-         "-c", "core.attributesFile=" + os.devnull] + args,
+         "-c", "core.attributesFile=" + os.devnull, "-c", "pack.threads=1"] + args,
         cwd=cwd, env=env, input=input_data, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=180, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         **({"preexec_fn": limits} if limits is not None and os.name == "posix" else {}),
     )
     require(len(proc.stdout) <= 8 * 1024 * 1024, "Git output exceeds limit")
-    require(proc.returncode in allowed, "Git validation failed: " + " ".join(args[:2]))
+    if proc.returncode not in allowed:
+        raise Rejected("Git validation failed: " + " ".join(args[:2]) + f" (exit {proc.returncode}): "
+                       + proc.stderr.decode("utf-8", errors="replace")[:2000])
     return proc.stdout
 
 
@@ -107,6 +109,17 @@ def safe_source_path(path):
     require(not any(p.casefold() == ".git" for p in components),
             "Git control path")
     return PurePosixPath(path).parts
+
+
+def object_bounds(directory):
+    from loop.source import MAX_OBJECT, MAX_OBJECTS, MAX_SOURCE
+    objects = git(["cat-file", "--batch-all-objects",
+                   "--batch-check=%(objectname) %(objectsize)"], directory).splitlines()
+    require(len(objects) <= MAX_OBJECTS, "Git object count exceeds limit")
+    sizes = {oid.decode(): int(size) for oid, size in (line.split() for line in objects)}
+    require(max(sizes.values(), default=0) <= MAX_OBJECT and sum(sizes.values()) <= MAX_SOURCE,
+            "Git object expansion exceeds limits")
+    return sizes
 
 
 def safe_path(path, request=None):
@@ -184,7 +197,7 @@ def reconstruct(files, request, fetch_source=None, package_dir=None):
             require(request["schema"] == 2 and REPO.fullmatch(request["head_repo"])
                     and not staged_source(request),
                     "Review source requires a bound trusted snapshot, never public fallback")
-            git(["fetch", "--quiet", "--depth=1", "--no-tags",
+            git(["fetch", "--quiet", "--no-auto-maintenance", "--depth=1", "--no-tags",
                  "https://github.com/" + request["head_repo"] + ".git", request["frozen_sha"]], directory)
         else:
             fetch_source(directory)
@@ -247,10 +260,7 @@ def reconstruct(files, request, fetch_source=None, package_dir=None):
                           "--no-textconv", "--no-renames", "--binary",
                           request["frozen_sha"]], directory)
         require(len(cumulative) <= MAX_PATCH, "Cumulative patch exceeds byte limit")
-        sizes = [int(n) for n in git(["cat-file", "--batch-all-objects",
-                                      "--batch-check=%(objectsize)"], directory).splitlines()]
-        require(len(sizes) <= 10000 and max(sizes, default=0) <= 4 * 1024 * 1024
-                and sum(sizes) <= 16 * 1024 * 1024, "Git object expansion exceeds limits")
+        object_bounds(directory)
         commit = parent
         git(["update-ref", "refs/heads/candidate", commit], directory)
         git(["fsck", "--strict", "--no-reflogs"], directory)

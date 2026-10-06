@@ -17,9 +17,11 @@ from loop.api import API
 from loop.policy import (AUTHOR_ID, BOT_IDENTITY_PATH, CENTRAL, DEFAULTS, REPO, Rejected, canonical,
                          check_target, diff_scope, digest, exact, iso, loop_kind, public_request,
                          require, staged_source)
-from loop.verify import git as object_git, parse_json, tree_entries
+from loop.verify import git as object_git, object_bounds, parse_json, tree_entries
 
-MAX_SOURCE = 16 * 1024 * 1024
+MAX_SOURCE = 64 * 1024 * 1024
+MAX_OBJECTS = 100000
+MAX_OBJECT = 4 * 1024 * 1024
 
 
 def git(args, directory):
@@ -89,15 +91,17 @@ def public_fetch(directory, request, repo=None, sha=None, depth=1):
     result = subprocess.run(
         ["git", "-c", "credential.helper=", "-c", "core.hooksPath=" + os.devnull,
          "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
-         "-c", "http.followRedirects=false", "-c", "fetch.unpackLimit=0",
-         "fetch", "--quiet", "--depth=" + str(depth), "--no-tags",
+         "-c", "http.followRedirects=false", "-c", "fetch.unpackLimit=1", "-c", "pack.threads=1",
+         "fetch", "--quiet", "--no-auto-maintenance", "--depth=" + str(depth), "--no-tags",
          "https://github.com/" + repo + ".git", sha],
-        cwd=directory, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        cwd=directory, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         timeout=180, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         **({"preexec_fn": source_limits} if os.name == "posix" else {}),
     )
-    require(result.returncode == 0,
-            "Frozen public Git retrieval failed; verify repository visibility and network")
+    if result.returncode:
+        raise Rejected(f"Frozen public Git retrieval failed for {repo}@{sha} "
+                       f"(exit {result.returncode}): "
+                       + result.stderr.decode("utf-8", errors="replace")[:2000])
 
 
 def source_limits():
@@ -127,15 +131,9 @@ def snapshot_identity(directory, sha, request=None):
     count = int(git(["rev-list", "--count", *refs], directory))
     require(0 < count <= 256 if conflict else count == len(commits),
             "Source snapshot history is incomplete or exceeds limits")
-    objects = git(["cat-file", "--batch-all-objects",
-                   "--batch-check=%(objectname) %(objecttype) %(objectsize)"], directory).decode().splitlines()
-    require(len(objects) <= 5000, "Source Git object count exceeds limit")
-    object_sizes = {item.split()[0]: int(item.split()[2]) for item in objects}
-    sizes = list(object_sizes.values())
-    require(all(size <= 4 * 1024 * 1024 for size in sizes) and sum(sizes) <= MAX_SOURCE,
-            "Source Git object sizes exceed limit")
-    total = 0
+    object_sizes = object_bounds(directory)
     for ref in refs:
+        total = 0
         entries = tree_entries(directory, ref)
         require(len(entries) <= 100000, "Source exceeds file limit")
         for _, kind, oid in entries.values():
@@ -143,7 +141,7 @@ def snapshot_identity(directory, sha, request=None):
                 continue
             require(oid in object_sizes, "Source snapshot is missing a blob")
             total += object_sizes[oid]
-    require(total <= MAX_SOURCE, "Source snapshot exceeds expanded limit")
+        require(total <= MAX_SOURCE, "Source snapshot tree exceeds expanded limit")
     git(["fsck", "--strict", "--no-reflogs"], directory)
     return git(["rev-parse", "snapshot^{tree}"], directory).decode().strip(), count
 
@@ -333,7 +331,8 @@ def import_source(directory, bundle, manifest, request):
         refs.append("refs/heads/review-base:refs/heads/review-base")
     if loop_kind(request) == "pr_conflict_resolver":
         refs.append("refs/heads/incoming:refs/heads/incoming")
-    git(["-c", "protocol.file.allow=always", "fetch", "--quiet", str(Path(bundle).resolve()), *refs], directory)
+    git(["-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-auto-maintenance",
+         str(Path(bundle).resolve()), *refs], directory)
     tree, count = snapshot_identity(directory, request["frozen_sha"], request)
     require((tree, count) == (manifest["tree"], manifest["history_count"]),
             "Imported source tree/history mismatch")
