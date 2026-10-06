@@ -140,27 +140,15 @@ function render() {
     if (!failures.children.length) failures.append(element("p", state.loadedAt ? "No failed coordinator dispatches found." : "Coordinator failures have not been loaded yet.", "empty"));
 }
 
-function confirmAction(pr, kind, cancel = false) {
-    const dialog = $("confirm");
-    if (dialog.open) return Promise.resolve(false);
-    $("confirm-title").textContent = cancel ? "Cancel current task" : `Run ${KIND_LABELS[kind]}`;
-    $("confirm-target").textContent = `${pr.target} ${pr.title}`;
-    $("confirm-effects").textContent = cancel
-        ? `Cancel request ${pr.phase.requestId}, generation ${pr.phase.generation}. This does not undo published changes or guarantee termination of an already authorized effect.`
-        : TASK_EFFECTS[kind];
-    $("confirm-submit").textContent = cancel ? "Cancel task" : "Run task";
-    dialog.returnValue = "";
-    return new Promise((resolve) => {
-        dialog.addEventListener("close", () => resolve(dialog.returnValue === "yes"), { once: true });
-        dialog.showModal();
-    });
-}
-
 async function taskAction(pr, kind, cancel = false) {
-    if (!await confirmAction(pr, kind, cancel)) return;
+    const displayed = state.prs.find((item) => item.target === pr.target);
+    const dispatch = displayed?.dispatch ?? pr.dispatch;
+    if (dispatch) {
+        error(dispatch.message);
+        return;
+    }
     pr.dispatch = { operation: cancel ? "cancel" : "launch", kind, status: "pending",
         message: "Dispatching. Do not submit again." };
-    const displayed = state.prs.find((item) => item.target === pr.target);
     if (displayed) displayed.dispatch = pr.dispatch;
     render();
     let failureMessage = null;
@@ -236,7 +224,7 @@ function prCard(pr) {
         const button = element("button", null, "task-button");
         button.type = "button";
         button.disabled = presentation.disabled;
-        button.title = !pr.tasks.includes(kind) && !presentation.busy
+        button.title = !presentation.disabled ? TASK_EFFECTS[kind] : !pr.tasks.includes(kind) && !presentation.busy
             ? `${presentation.label}. ${presentation.detail}` : presentation.detail;
         button.setAttribute("data-tone", presentation.tone);
         button.setAttribute("aria-label", `${label}: ${presentation.label}`);
@@ -256,7 +244,8 @@ function prCard(pr) {
     card.append(tasks);
     const controls = element("div", null, "controls");
     const cancel = element("button", "Cancel current task");
-    cancel.disabled = !pr.canCancel;
+    cancel.disabled = !pr.canCancel || Boolean(pr.dispatch);
+    cancel.title = "Cancel the current task. This does not undo published changes or guarantee termination of an already authorized effect.";
     const message = element("p", pr.dispatch?.message ?? "", "notice");
     message.hidden = !pr.dispatch;
     cancel.addEventListener("click", () => taskAction(pr, pr.phase?.kind, true));

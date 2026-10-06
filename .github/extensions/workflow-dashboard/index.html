@@ -41,6 +41,7 @@
         <span id="loading-message"></span>
       </p>
       <p class="muted">Reviewer routing comes from the OpenTelemetry PR dashboard. Unknown or stale classifications stay in All PRs.</p>
+      <p class="muted">Run and Cancel dispatch immediately. These tasks can publish changes using Actions secrets.</p>
       <div id="warnings" class="notice" hidden></div>
       <div id="prs" aria-busy="false"></div>
     </section>
@@ -50,15 +51,6 @@
       <div id="actions"></div>
     </section>
   </main>
-  <dialog id="confirm">
-    <form method="dialog">
-      <h2 id="confirm-title"></h2>
-      <p id="confirm-target"></p>
-      <p id="confirm-effects"></p>
-      <p class="muted">Actions secrets authorize publication. Your local gh account only dispatches the workflow.</p>
-      <div class="controls"><button value="no">Back</button><button id="confirm-submit" value="yes">Confirm</button></div>
-    </form>
-  </dialog>
   <script type="module" src="/app.mjs"></script>
 </body>
 </html>

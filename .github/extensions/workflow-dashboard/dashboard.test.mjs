@@ -970,9 +970,9 @@ async function rendererFixture(fetch) {
         get firstChild() { return this.children[0]; }
         addEventListener(name, action) { this.events[name] = action; }
         setAttribute(name, value) { this[name] = value; }
-        showModal() { this.open = true; }
     }
     const html = await readFile(new URL("index.html", import.meta.url), "utf8");
+    assert.doesNotMatch(html, /<dialog\b|method="dialog"/);
     const nodes = new Map(Array.from(html.matchAll(/\bid="([^"]+)"/g), (match) => [match[1], new Node()]));
     const document = {
         hidden: false, getElementById: (id) => nodes.get(id), createElement: (tag) => new Node(tag),
@@ -1002,7 +1002,7 @@ function rendererState(repository = "example/project") {
     };
 }
 
-test("renderer preserves safe history and shows per-task buttons with confirmation and activity", async () => {
+test("renderer preserves safe history and shows per-task buttons with direct dispatch and activity", async () => {
     const s = fixture({ stage: "blocked", reason: "target_ci_failed",
         publications: [{ request_id: requestId("a"), sha: sha("b"), effect: "push" }],
     }, { findings: [{ key: "one", body: '<img src=x onerror="throw Error()">', path: "src/example.js" }] });
@@ -1074,28 +1074,83 @@ test("renderer preserves safe history and shows per-task buttons with confirmati
     Object.assign(state.prs[0], { tasks: ["pr_description"], actionBlock: null, phase: null });
     renderer.render();
     const description = buttons().find((button) => button["aria-label"] === "PR Description: Run");
-    const dialog = nodes.get("confirm");
-    const decline = description.events.click();
-    assert.equal(dialog.open, true);
-    assert.match(nodes.get("confirm-effects").textContent, /title and description/);
-    assert.equal(launches.length, 0);
-    dialog.returnValue = "no";
-    dialog.open = false;
-    dialog.events.close();
-    await decline;
-    assert.equal(launches.length, 0);
-
+    assert.equal(description.title, TASK_EFFECTS.pr_description);
     const accept = description.events.click();
-    dialog.returnValue = "yes";
-    dialog.open = false;
-    dialog.events.close();
-    await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(launches, [{ target, kind: "pr_description", confirmed: true }]);
     assert.ok(buttons().every((button) => button.disabled));
     assert.ok(buttons().some((button) => button["aria-label"] === "PR Description: Dispatching" && button["aria-busy"] === "true"));
     releaseLaunch();
     await accept;
     assert.ok(buttons().some((button) => button["aria-label"] === "PR Description: Starting"));
+});
+
+test("every task dispatches directly on click and locks duplicate and competing submissions", async () => {
+    for (const [kind, label] of Object.entries(KIND_LABELS)) {
+        const state = rendererState();
+        const launches = [];
+        let release;
+        const { nodes } = await rendererFixture(async (path, options) => {
+            if (path === "/api/launch") {
+                launches.push(JSON.parse(options.body));
+                return new Promise((resolve) => release = () => {
+                    state.prs[0].dispatch = { operation: "launch", kind, status: "accepted", message: "Dispatch accepted" };
+                    resolve({ ok: true, json: async () => state.prs[0].dispatch });
+                });
+            }
+            return { ok: true, json: async () => state };
+        });
+        const buttons = () => nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid").children;
+        const original = [...buttons()];
+        const button = original.find((node) => node["aria-label"] === `${label}: Run`);
+        assert.equal(button.title, TASK_EFFECTS[kind]);
+        const pending = button.events.click();
+        assert.deepEqual(launches, [{ target, kind, confirmed: true }]);
+        assert.ok(buttons().every((node) => node.disabled));
+        for (const stale of original) await stale.events.click();
+        assert.equal(launches.length, 1);
+        assert.match(nodes.get("error").textContent, /Do not submit again/);
+        release();
+        await pending;
+        assert.ok(buttons().every((node) => node.disabled));
+        assert.ok(buttons().some((node) => node["aria-label"] === `${label}: Starting`));
+    }
+});
+
+test("Cancel dispatches the exact displayed identity directly and stays locked pending confirmation", async () => {
+    const state = rendererState();
+    const phase = phaseSummary(record(fixture()));
+    Object.assign(state.prs[0], { phase, canCancel: true, actionBlock: "A task is already active" });
+    const cancellations = [];
+    let release;
+    const { renderer, nodes } = await rendererFixture(async (path, options) => {
+        if (path === "/api/cancel") {
+            cancellations.push(JSON.parse(options.body));
+            return new Promise((resolve) => release = () => {
+                state.prs[0].dispatch = { operation: "cancel", kind: phase.kind, status: "accepted", message: "Cancellation accepted" };
+                resolve({ ok: true, json: async () => state.prs[0].dispatch });
+            });
+        }
+        return { ok: true, json: async () => state };
+    });
+    const cancelButton = () => nodes.get("prs").firstChild.children.find((node) =>
+        node.className === "controls").children.find((node) => node.textContent === "Cancel current task");
+    const button = cancelButton();
+    assert.equal(button.disabled, false);
+    assert.match(button.title, /does not undo published changes/);
+    const pending = button.events.click();
+    assert.deepEqual(cancellations, [{ target, requestId: phase.requestId, generation: phase.generation, confirmed: true }]);
+    assert.equal(cancelButton().disabled, true);
+    await button.events.click();
+    assert.equal(cancellations.length, 1);
+    release();
+    await pending;
+    assert.equal(cancelButton().disabled, true);
+    assert.ok(nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid")
+        .children.some((node) => node["aria-label"] === "Copilot review: Cancelling"));
+    Object.assign(state.prs[0], { phase: { ...phase, stage: "cancelled" },
+        canCancel: false, actionBlock: null, dispatch: null });
+    renderer.render();
+    assert.equal(cancelButton(), undefined);
 });
 
 test("repository selection shows loading before its response and hides old cards until completion", async () => {

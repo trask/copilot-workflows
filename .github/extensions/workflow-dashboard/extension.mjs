@@ -8,7 +8,7 @@ const dashboard = new PrDashboard();
 const servers = new Map();
 const emptyInput = { type: "object", properties: {}, additionalProperties: false };
 const target = { type: "string", pattern: `^(?:${REPOSITORIES.join("|")})#[1-9][0-9]{0,7}$` };
-const confirmed = { type: "boolean", const: true, description: "The user explicitly confirmed this target, task and its effects." };
+const confirmed = { type: "boolean", const: true, description: "The user explicitly requested this target and action. A direct button click is sufficient." };
 
 function action(name, description, properties, required, handler) {
     return {
@@ -47,10 +47,10 @@ await joinSession({
                     if (state.prError) throw new Error(state.prError);
                     return state;
                 }),
-            action("launch", "Dispatch the selected PR task after explicit user confirmation of its target and effects.",
+            action("launch", "Dispatch the selected PR task on explicit user request, without a separate confirmation dialog.",
                 { target, kind: { type: "string", enum: Object.keys(KIND_LABELS) }, confirmed },
                 ["target", "kind", "confirmed"], (input) => dashboard.launch(input)),
-            action("cancel", "Cancel an exact observed nonterminal request after explicit user confirmation. Does not undo publication.",
+            action("cancel", "Cancel an exact observed nonterminal request on explicit user request, without a separate confirmation dialog. Does not undo publication.",
                 { target, requestId: { type: "string", pattern: "^[0-9a-f]{32}$" },
                     generation: { type: "integer", minimum: 1 }, confirmed },
                 ["target", "requestId", "generation", "confirmed"], (input) => dashboard.cancel(input)),
