@@ -56,6 +56,7 @@ export function checkedRecord(record) {
         ![s.publications, s.artifacts, s.effects, r.findings, s.report?.candidate?.changed_paths,
             s.report?.candidate?.commits,
             s.report?.dispositions?.findings, s.report?.dispositions?.consistency,
+            s.report?.dispositions?.comments, s.task_completion?.comments,
             s.ci_reruns, s.ci_warnings, s.ci?.checks, s.fresh_review?.inline_ids]
             .every((items) => items === undefined || Array.isArray(items) && items.every((item) => item !== null))) {
         throw new Error(`Checkpoint ${record.name} has an unsupported or malformed identity.`);
@@ -70,6 +71,9 @@ export function checkedRecord(record) {
         !(s.artifacts ?? []).every((item) => item && typeof item === "object") ||
         !(s.ci?.checks ?? []).every((item) => item && typeof item === "object") ||
         !(s.report?.dispositions?.findings ?? []).every((item) => item && typeof item === "object") ||
+        ![s.report?.dispositions?.comments, s.task_completion?.comments].every((items) =>
+            (items ?? []).every((item) => item && typeof item.path === "string" &&
+                typeof item.body === "string" && Number.isSafeInteger(item.line) && item.line > 0)) ||
         !(s.report?.candidate?.changed_paths ?? []).every((item) => typeof item === "string")) {
         throw new Error(`Checkpoint ${record.name} has malformed iteration evidence.`);
     }
@@ -143,6 +147,11 @@ export function phaseSummary(record) {
                 TERMINAL.has(s.stage) ? "completed" :
                     ["waiting_ci", "waiting_review", "review_request_intent", "task_effect_intent"].includes(s.stage) ? "waiting" : "active",
         kind: r.loop_kind ?? "copilot_review", mode: r.mode ?? "unknown",
+        outcome: s.task_completion?.outcome ?? null,
+        reviewCommentCount: (s.task_completion?.comments ?? s.report?.dispositions?.comments)?.length ?? null,
+        pendingReviewUrl: s.task_completion?.outcome === "pending_review" &&
+            Number.isSafeInteger(s.task_completion.review_id) && s.task_completion.review_id > 0
+            ? `https://github.com/${r.repo}/pull/${r.pr}#pullrequestreview-${s.task_completion.review_id}` : null,
         reason: s.reason ?? null, error: s.error ?? null,
         iteration: s.iteration, maximum: ["pr_conflict_resolver", "pr_description", "pr_simplify",
             "pr_review", "pr_consistency"].includes(r.loop_kind) ? 1 : r.budgets?.max_iterations ?? null,
@@ -177,6 +186,7 @@ function iteration(record, publication) {
         inputSha: r.frozen_sha, inputUrl: commitLink(headRepo, r.frozen_sha),
         workerUrl: runLink(s.run), workerConclusion: s.run?.conclusion ?? null,
         verifierUrl: runLink(s.verification_run ?? s.validation_run), coordinatorUrl: runLink(s.coordinator_run),
+        kind: r.loop_kind ?? "copilot_review",
         stage: s.stage, reason: s.reason ?? null, error: s.error ?? s.report?.error ?? null,
         historical: historical(s), outcome: s.report?.dispositions?.outcome ?? null,
         verification: historical(s) ? "historical evidence" : s.report?.verification ?? "not recorded",
@@ -195,6 +205,9 @@ function iteration(record, publication) {
             })) : [],
         } : null,
         findings: findings(s, publication),
+        reviewComments: (s.report?.dispositions?.comments ?? s.task_completion?.comments ?? []).map((item) => ({
+            path: item.path, line: item.line, body: item.body,
+        })),
         review: review ? {
             decision: review.decision,
             url: Number.isSafeInteger(review.review_id) && review.review_id > 0

@@ -1,5 +1,5 @@
 import { KIND_LABELS } from "./kinds.mjs";
-import { filterPulls, taskPresentation, TASK_EFFECTS } from "./prs.mjs";
+import { filterPulls, taskPresentation, completionPresentation, TASK_EFFECTS } from "./prs.mjs";
 
 const $ = (id) => document.getElementById(id);
 let state = null;
@@ -126,7 +126,7 @@ function render() {
         row.append(heading, element("p", `${run.name} · ${date(run.created)}${run.targets.length ? ` · ${run.targets.join(", ")}` : " · shared or unmatched run"}`, "muted"));
         actions.append(row);
     }
-    if (!actions.children.length) actions.append(element("p", state.loadedAt ? "No repository Actions runs are currently in flight." : "Actions have not been loaded yet.", "empty"));
+    if (!actions.children.length) actions.append(element("p", state.loadedAt ? "No background jobs are running." : "Background jobs have not been loaded yet.", "empty"));
     const failures = $("failures");
     failures.replaceChildren();
     $("failures-count").textContent = state.failures.length;
@@ -244,32 +244,35 @@ function prCard(pr) {
     card.append(tasks);
     if (pr.actionBlock && !pr.dispatch) card.append(element("p", pr.actionBlock, "muted"));
     card.append(message);
-    if (pr.phase) card.append(phaseCard(pr.phase));
+    if (pr.phase) {
+        const completion = completionPresentation(pr.phase);
+        if (completion) {
+            const result = element("div", null, "run-result");
+            if (pr.phase.sha && pr.phase.sha !== pr.sha) result.append(element("p", "Result from a previous PR commit.", "muted"));
+            result.append(element("p", completion.detail));
+            if (pr.phase.pendingReviewUrl) result.append(link("Open pending review", pr.phase.pendingReviewUrl));
+            card.append(result);
+        }
+        card.append(phaseCard(pr.phase));
+    }
     return card;
 }
 
 function phaseCard(phase) {
     const card = element("details", null, "card");
-    const summary = element("summary", "Saved run details");
+    const summary = element("summary", "Run details");
     const detail = element("div", null, "detail");
-    const heading = element("div", null, "row");
-    heading.append(element("span", phase.target, "title"),
-        element("span", words(phase.stage), `badge ${phase.category}`));
     const meta = element("div", null, "meta");
     for (const value of [
-        `${KIND_LABELS[phase.kind] ?? words(phase.kind)} · ${phase.mode}`, `${phase.iteration} / ${phase.maximum ?? "?"} workers`,
+        KIND_LABELS[phase.kind] ?? words(phase.kind),
         `Head ${short(phase.sha)}`, `Started ${date(phase.started)}`,
-        `Deadline ${date(phase.deadline)}${phase.deadline < Date.now() && ["active", "waiting"].includes(phase.category) ? " · overdue" : ""}`,
+        ...(["active", "waiting"].includes(phase.category) ? [
+            `Deadline ${date(phase.deadline)}${phase.deadline < Date.now() ? " · overdue" : ""}`,
+        ] : []),
     ]) meta.append(element("span", value));
-    detail.append(heading, meta);
-    if (phase.reason) detail.append(element("p", `${words(phase.reason)} (${phase.reason})`, "reason"));
+    detail.append(meta);
     if (phase.historical) detail.append(element("p", "Historical protocol evidence. Not an active generic phase.", "reason"));
     if (phase.unknownStage) detail.append(element("p", "Unknown controller stage. Inspect its recorded evidence.", "reason"));
-    const links = element("div", null, "links");
-    links.append(link("Pull request", phase.url), link(`Head ${short(phase.sha)}`, phase.commitUrl));
-    if (phase.runUrl) links.append(link("Current worker", phase.runUrl));
-    if (phase.coordinatorUrl) links.append(link("Coordinator", phase.coordinatorUrl));
-    detail.append(links);
     if (phase.error) detail.append(element("p", phase.error, "error"));
     const timeline = element("div");
     detail.append(timeline);
@@ -287,7 +290,8 @@ function phaseCard(phase) {
             timeline.replaceChildren();
             for (const message of history.warnings) timeline.append(element("p", message, "notice"));
             for (const item of history.phases) {
-                timeline.append(element("h3", `${item.current ? "Current" : "Previous"} phase · ${words(item.stage)} · ${date(item.started)}`, "phase-heading"));
+                if (history.phases.length > 1) timeline.append(element("h3",
+                    `${item.current ? "Latest" : "Previous"} run · ${KIND_LABELS[item.kind] ?? words(item.kind)} · ${date(item.started)}`, "phase-heading"));
                 if (item.gaps.length) timeline.append(element("p", `No saved worker evidence for consumed iteration(s) ${item.gaps.join(", ")}.`, "notice"));
                 if (item.missingPublications.length) timeline.append(element("p", "Some published requests have no retained iteration snapshot. See recorded checkpoint evidence.", "notice"));
                 for (const publication of item.orphanPublications) {
@@ -298,7 +302,6 @@ function phaseCard(phase) {
                     saved.append(element("span", date(publication.confirmed), "muted"));
                     timeline.append(saved);
                 }
-                if (item.reason) timeline.append(element("p", item.reason, "muted"));
                 const list = element("div", null, "timeline");
                 for (const iteration of item.iterations) list.append(iterationCard(iteration));
                 for (const transition of item.transitions) list.append(element("p", `${words(transition.stage)} · ${transition.reason ?? "No worker dispatched"} · ${date(transition.frozen)}`, "muted"));
@@ -324,14 +327,14 @@ function phaseCard(phase) {
 
 function iterationCard(item) {
     const node = element("article", null, "iteration");
-    node.append(element("h3", `Iteration ${item.number} · ${words(item.outcome ?? item.stage)}`));
-    node.append(element("p", `Frozen ${date(item.frozen)} · Dispatched ${date(item.dispatched)} · Worker ${item.workerConclusion ?? "not complete or not recorded"}`, "meta"));
+    node.append(element("h3", `Pass ${item.number} · ${item.kind === "pr_review" && item.outcome === "no_change" ? "No findings" : words(item.outcome ?? item.stage)}`));
+    node.append(element("p", `Started ${date(item.dispatched)} · Worker ${item.workerConclusion ?? "not complete or not recorded"}`, "meta"));
     const links = element("div", null, "links");
     links.append(link(`Input ${short(item.inputSha)}`, item.inputUrl));
-    if (item.workerUrl) links.append(link("Worker + diagnostics", item.workerUrl));
-    if (item.verifierUrl) links.append(link("Structural verifier", item.verifierUrl));
+    if (item.workerUrl) links.append(link("Worker log", item.workerUrl));
+    if (item.verifierUrl) links.append(link("Output verification", item.verifierUrl));
     if (item.coordinatorUrl) links.append(link("Coordinator", item.coordinatorUrl));
-    node.append(links, element("p", `Verification: ${words(item.verification)}. Worker diagnostics are not independent proof of passing tests.`, "muted"));
+    node.append(links, element("p", `Output verification: ${words(item.verification)}. This checks saved outputs, not review quality or passing tests.`, "muted"));
     if (item.publication) {
         const published = element("div", null, "links");
         if (item.publication.effect === "push") published.append(link(`Published ${short(item.publication.sha)}`, item.publication.url), link("Compare changes", item.publication.compareUrl));
@@ -357,10 +360,10 @@ function iterationCard(item) {
         }
         node.append(paths);
     }
-    if (item.reason) node.append(element("p", item.reason, "muted"));
+    if (item.reason) node.append(element("p", `Controller result: ${item.reason}`, "muted"));
     if (item.error) node.append(element("p", item.error, "error"));
-    if (item.task) {
-        node.append(element("p", `Task completion: ${words(item.task.outcome)}. This is not clean-review clearance.`));
+    if (item.task && item.task.outcome !== item.outcome) {
+        node.append(element("p", `Recorded outcome: ${words(item.task.outcome)}.`));
     }
     if (item.proposal) {
         node.append(element("p", "Saved title/body proposal. Effect confirmation is recorded separately.", "muted"),
@@ -368,7 +371,13 @@ function iterationCard(item) {
     }
     if (item.taskEffect) {
         node.append(element("p", `${words(item.taskEffect.kind)}: ${words(item.taskEffect.status)}.`));
-        if (item.taskEffect.reviewUrl) node.append(link("Pending review. Not submitted or approved.", item.taskEffect.reviewUrl));
+        if (item.taskEffect.reviewUrl) node.append(link("Pending review", item.taskEffect.reviewUrl));
+    }
+    for (const comment of item.reviewComments ?? []) {
+        const row = element("div", null, "finding");
+        row.append(element("code", `${comment.path}:${comment.line}`),
+            element("p", comment.body, "finding-text"));
+        node.append(row);
     }
     for (const rerun of item.ciReruns ?? []) {
         node.append(link(`Failed-jobs rerun ${rerun.runId}, attempt ${rerun.attempt ?? "not confirmed"}, ${rerun.status}`, rerun.url));
@@ -395,7 +404,7 @@ function iterationCard(item) {
     }
     if (item.findings.length) {
         const details = element("details");
-        details.append(element("summary", `${item.findings.length} frozen finding(s) and dispositions`));
+        details.append(element("summary", `${item.findings.length} existing review comment${item.findings.length === 1 ? "" : "s"} and responses`));
         for (const finding of item.findings) {
             const row = element("div", null, "finding");
             row.append(link(finding.path ?? "Review finding", finding.url),
@@ -415,7 +424,7 @@ function iterationCard(item) {
     }
     if (item.artifacts.length) {
         const details = element("details");
-        details.append(element("summary", "Saved worker artifacts"));
+        details.append(element("summary", "Downloads"));
         for (const artifact of item.artifacts) {
             const p = element("p", null, "links");
             p.append(link(`${artifact.name}${artifact.expired ? " · expired" : ""}`, artifact.url));

@@ -10,7 +10,7 @@ import { phaseSummary, targetHistory, actionSummary, failedActionSummary, commit
 import { Dashboard } from "./dashboard.mjs";
 import { startServer } from "./server.mjs";
 import { KIND_LABELS } from "./kinds.mjs";
-import { filterPulls, taskPresentation, TASK_EFFECTS } from "./prs.mjs";
+import { filterPulls, taskPresentation, completionPresentation, TASK_EFFECTS } from "./prs.mjs";
 
 const sha = (letter) => letter.repeat(40);
 const requestId = (letter) => letter.repeat(32);
@@ -67,6 +67,27 @@ test("merge parents, pending reviews and CI reruns retain separate saved evidenc
     assert.match(item.taskEffect.reviewUrl, /pullrequestreview-42$/);
     assert.equal(item.ciReruns[0].attempt, 2);
     assert.equal(item.ciWarnings[0].analysis, "Pre-existing failure");
+});
+
+test("PR review results distinguish new comments from existing findings and retain pending-review evidence", () => {
+    const comments = [{ path: "src/example.js", line: 12, side: "RIGHT", body: "Missing input guard" }];
+    const s = fixture({
+        stage: "complete", reason: "viewer_pending_review_confirmed",
+        task_completion: { outcome: "pending_review", review_id: 42, comments },
+        report: { dispositions: { outcome: "comments", comments } },
+    }, { loop_kind: "pr_review", findings: [{ key: "old", path: "src/old.js", body: "Existing comment" }] });
+    const phase = phaseSummary(record(s));
+    assert.equal(phase.findingCount, 1);
+    assert.equal(phase.reviewCommentCount, 1);
+    assert.equal(phase.outcome, "pending_review");
+    assert.equal(phase.pendingReviewUrl, "https://github.com/example/project/pull/12#pullrequestreview-42");
+    assert.equal(completionPresentation(phase).label, "Review ready");
+    const item = targetHistory([record(s)], target).phases[0].iterations[0];
+    assert.equal(item.kind, "pr_review");
+    assert.deepEqual(item.reviewComments, [{ path: "src/example.js", line: 12, body: "Missing input guard" }]);
+    assert.throws(() => phaseSummary(record(fixture({
+        report: { dispositions: { comments: [{ path: "src/example.js", line: -1, body: "Bad anchor" }] } },
+    }))), /malformed iteration evidence/);
 });
 function response(data, headers = {}, status = 200, code = status === 304 ? 1 : 0) {
     return {
@@ -1006,7 +1027,7 @@ async function rendererFixture(fetch) {
     };
     const script = await readFile(new URL("app.mjs", import.meta.url), "utf8");
     const renderer = await runInNewContext(`(async () => { ${script.replace(/^import .+;\r?$/gm, "")} return { render, heartbeat, refresh }; })()`, {
-        KIND_LABELS, filterPulls, taskPresentation, TASK_EFFECTS, document, setInterval() {}, fetch,
+        KIND_LABELS, filterPulls, taskPresentation, completionPresentation, TASK_EFFECTS, document, setInterval() {}, fetch,
     });
     return { renderer, nodes, document, html };
 }
@@ -1267,7 +1288,7 @@ test("PR cards put status in task buttons and keep saved run metadata inside exp
     assert.equal(buttons.length, Object.keys(KIND_LABELS).length);
     assert.ok(buttons.some((node) => node["aria-label"] === "Copilot review: Clean"));
     const details = row().children.find((node) => node.tag === "details");
-    assert.equal(details.firstChild.textContent, "Saved run details");
+    assert.equal(details.firstChild.textContent, "Run details");
     assert.equal(details.open, undefined);
     assert.ok(details.children[1].children.find((node) => node.className === "meta")
         .children.some((node) => node.textContent === `Head ${sha("a").slice(0, 8)}`));
@@ -1275,6 +1296,61 @@ test("PR cards put status in task buttons and keep saved run metadata inside exp
     const visit = (node) => { all.push(node); for (const child of node.children ?? []) visit(child); };
     visit(row());
     assert.equal(all.some((node) => node.textContent === "Central Actions"), false);
+});
+
+test("review cards show the actual outcome above collapsed technical details without claiming approval", async () => {
+    const state = rendererState();
+    const s = fixture({
+        stage: "complete", reason: "verified_no_change",
+        task_completion: { outcome: "no_change" },
+        report: { verification: "verified", dispositions: { outcome: "no_change", comments: [] } },
+    }, { loop_kind: "pr_review" });
+    const history = () => ({ ...targetHistory([record(s)], target), snapshot: state.snapshot });
+    state.prs[0].phase = phaseSummary(record(s));
+    const { renderer, nodes, html } = await rendererFixture(async (path) => ({
+        ok: true, json: async () => path.includes("history") ? history() : state,
+    }));
+    const card = () => nodes.get("prs").firstChild;
+    const result = () => card().children.find((node) => node.className === "run-result");
+    const details = () => card().children.find((node) => node.tag === "details");
+    const status = () => card().children.find((node) => node.className === "task-grid")
+        .children.find((node) => node["aria-label"]?.startsWith("PR Reviewer:"));
+    assert.equal(status()["aria-label"], "PR Reviewer: No findings");
+    assert.equal(result().firstChild.textContent, "No new findings. No pending review was created.");
+    assert.equal(details().firstChild.textContent, "Run details");
+    assert.equal(details().open, undefined);
+    assert.match(html, /<details class="card">\s*<summary>Background jobs/);
+
+    const comments = [{ path: "src/example.js", line: 12, side: "RIGHT", body: "<img src=x> Missing input guard" }];
+    Object.assign(s, {
+        task_completion: { outcome: "pending_review", review_id: 42, comments },
+        report: { verification: "verified", dispositions: { outcome: "comments", comments } },
+    });
+    state.prs[0].phase = phaseSummary(record(s));
+    renderer.render();
+    assert.equal(status()["aria-label"], "PR Reviewer: Review ready");
+    assert.equal(result().firstChild.textContent,
+        "1 review comment in a pending GitHub review. Only you can see it until you submit it.");
+    assert.equal(result().children[1].href, "https://github.com/example/project/pull/12#pullrequestreview-42");
+    const expanded = details();
+    expanded.open = true;
+    expanded.events.toggle();
+    await new Promise((resolve) => setImmediate(resolve));
+    const all = [];
+    const visit = (node) => { all.push(node); for (const child of node.children ?? []) visit(child); };
+    visit(expanded);
+    assert.ok(all.some((node) => node.textContent === "src/example.js:12"));
+    assert.ok(all.some((node) => node.textContent === "<img src=x> Missing input guard"));
+    assert.equal(all.some((node) => node.tag === "img"), false);
+
+    state.prs[0].sha = sha("b");
+    renderer.render();
+    assert.equal(status()["aria-label"], "PR Reviewer: Previous head");
+    assert.equal(result().firstChild.textContent, "Result from a previous PR commit.");
+    Object.assign(state.prs[0], { sha: sha("a"), phase: { ...phaseSummary(record(s)), stage: "blocked" } });
+    renderer.render();
+    assert.equal(status()["aria-label"], "PR Reviewer: Blocked");
+    assert.equal(result(), undefined);
 });
 
 test("Cancel dispatches the exact displayed identity directly and stays locked pending confirmation", async () => {

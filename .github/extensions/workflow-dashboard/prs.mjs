@@ -91,6 +91,29 @@ export function actionBlock(pr, viewer, phase, ready, dispatch) {
     return null;
 }
 
+export function completionPresentation(phase) {
+    if (phase.historical || phase.unknownStage || !["complete", "clean"].includes(phase.stage)) return null;
+    if (phase.stage === "clean") return { label: "Clean", detail: "Review is clean and CI passed for the recorded commit." };
+    if (phase.kind === "pr_review") {
+        if (phase.outcome === "no_change") return {
+            label: "No findings", detail: "No new findings. No pending review was created.",
+        };
+        if (phase.outcome === "pending_review" && phase.pendingReviewUrl) return {
+            label: "Review ready",
+            detail: phase.reviewCommentCount == null
+                ? "A pending GitHub review was created. Only you can see it until you submit it."
+                : `${phase.reviewCommentCount} review comment${phase.reviewCommentCount === 1 ? "" : "s"} in a pending GitHub review. Only you can see it until you submit it.`,
+        };
+    }
+    if (phase.outcome === "no_change") return { label: "No changes", detail: "No changes were published." };
+    if (phase.outcome === "metadata_updated") return { label: "Updated", detail: "The PR title and description were updated." };
+    if (phase.outcome === "CI_passed") return { label: "CI passed", detail: "CI passed for the recorded commit." };
+    if (phase.outcome === "warnings_not_CI_clearance") return {
+        label: "CI still failing", detail: "The remaining CI failures were classified as unrelated to this PR.",
+    };
+    return { label: "Completed", detail: "Task completed. See run details for the recorded result." };
+}
+
 export function taskPresentation(pr, kind, workflowReady, actions = []) {
     const phase = pr.phase?.kind === kind ? pr.phase : null;
     const dispatch = pr.dispatch && (pr.dispatch.kind === kind ||
@@ -98,7 +121,8 @@ export function taskPresentation(pr, kind, workflowReady, actions = []) {
     const disabled = Boolean(!workflowReady || pr.actionBlock || pr.dispatch) || !pr.tasks.includes(kind);
     const result = (label, tone = "idle", busy = false) => ({
         label, tone, busy, disabled,
-        detail: dispatch?.message ?? (phase ? phase.reason : null) ?? pr.actionBlock ?? TASK_EFFECTS[kind],
+        detail: dispatch?.message ?? (phase ? completionPresentation(phase)?.detail ?? phase.reason?.replaceAll("_", " ") : null) ??
+            pr.actionBlock ?? TASK_EFFECTS[kind],
     });
     if (dispatch) {
         if (dispatch.status === "uncertain") return result("Dispatch uncertain", "attention");
@@ -110,6 +134,8 @@ export function taskPresentation(pr, kind, workflowReady, actions = []) {
     if (phase.historical) return result("Historical", "unknown");
     if (phase.unknownStage) return result("Unknown state", "attention");
     if (phase.sha && phase.sha !== pr.sha) return result("Previous head", "unknown");
+    const completion = completionPresentation(phase);
+    if (completion) return result(completion.label, "complete");
     const terminal = {
         clean: ["Clean", "complete"], complete: ["Completed", "complete"],
         blocked: ["Blocked", "attention"], failed: ["Failed", "attention"],
