@@ -1193,6 +1193,33 @@ test("every task dispatches directly on click and locks duplicate and competing 
     }
 });
 
+test("PR headings show only the linked title without routing, dashboard or draft pills in either view", async () => {
+    const state = rendererState();
+    const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
+    for (const mine of [true, false]) {
+        nodes.get("mine").checked = mine;
+        nodes.get("others").checked = !mine;
+        Object.assign(state.prs[0], {
+            mine, author: mine ? "trask" : "someone", tasks: mine ? Object.keys(KIND_LABELS) : ["pr_review"],
+        });
+        for (const draft of [true, false]) {
+            for (const routeLabel of ["Dashboard stale", "Dashboard missing", "Waiting on authors",
+                "Waiting on reviewers", "Waiting on maintainers", "Draft"]) {
+                Object.assign(state.prs[0], { draft, routeLabel });
+                renderer.render();
+                const card = nodes.get("prs").firstChild;
+                const heading = card.firstChild;
+                assert.equal(heading.children.length, 1);
+                assert.equal(heading.firstChild.tag, "a");
+                assert.equal(heading.firstChild.textContent, "#12 PR in example/project");
+                assert.equal(heading.firstChild.href, state.prs[0].url);
+                assert.equal(card.children.find((node) => node.className === "task-grid").children.length,
+                    mine ? 8 : 1);
+            }
+        }
+    }
+});
+
 test("PR cards put status in task buttons and keep saved run metadata inside expandable details", async () => {
     const state = rendererState();
     Object.assign(state.prs[0], {
