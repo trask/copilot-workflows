@@ -920,6 +920,20 @@ test("history coalesces archive reads, reports failures, and cannot mix with a r
     assert.match(dashboard.state().pauseReason, /History read failed/);
 });
 
+test("busy markers rotate normally and use a static hourglass under reduced motion", async () => {
+    const styles = await readFile(new URL("styles.css", import.meta.url), "utf8");
+    const spinner = styles.match(/^\.task-marker\.spinner \{([^}]+)\}/m)?.[1];
+    assert.ok(spinner);
+    assert.match(spinner, /animation: task-spin 1s linear infinite;/);
+    assert.match(styles, /@keyframes task-spin \{ to \{ transform: rotate\(360deg\); \} \}/);
+    const reduced = styles.match(/@media \(prefers-reduced-motion: reduce\) \{\s*\.task-marker\.spinner \{([^}]+)\}/)?.[1];
+    assert.ok(reduced);
+    for (const declaration of ["animation: none;", "border: 0;", "border-radius: 0;", "background: currentColor;"]) {
+        assert.ok(reduced.includes(declaration), `Reduced-motion marker requires ${declaration}`);
+    }
+    assert.match(reduced, /clip-path: polygon\(0 0, 100% 0, 100% 20%, 65% 50%, 100% 80%, 100% 100%, 0 100%, 0 80%, 35% 50%, 0 20%\);/);
+});
+
 test("loopback serves assets and read-only endpoints; cross-origin data reads and invalid inputs fail explicitly", async (t) => {
     const dashboard = fakeDashboard();
     const server = await startServer(dashboard);
@@ -1053,6 +1067,9 @@ test("renderer preserves safe history and shows per-task buttons with confirmati
     assert.equal(active.length, 1);
     assert.equal(active[0]["aria-label"], "Self-review: Running");
     assert.equal(active[0]["data-tone"], "active");
+    const marker = active[0].children[1].children[1].firstChild;
+    assert.equal(marker.className, "task-marker spinner");
+    assert.equal(marker["aria-hidden"], "true");
 
     Object.assign(state.prs[0], { tasks: ["pr_description"], actionBlock: null, phase: null });
     renderer.render();

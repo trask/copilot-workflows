@@ -49,7 +49,15 @@ code { font: 12px var(--font-mono, Consolas, monospace); overflow-wrap: anywhere
 .task-button[data-tone="attention"] .task-status { color: var(--true-color-red, #cf222e); }
 .task-marker.spinner { width: 11px; height: 11px; border-width: 2px; border-right-color: transparent; animation: task-spin 1s linear infinite; }
 @keyframes task-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .task-marker.spinner { animation: none; } }
+@media (prefers-reduced-motion: reduce) {
+    .task-marker.spinner {
+        animation: none;
+        border: 0;
+        border-radius: 0;
+        background: currentColor;
+        clip-path: polygon(0 0, 100% 0, 100% 20%, 65% 50%, 100% 80%, 100% 100%, 0 100%, 0 80%, 35% 50%, 0 20%);
+    }
+}
 dialog { max-width: min(520px, 90vw); color: var(--text-color-default, #1f2328); background: var(--background-color-default, #fff); border: 1px solid var(--border-color-default, #d1d9e0); border-radius: 8px; padding: 20px; overflow-wrap: anywhere; }
 dialog::backdrop { background: #0006; }
 .search { flex: 1; min-width: 140px; }
