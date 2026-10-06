@@ -113,7 +113,7 @@ export class PrDashboard extends Dashboard {
             }
             const prs = pulls.map((pr) => normalizePull(pr, this.repository, dashboard, this.viewer));
             const incomplete = prs.filter((pr) => !["current", "draft"].includes(pr.dashboardStatus)).length;
-            if (incomplete) warnings.push(`${incomplete} PR(s) have missing, stale or invalid dashboard classifications. They remain in their ownership view unless Waiting on reviewers is selected.`);
+            if (incomplete) warnings.push(`${incomplete} PR(s) have missing, failed or invalid dashboard classifications. They remain in their ownership view unless Waiting on reviewers is selected.`);
             this.prs = prs;
             this.prWarnings = warnings;
             this.prLoadedAt = this.now();

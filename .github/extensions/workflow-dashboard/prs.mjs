@@ -42,10 +42,6 @@ export function normalizePull(pr, repo, dashboard, viewer) {
             !Object.hasOwn(ROUTES, cached.route) || !cached.facts ||
             typeof cached.facts !== "object" || Array.isArray(cached.facts)) status = "invalid";
         else if (cached.failed === true || ["transient-failure", "unknown"].includes(cached.route)) status = "failed";
-        else if (cached.facts.head_sha !== pr.head.sha ||
-            cached.facts.is_draft !== pr.draft ||
-            typeof cached.facts.author !== "string" ||
-            cached.facts.author.toLowerCase() !== pr.user.login.toLowerCase()) status = "stale";
         else {
             status = "current";
             facts = cached.facts;

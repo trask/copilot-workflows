@@ -105,7 +105,7 @@ test("dashboard decoding validates shape, version, Git identity, UTF-8 and size"
     ]) assert.throws(() => decodeDashboard(invalid), /Dashboard/);
 });
 
-test("all open rows include drafts, bots and missing dashboard data; routing is exact and head-bound", () => {
+test("all open rows include drafts, bots and missing dashboard data; routing uses dashboard classifications", () => {
     const matching = normalizePull(pull(), repo, state(), account);
     assert.equal(matching.mine, true);
     assert.equal(matching.routeLabel, "Waiting on reviewers");
@@ -118,9 +118,6 @@ test("all open rows include drafts, bots and missing dashboard data; routing is 
     assert.deepEqual(filterPulls([matching, draft, missing], { mine: false }), [missing]);
     assert.deepEqual(filterPulls([matching, draft, missing], { reviewers: true }), [matching]);
     for (const record of [
-        cached({ facts: facts({ head_sha: "d".repeat(40) }) }),
-        cached({ facts: facts({ author: "different" }) }),
-        cached({ facts: facts({ is_draft: true }) }),
         cached({ pr_number: 20 }), cached({ pr_url: "https://evil.test/" }), cached({ failed: true }),
         cached({ route: "unknown" }), cached({ route: "new-route" }),
     ]) {
@@ -133,6 +130,32 @@ test("all open rows include drafts, bots and missing dashboard data; routing is 
         assert.equal(filterPulls([pr], { reviewers: true }).length, 0);
     }
     assert.throws(() => normalizePull(pull({ state: "closed" }), repo, state(), account), /invalid/);
+});
+
+test("refresh uses the latest saved routing and facts while ownership and tasks use the live author", async () => {
+    const c = controller({
+        pulls: [pull({ user: { login: "renovate[bot]", id: 21, type: "Bot" } })],
+        dashboardState: state(cached({ facts: facts({
+            head_sha: "d".repeat(40), author: "app/renovate", is_draft: true, ci_pending_count: 2,
+        }) })),
+    });
+    const first = await c.canvas.refresh();
+    const pr = first.prs[0];
+    assert.deepEqual(first.prWarnings, []);
+    assert.equal(pr.routeLabel, "Waiting on reviewers");
+    assert.equal(pr.ciPending, 2);
+    assert.equal(pr.author, "renovate[bot]");
+    assert.equal(pr.sha, sha);
+    assert.equal(pr.draft, false);
+    assert.equal(pr.mine, false);
+    assert.deepEqual(pr.tasks, ["pr_review"]);
+    assert.deepEqual(filterPulls(first.prs, { mine: false, reviewers: true }), [pr]);
+    c.setDashboard(state(cached({ route: "author", facts: facts({ ci_pending_count: 0 }) })));
+    const next = await c.canvas.refresh();
+    assert.deepEqual(next.prWarnings, []);
+    assert.equal(next.prs[0].routeLabel, "Waiting on authors");
+    assert.equal(next.prs[0].ciPending, 0);
+    assert.deepEqual(filterPulls(next.prs, { mine: false, reviewers: true }), []);
 });
 
 test("ownership views are disjoint and compose with reviewer and case-insensitive search filters", () => {
