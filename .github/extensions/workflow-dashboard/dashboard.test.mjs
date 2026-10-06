@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { runInNewContext } from "node:vm";
 import { request as httpRequest } from "node:http";
-import { GitHub, GitHubError, CENTRAL, FAILED_COORDINATORS, parseResponse } from "./github.mjs";
+import { GitHub, GitHubError, CENTRAL, FAILED_COORDINATORS, parseResponse, runGh } from "./github.mjs";
 import { Checkpoints } from "./state.mjs";
 import { phaseSummary, targetHistory, actionSummary, failedActionSummary, commitLink, compareLink } from "./model.mjs";
 import { Dashboard } from "./dashboard.mjs";
@@ -118,6 +118,155 @@ test("GitHub reads run concurrently with a maximum of three, and missing output 
     assert.equal(github.inFlightReads.size, 0);
     const bad = new GitHub(async () => ({ code: 1, stdout: "" }));
     await assert.rejects(bad.get(`repos/${CENTRAL}/actions/runs`), /no HTTP/);
+});
+
+test("CLI transport diagnostics are sanitized and retain the no-window and bounded-process settings", async () => {
+    for (const diagnostic of [
+        "read tcp: wsarecv: An existing connection was forcibly closed by the remote host.",
+        "unexpected EOF", "net/http: TLS handshake timeout", "i/o timeout",
+    ]) {
+        await assert.rejects(runGh(["api", "user"], (command, args, options, callback) => {
+            assert.equal(command, "gh");
+            assert.equal(options.windowsHide, true);
+            assert.equal(options.timeout, 20000);
+            assert.equal(options.env.GH_PROMPT_DISABLED, "1");
+            assert.equal(options.env.GH_DEBUG, undefined);
+            callback({ code: 1 }, "", `${diagnostic}\nAuthorization: Bearer must-not-echo`);
+        }), (error) => error instanceof GitHubError && error.transient &&
+            /HTTP response/.test(error.message) && !/must-not-echo|Bearer|wsarecv/.test(error.message));
+    }
+});
+
+test("transient GET failure receives one shared retry, preserves ETags and exposes retry metrics", async () => {
+    const calls = [];
+    const delays = [];
+    const github = new GitHub((args) => runGh(args, (_command, _args, _options, callback) => {
+        calls.push(args);
+        if (calls.length === 1) callback({ code: 1 }, "", "connection reset by peer");
+        else if (calls.length === 2) callback(null, response([], { Etag: '"recovered"' }).stdout, "");
+        else callback({ code: 1 }, response(null, {}, 304).stdout, "HTTP 304");
+    }), () => 2000000, async (milliseconds) => delays.push(milliseconds));
+    const path = `repos/${CENTRAL}/git/matching-refs/heads/review-loop-state`;
+    const first = github.get(path);
+    const second = github.get(path);
+    assert.equal(first, second);
+    assert.deepEqual((await first).data, []);
+    assert.equal(await first, await second);
+    assert.deepEqual(delays, [250]);
+    assert.equal(calls.length, 2);
+    await github.get(path);
+    assert.ok(calls[2].includes('If-None-Match: "recovered"'));
+    assert.equal(github.requests, 3);
+    assert.equal(github.counted, 1);
+    assert.equal(github.cacheHits, 1);
+    assert.equal(github.readRetries, 1);
+    assert.equal(new Dashboard(github).state().metrics.readRetries, 1);
+    assert.equal(github.activeReads, 0);
+});
+
+test("repeated transport failures stop after one retry and never expose raw stderr", async () => {
+    let calls = 0;
+    const github = new GitHub((args) => runGh(args, (_command, _args, _options, callback) => {
+        calls++;
+        callback({ code: 1 }, "", "unexpected EOF\nAuthorization: Bearer must-not-echo");
+    }), () => 2000000, async () => {});
+    await assert.rejects(github.get(`repos/${CENTRAL}/actions/runs`), (error) =>
+        /closed.*one retry/.test(error.message) && !/must-not-echo/.test(error.message));
+    assert.equal(calls, 2);
+    assert.equal(github.requests, 2);
+    assert.equal(github.readRetries, 1);
+    assert.equal(github.counted, 0);
+    assert.equal(github.cache.size, 0);
+    assert.equal(github.activeReads, 0);
+    assert.equal(github.inFlightReads.size, 0);
+});
+
+test("authentication, certificate, process and unknown CLI failures do not retry", async () => {
+    for (const [failure, stdout, stderr, expected] of [
+        [{ code: 1 }, "", "To get started, run gh auth login. must-not-echo", /authenticate/],
+        [{ code: 1 }, "", "x509: certificate signed by unknown authority", /certificate/],
+        [{ code: 1 }, "", "unknown failure must-not-echo", /exited with code 1/],
+        [{ code: "ENOENT" }, "", "", /installed/],
+        [{ code: null, killed: true }, "", "", /20-second/],
+        [{ code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", killed: true }, "", "", /size limit/],
+        [{ code: 1 }, "HTTP/2.0 200 OK", "unexpected EOF", /no HTTP/],
+    ]) {
+        let calls = 0;
+        const github = new GitHub((args) => runGh(args, (_command, _args, _options, callback) => {
+            calls++;
+            callback(failure, stdout, stderr);
+        }), () => 2000000, async () => assert.fail("Nontransient failures must not sleep or retry"));
+        await assert.rejects(github.get(`repos/${CENTRAL}/actions/runs`), (error) =>
+            expected.test(error.message) && !error.transient && !/must-not-echo/.test(error.message));
+        assert.equal(calls, 1);
+        assert.equal(github.readRetries, 0);
+    }
+});
+
+test("received HTTP errors are not retried even when stderr contains a transport signature", async () => {
+    for (const status of [401, 403, 404, 429, 500]) {
+        let calls = 0;
+        const github = new GitHub((args) => runGh(args, (_command, _args, _options, callback) => {
+            calls++;
+            callback({ code: 1 }, response({ secret: "must-not-echo" }, {}, status).stdout, "unexpected EOF");
+        }), () => 2000000, async () => assert.fail("HTTP responses must not trigger transport retries"));
+        await assert.rejects(github.get(`repos/${CENTRAL}/actions/runs`), (error) =>
+            error.message.includes(`HTTP ${status}`) && !/must-not-echo/.test(error.message));
+        assert.equal(calls, 1);
+        assert.equal(github.readRetries, 0);
+    }
+});
+
+test("read retries stay inside the three-request concurrency limit", async () => {
+    let active = 0;
+    let maximum = 0;
+    const attempts = new Map();
+    const github = new GitHub(async (args) => {
+        maximum = Math.max(maximum, ++active);
+        const path = args.at(-1);
+        const attempt = (attempts.get(path) ?? 0) + 1;
+        attempts.set(path, attempt);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active--;
+        if (attempt === 1) throw Object.assign(new GitHubError("Connection reset."), { transient: true });
+        return response({ workflow_runs: [], total_count: 0 });
+    }, () => 2000000, async () => {});
+    await Promise.all(["queued", "pending", "waiting", "requested", "in_progress"].map((status) =>
+        github.get(`repos/${CENTRAL}/actions/runs?status=${status}`)));
+    assert.equal(maximum, 3);
+    assert.equal(github.requests, 10);
+    assert.equal(github.readRetries, 5);
+    assert.ok([...attempts.values()].every((attempt) => attempt === 2));
+    assert.equal(github.activeReads, 0);
+});
+
+test("a concurrent rate-limit response stops a scheduled transport retry", async () => {
+    let release;
+    const github = new GitHub(async () => {
+        throw Object.assign(new GitHubError("Connection reset."), { transient: true });
+    }, () => 2000000, () => new Promise((resolve) => release = resolve));
+    const pending = github.get(`repos/${CENTRAL}/actions/runs`);
+    await new Promise((resolve) => setImmediate(resolve));
+    github.recordRate({ "retry-after": "120" }, 429);
+    release();
+    await assert.rejects(pending, /paused/);
+    assert.equal(github.requests, 1);
+    assert.equal(github.readRetries, 0);
+    assert.equal(github.retryAt, 2120000);
+});
+
+test("a transport failure during dispatch remains uncertain and never retries", async () => {
+    let calls = 0;
+    const github = new GitHub((args) => runGh(args, (_command, _args, _options, callback) => {
+        calls++;
+        callback({ code: 1 }, "", "An existing connection was forcibly closed by the remote host.");
+    }), () => 2000000, async () => assert.fail("Dispatch must never retry"));
+    await assert.rejects(github.dispatch({
+        operation: "launch", target: "open-telemetry/shared-workflows#441",
+        loop_kind: "self_review", publication_auth: "fine_grained_pat",
+    }), (error) => error.uncertain && /do not blindly retry/.test(error.message));
+    assert.equal(calls, 1);
+    assert.equal(github.readRetries, 0);
 });
 
 test("concurrent reads of one path share an in-flight response, not a later refresh", async () => {
@@ -1084,4 +1233,11 @@ test("manual and background refreshes display busy status without replacing the 
     await renderer.heartbeat();
     assert.equal(nodes.get("loading").hidden, true);
     assert.equal(nodes.get("prs")["aria-busy"], "false");
+});
+
+test("renderer reports transport retry attempts in the session metrics", async () => {
+    const { nodes } = await rendererFixture(async () => ({ ok: true, json: async () => ({
+        ...rendererState(), metrics: { requests: 12, cacheHits: 10, readRetries: 1 },
+    }) }));
+    assert.match(nodes.get("cost").textContent, /Network read retries: 1\./);
 });

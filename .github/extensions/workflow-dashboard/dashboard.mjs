@@ -23,7 +23,8 @@ export class Dashboard {
         return {
             ...this.value, auto: this.auto, pauseReason: this.pauseReason,
             rate: this.github.rate, retryAt: this.github.retryAt,
-            metrics: { requests: this.github.requests, counted: this.github.counted, cacheHits: this.github.cacheHits },
+            metrics: { requests: this.github.requests, counted: this.github.counted, cacheHits: this.github.cacheHits,
+                readRetries: this.github.readRetries ?? 0 },
         };
     }
 

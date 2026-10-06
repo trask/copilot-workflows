@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
+import { setTimeout as sleep } from "node:timers/promises";
 import { REPOSITORIES, configuredRepository, dashboardPath } from "./repositories.mjs";
 import { KIND_LABELS } from "./kinds.mjs";
 
 export const CENTRAL = "trask/copilot-workflows";
 export const MAX_RESPONSE = 16 * 1024 * 1024;
 const READ_CONCURRENCY = 3;
+const READ_RETRY_DELAY = 250;
 export const ACTIVE_STATUSES = ["queued", "in_progress", "waiting", "pending", "requested"];
 export const FAILED_COORDINATORS = `repos/${CENTRAL}/actions/workflows/coordinator.yml/runs?event=workflow_dispatch&status=failure&per_page=20`;
 
@@ -12,17 +14,48 @@ export class GitHubError extends Error {
     constructor(message, retryAt = null) {
         super(message);
         this.retryAt = retryAt;
+        this.transient = false;
     }
 }
 
-export function runGh(args) {
+function cliFailure(error, stderr) {
+    if (error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+        return new GitHubError("GitHub CLI output exceeds the dashboard size limit.");
+    }
+    if (error.killed) return new GitHubError("GitHub CLI request exceeded its 20-second time limit.");
+    if (typeof error.code !== "number") {
+        return new GitHubError("GitHub CLI could not complete the request. Check that gh is installed, authenticated, and online.");
+    }
+    if (/gh auth login|authentication (?:failed|required)|failed to (?:get|read|retrieve).*credential/i.test(stderr)) {
+        return new GitHubError("GitHub CLI could not authenticate before sending the request. Check gh auth status.");
+    }
+    if (/x509:|certificate.*(?:invalid|unknown|expired)|certificate signed by unknown authority/i.test(stderr)) {
+        return new GitHubError("GitHub TLS certificate validation failed. Check the network proxy and trusted certificates.");
+    }
+    let message;
+    if (/TLS handshake timeout/i.test(stderr)) message = "GitHub TLS handshake timed out before an HTTP response.";
+    else if (/i\/o timeout|context deadline exceeded|Client\.Timeout exceeded/i.test(stderr)) {
+        message = "GitHub network request timed out before an HTTP response.";
+    } else if (/unexpected EOF|connection reset|forcibly closed|server closed idle connection/i.test(stderr)) {
+        message = "Network connection closed before GitHub returned an HTTP response.";
+    }
+    if (message) {
+        const failure = new GitHubError(message);
+        failure.transient = true;
+        return failure;
+    }
+    return new GitHubError(`GitHub CLI exited with code ${error.code} without an HTTP response. Check authentication and network connectivity.`);
+}
+
+export function runGh(args, execute = execFile) {
     const env = { ...process.env, GH_PROMPT_DISABLED: "1", GH_PAGER: "cat" };
     delete env.GH_DEBUG;
     return new Promise((resolve, reject) => {
-        execFile("gh", args, { windowsHide: true, timeout: 20000, maxBuffer: MAX_RESPONSE + 65536, env },
-            (error, stdout) => {
-                if (error && (typeof error.code !== "number" || error.killed)) {
-                    reject(new GitHubError("GitHub CLI could not complete the request. Check that gh is installed, authenticated, and online."));
+        execute("gh", args, { windowsHide: true, timeout: 20000, maxBuffer: MAX_RESPONSE + 65536, env },
+            (error, stdout, stderr) => {
+                if (error && (typeof error.code !== "number" || error.killed ||
+                    !/^HTTP\/[\d.]+ \d{3}\b/.test(stdout))) {
+                    reject(cliFailure(error, stderr));
                 } else {
                     resolve({ code: error?.code ?? 0, stdout });
                 }
@@ -66,9 +99,10 @@ function safePath(path) {
 }
 
 export class GitHub {
-    constructor(run = runGh, now = () => Date.now()) {
+    constructor(run = runGh, now = () => Date.now(), wait = sleep) {
         this.run = run;
         this.now = now;
+        this.wait = wait;
         this.cache = new Map();
         this.readQueue = [];
         this.inFlightReads = new Map();
@@ -76,6 +110,7 @@ export class GitHub {
         this.requests = 0;
         this.counted = 0;
         this.cacheHits = 0;
+        this.readRetries = 0;
         this.rate = null;
         this.retryAt = null;
     }
@@ -126,16 +161,27 @@ export class GitHub {
     }
 
     async read(path) {
-        if (this.retryAt && this.now() < this.retryAt) {
-            throw new GitHubError("GitHub reads are paused until the recorded rate-limit reset.", this.retryAt);
-        }
         const cached = this.cache.get(path);
         const args = ["api", "--hostname", "github.com", "--method", "GET", "--include",
             "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28"];
         if (cached?.etag) args.push("-H", `If-None-Match: ${cached.etag}`);
         args.push(path);
-        this.requests++;
-        const result = await this.run(args);
+        let result;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            if (this.retryAt && this.now() < this.retryAt) {
+                throw new GitHubError("GitHub reads are paused until the recorded rate-limit reset.", this.retryAt);
+            }
+            this.requests++;
+            if (attempt) this.readRetries++;
+            try {
+                result = await this.run(args);
+                break;
+            } catch (error) {
+                if (!(error instanceof GitHubError) || !error.transient) throw error;
+                if (attempt) throw new GitHubError(`${error.message} The read failed after one retry; refresh to try again.`);
+                await this.wait(READ_RETRY_DELAY);
+            }
+        }
         const response = parseResponse(result.stdout);
         const { status, headers } = response;
         const limited = this.recordRate(headers, status);
