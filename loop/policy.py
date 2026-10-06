@@ -262,9 +262,10 @@ def eligible(pr, repo=None, actor_id=AUTHOR_ID, kind="copilot_review"):
     require(REPO.fullmatch(repo), "Invalid target repository")
     require(pr["state"] == "open" and not pr.get("merged", False), "PR is not open")
     require(kind in LOOP_KINDS and type(actor_id) is int and actor_id > 0
-            and pr["user"]["type"] == "User"
+            and pr["user"]["type"] in {"User", "Bot"}
             and type(pr["user"]["id"]) is int and pr["user"]["id"] > 0
-            and (kind == "pr_review" or pr["user"]["id"] == actor_id), "Wrong author")
+            and (kind == "pr_review" or pr["user"]["type"] == "User"
+                 and pr["user"]["id"] == actor_id), "Wrong author")
     head, base = pr["head"], pr["base"]
     require(
         head["repo"] is not None

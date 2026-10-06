@@ -205,6 +205,30 @@ class TaskContractsTests(unittest.TestCase):
         with self.assertRaisesRegex(Rejected, "Target changed after freeze"):
             check_target(read, frozen)
 
+    def test_reviewer_freezes_bot_authors_without_granting_owner_only_task_access(self):
+        req = task_request("pr_review")
+        read = TaskRead(req)
+        read.pr["user"].update(type="Bot", login="dependabot[bot]")
+        frozen = freeze(read, 1, REVISION, 100, FIXTURE, loop_kind="pr_review")
+        self.assertEqual(999, frozen["pr_author_id"])
+        self.assertEqual(req["commit_author"], frozen["commit_author"])
+        self.assertEqual(req["pr_diff"], frozen["pr_diff"])
+        check_target(read, frozen)
+        for kind in LOOP_KINDS - {"pr_review"}:
+            with self.subTest(kind=kind), self.assertRaisesRegex(Rejected, "Wrong author"):
+                eligible(read.pr, FIXTURE, AUTHOR_ID, kind)
+        for author_type in ("Organization", "unknown", None):
+            read.pr["user"]["type"] = author_type
+            with self.subTest(author_type=author_type), self.assertRaisesRegex(Rejected, "Wrong author"):
+                eligible(read.pr, FIXTURE, AUTHOR_ID, "pr_review")
+        read.pr["user"]["type"] = "Bot"
+        read.pr["user"]["id"] = AUTHOR_ID
+        for kind in LOOP_KINDS - {"pr_review"}:
+            with self.subTest(kind=kind), self.assertRaisesRegex(Rejected, "Wrong author"):
+                eligible(read.pr, FIXTURE, AUTHOR_ID, kind)
+        with self.assertRaisesRegex(Rejected, "Target changed after freeze"):
+            check_target(read, frozen)
+
     def test_new_freezes_include_live_base_and_complete_actual_diff(self):
         for kind in ("pr_review", "pr_description", "pr_simplify", "pr_consistency", "pr_conflict_resolver"):
             req = task_request(kind)
@@ -417,6 +441,21 @@ class NonCodeEffectsTests(unittest.TestCase):
             self.publish(state, read, store, name, publisher)
         self.assertEqual([], publisher.posts)
         self.assertEqual([{"id": 7, "state": "PENDING", "user": {"id": AUTHOR_ID}}], read.reviews)
+
+    def test_bot_authored_pr_gets_only_an_owner_owned_pending_review(self):
+        state, read, store, name, publisher = self.context("pr_review")
+        read.pr["user"].update(type="Bot", login="dependabot[bot]")
+        complete = self.publish(state, read, store, name, publisher)
+        self.assertEqual("complete", complete["stage"])
+        self.assertEqual(1, len(publisher.posts))
+        path, method, data = publisher.posts[0]
+        self.assertEqual(f"repos/{FIXTURE}/pulls/1/reviews", path)
+        self.assertEqual("POST", method)
+        self.assertEqual({"commit_id", "comments"}, set(data))
+        self.assertEqual(SHA, data["commit_id"])
+        self.assertEqual("PENDING", read.reviews[0]["state"])
+        self.assertEqual(AUTHOR_ID, read.reviews[0]["user"]["id"])
+        self.assertEqual([], complete["publications"])
 
     def test_existing_pending_review_metadata_or_source_drift_prevents_mutation(self):
         for mutation in ("existing", "metadata", "head", "diff"):

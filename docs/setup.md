@@ -12,7 +12,7 @@ gh workflow run coordinator.yml --repo trask/copilot-workflows --ref main \
   -f publication_auth=fine_grained_pat -f target=owner/repository#123
 ```
 
-Only the central launch owner can dispatch. PR Reviewer accepts the owner's or another author's open PR and cannot gain source publication permission. All other kinds require the owner's open PR. A launch authorizes only the selected task; none of the six new kinds posts top-level comments, replies to people, resolves threads, changes draft state, submits/approves reviews or lands a PR.
+Only the central launch owner can dispatch. PR Reviewer accepts the owner's or another author's open PR, including bot-authored PRs, and cannot gain source publication permission. All other kinds require the owner's open PR. A launch authorizes only the selected task; none of the six new kinds posts top-level comments, replies to people, resolves threads, changes draft state, submits/approves reviews or lands a PR.
 
 | Task effect | Selected secret owner | Required target access |
 | --- | --- | --- |
@@ -127,7 +127,7 @@ Keep revision branches while their phases or retained evidence may need them. De
 
 The freeze binds base repository name/ID, actual head repository name/ID/ref, source/target visibility, author/launch actor, exact SHA, trusted workflow revision, request digest, baseline review IDs and verified findings. Forks use the head repository for Git and the base repository for PR/review APIs. Credentialed operations recheck open/author/head/source identity immediately before acting.
 
-New freezes bind `commit_author`, the launch owner's verified GitHub numeric ID and login. For source-changing workflows this is also the PR author. PR Reviewer separately freezes the PR author's identity, which may match the launch owner, and never constructs a code commit. Deterministic candidate commits use that login as author and committer and `<id>+<login>@users.noreply.github.com` as both emails. Both dates use the freeze timestamp. The publisher verifies its authenticated account matches the frozen author before pushing, and the existing Copilot co-author trailer is retained.
+New freezes bind `commit_author`, the launch owner's verified GitHub numeric ID and login. For source-changing workflows this is also the PR author. PR Reviewer separately freezes the PR author's numeric identity, which may belong to the launch owner, another person or a bot, and never constructs a code commit. Deterministic candidate commits use that login as author and committer and `<id>+<login>@users.noreply.github.com` as both emails. Both dates use the freeze timestamp. The publisher verifies its authenticated account matches the frozen author before pushing, and the existing Copilot co-author trailer is retained.
 
 Requests without this frozen author cannot publish or have their candidates reconstructed under the current runtime. Historical evidence stays unchanged. After the prior phase is verified quiescent, start a fresh phase to freeze an attributed candidate; do not reuse or rewrite a saved candidate acceptance.
 

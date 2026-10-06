@@ -311,6 +311,29 @@ test("PR Reviewer is enabled on the owner's PR and dispatches a review task", as
     }]);
 });
 
+test("PR Reviewer accepts bot-authored PRs without authorizing owner-only tasks", async () => {
+    const c = controller({ pulls: [pull({ user: { login: "dependabot[bot]", id: 21, type: "Bot" } })] });
+    const snapshot = await c.canvas.refresh();
+    assert.equal(snapshot.prs[0].actionBlock, null);
+    assert.deepEqual(snapshot.prs[0].tasks, ["pr_review"]);
+    const presentation = taskPresentation(snapshot.prs[0], "pr_review", snapshot.workflowReady);
+    assert.equal(presentation.label, "Run");
+    assert.equal(presentation.disabled, false);
+    for (const kind of Object.keys(KIND_LABELS).filter((value) => value !== "pr_review")) {
+        assert.equal(taskPresentation(snapshot.prs[0], kind, snapshot.workflowReady).disabled, true);
+        await assert.rejects(c.canvas.launch({ target, kind, confirmed: true }), /not eligible/);
+    }
+    await c.canvas.launch({ target, kind: "pr_review", confirmed: true });
+    assert.deepEqual(c.calls.filter((call) => typeof call === "object"), [{
+        operation: "launch", target, loop_kind: "pr_review", publication_auth: "fine_grained_pat",
+    }]);
+    const bot = normalizePull(pull({ user: { ...account, type: "Bot" } }), repo, state(), account);
+    assert.deepEqual(taskChoices(bot, account), ["pr_review"]);
+    for (const type of ["Organization", "unknown", null]) {
+        assert.throws(() => normalizePull(pull({ user: { ...account, type } }), repo, state(), account), /invalid/);
+    }
+});
+
 test("cancellation uses the exact rendered identity and rejects stale generations instead of adopting them", async () => {
     const c = controller({ records: [checkpoint()] });
     await c.canvas.refresh();

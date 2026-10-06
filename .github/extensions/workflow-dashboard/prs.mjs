@@ -82,14 +82,13 @@ export function filterPulls(prs, { mine = false, reviewers = false, search = "" 
 export function taskChoices(pr, viewer) {
     if (!viewer || viewer.id !== LAUNCH_OWNER_ID) return [];
     return Object.keys(KIND_LABELS).filter((kind) => kind === "pr_review" ||
-        pr.mine && pr.authorId === viewer.id);
+        pr.authorType === "User" && pr.mine && pr.authorId === viewer.id);
 }
 
 export function actionBlock(pr, viewer, phase, ready, dispatch) {
     if (!ready) return "Refresh successfully before running a task.";
     if (!viewer || viewer.id !== LAUNCH_OWNER_ID) return "The workflows only accept the configured personal owner's dispatch.";
     if (dispatch) return dispatch.message;
-    if (pr.authorType !== "User") return "The coordinator requires a human-authored PR.";
     if (!pr.headAvailable) return "The PR head repository is unavailable.";
     if (phase?.historical || phase?.unknownStage) return "Unsupported checkpoint. Inspect its saved evidence.";
     if (phase && ["active", "waiting"].includes(phase.category)) return "A task is already active on this PR.";

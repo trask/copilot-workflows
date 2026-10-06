@@ -2,7 +2,7 @@
 
 Review and fix explicitly selected PRs. The default `loop_kind=copilot_review` investigates existing verified Copilot findings. `loop_kind=self_review` uses one fresh worker per pass to review the complete PR diff and fix warranted problems. Both read repository instructions, format changes and run appropriate existing checks. There is no repository or language allowlist or per-repository adapter.
 
-The scope stays personal and opt-in. Only a fresh owner dispatch can launch work. Source-changing tasks and description require that owner's open PR; PR Reviewer can review the owner's or another author's open PR. The watcher advances existing authorized checkpoints; it does not discover PRs or scan repositories. Both existing loops publish warranted fixes. Copilot review always replies to and resolves eligible original Copilot threads before requesting fresh review; no other kind posts replies or resolves threads. There are no preview/shadow modes or reply switches.
+The scope stays personal and opt-in. Only a fresh owner dispatch can launch work. Source-changing tasks and description require that owner's open PR; PR Reviewer can review the owner's or another author's open PR, including bot-authored PRs. The watcher advances existing authorized checkpoints; it does not discover PRs or scan repositories. Both existing loops publish warranted fixes. Copilot review always replies to and resolves eligible original Copilot threads before requesting fresh review; no other kind posts replies or resolves threads. There are no preview/shadow modes or reply switches.
 
 ## Independent tasks
 
