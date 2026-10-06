@@ -207,9 +207,11 @@ function prCard(pr) {
     if (pr.draft) heading.append(element("span", "Draft", "badge"));
     card.append(heading);
     const tasks = element("div", null, "task-grid");
+    tasks.setAttribute("data-mine", String(pr.mine));
     tasks.setAttribute("role", "group");
     tasks.setAttribute("aria-label", `Workflow tasks for ${pr.target}`);
     for (const [kind, label] of Object.entries(KIND_LABELS)) {
+        if (!pr.mine && kind !== "pr_review") continue;
         const presentation = taskPresentation(pr, kind, state.workflowReady, state.actions);
         const button = element("button", null, "task-button");
         button.type = "button";
@@ -460,7 +462,7 @@ $("auto").addEventListener("change", async () => {
         error(failure.message);
     }
 });
-for (const id of ["mine", "reviewers", "search"]) $(id).addEventListener("input", render);
+for (const id of ["mine", "others", "reviewers", "search"]) $(id).addEventListener("input", render);
 $("repo").addEventListener("change", () => load("/api/repository", $("repo").value));
 
 async function heartbeat() {

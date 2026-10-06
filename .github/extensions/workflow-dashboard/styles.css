@@ -15,7 +15,7 @@ p { margin: 8px 0; }
 button, select, input { font: inherit; color: inherit; background: var(--background-color-default, #fff); border: 1px solid var(--border-color-default, #d1d9e0); border-radius: 6px; padding: 6px 10px; }
 button, select, summary { cursor: pointer; }
 button:disabled { opacity: .6; cursor: wait; }
-input[type="checkbox"] { accent-color: var(--true-color-blue, #0969da); }
+input[type="checkbox"], input[type="radio"] { accent-color: var(--true-color-blue, #0969da); }
 button:hover { background: color-mix(in srgb, var(--text-color-muted, #59636e) 6%, var(--background-color-default, #fff)); }
 :focus-visible { outline: 2px solid var(--color-focus-outline, #0969da); outline-offset: 3px; }
 a { color: var(--true-color-blue, #0969da); text-decoration: none; }
@@ -27,10 +27,12 @@ code { font: 12px var(--font-mono, Consolas, monospace); overflow-wrap: anywhere
 .filters { align-items: end; margin-bottom: 14px; }
 .filters label { font-size: 12px; display: grid; gap: 4px; }
 .filters .toggle { display: flex; align-items: center; padding-bottom: 6px; }
+.ownership { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .pr-card { border: 1px solid var(--border-color-default, #d1d9e0); border-radius: 8px; padding: 14px; margin-bottom: 12px; overflow-wrap: anywhere; }
 .pr-card > .row > a { font-weight: var(--font-weight-semibold, 600); }
 .pr-card .card { margin-top: 14px; margin-bottom: 0; }
 .task-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(144px, 1fr)); gap: 8px; margin-top: 16px; }
+.task-grid[data-mine="false"] { grid-template-columns: repeat(auto-fit, minmax(144px, 180px)); }
 .task-button { display: flex; align-items: center; gap: 10px; min-height: 62px; padding: 10px; text-align: left; }
 .task-button:disabled { cursor: default; opacity: .6; }
 .task-icon { width: 28px; height: 28px; flex: none; color: var(--text-color-muted, #59636e); }

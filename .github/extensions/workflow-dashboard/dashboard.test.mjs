@@ -974,6 +974,10 @@ async function rendererFixture(fetch) {
     const html = await readFile(new URL("index.html", import.meta.url), "utf8");
     assert.doesNotMatch(html, /<dialog\b|method="dialog"/);
     const nodes = new Map(Array.from(html.matchAll(/\bid="([^"]+)"/g), (match) => [match[1], new Node()]));
+    for (const [input] of html.matchAll(/<input\b[^>]*>/g)) {
+        const id = input.match(/\bid="([^"]+)"/)?.[1];
+        if (id) nodes.get(id).checked = /\bchecked\b/.test(input);
+    }
     const document = {
         hidden: false, getElementById: (id) => nodes.get(id), createElement: (tag) => new Node(tag),
         createElementNS: (_namespace, tag) => new Node(tag),
@@ -983,7 +987,7 @@ async function rendererFixture(fetch) {
     const renderer = await runInNewContext(`(async () => { ${script.replace(/^import .+;\r?$/gm, "")} return { render, heartbeat, refresh }; })()`, {
         KIND_LABELS, filterPulls, taskPresentation, TASK_EFFECTS, document, setInterval() {}, fetch,
     });
-    return { renderer, nodes, document };
+    return { renderer, nodes, document, html };
 }
 
 function rendererState(repository = "example/project") {
@@ -1001,6 +1005,79 @@ function rendererState(repository = "example/project") {
         }],
     };
 }
+
+test("ownership toggle defaults to My PRs and shows only PR Reviewer on other authors' PRs", async () => {
+    const state = rendererState();
+    const own = state.prs[0];
+    const phase = phaseSummary(record(fixture({}, { loop_kind: "pr_review" })));
+    state.prs.push({
+        ...own, target: "example/project#13", number: 13, title: "Another author's PR",
+        url: "https://github.com/example/project/pull/13", author: "someone", mine: false,
+        dashboardStatus: "current", route: "approver", tasks: ["pr_review"],
+        phase: { ...phase, target: "example/project#13" }, canCancel: true,
+        actionBlock: "A task is already active on this PR.",
+    }, {
+        ...own, target: "example/project#14", number: 14, title: "Bot draft",
+        url: "https://github.com/example/project/pull/14", author: "dependabot[bot]", mine: false,
+        draft: true, tasks: ["pr_review"],
+    });
+    const requests = [];
+    const { renderer, nodes, html } = await rendererFixture(async (path) => {
+        requests.push(path);
+        return { ok: true, json: async () => state };
+    });
+    const cards = () => nodes.get("prs").children;
+    const buttons = (card) => card.children.find((node) => node.className === "task-grid").children;
+    assert.match(html, /id="mine" type="radio" name="ownership" checked/);
+    assert.match(html, /id="others" type="radio" name="ownership"/);
+    assert.equal(nodes.get("mine").checked, true);
+    assert.equal(nodes.get("others").checked, false);
+    assert.equal(nodes.get("pr-count").textContent, "1 / 3");
+    assert.equal(cards()[0].firstChild.firstChild.textContent, "#12 PR in example/project");
+    assert.equal(buttons(cards()[0]).length, Object.keys(KIND_LABELS).length);
+
+    const reads = requests.length;
+    nodes.get("mine").checked = false;
+    nodes.get("others").checked = true;
+    nodes.get("others").events.input();
+    assert.equal(nodes.get("pr-count").textContent, "2 / 3");
+    assert.equal(cards().length, 2);
+    const active = buttons(cards()[0]);
+    assert.equal(active.length, 2);
+    assert.equal(active[0]["aria-label"], "PR Reviewer: Running");
+    assert.equal(active[0]["aria-busy"], "true");
+    assert.equal(active[0].disabled, true);
+    assert.equal(active[1].textContent, "Cancel current task");
+    assert.equal(active[1].disabled, false);
+    assert.ok(cards()[0].children.some((node) => node.tag === "details"));
+    assert.equal(buttons(cards()[1]).length, 1);
+    assert.equal(buttons(cards()[1])[0]["aria-label"], "PR Reviewer: Run");
+    assert.equal(buttons(cards()[1])[0].disabled, false);
+    assert.ok(cards().every((card) => !buttons(card).some((button) =>
+        button["aria-label"]?.startsWith("Self-review:"))));
+
+    nodes.get("reviewers").checked = true;
+    nodes.get("reviewers").events.input();
+    assert.equal(nodes.get("pr-count").textContent, "1 / 3");
+    nodes.get("search").value = "BOT";
+    nodes.get("search").events.input();
+    assert.equal(nodes.get("pr-count").textContent, "0 / 3");
+    nodes.get("reviewers").checked = false;
+    nodes.get("reviewers").events.input();
+    assert.equal(nodes.get("pr-count").textContent, "1 / 3");
+    assert.equal(cards()[0].firstChild.firstChild.textContent, "#14 Bot draft");
+    renderer.render();
+    assert.equal(nodes.get("others").checked, true);
+    assert.equal(nodes.get("pr-count").textContent, "1 / 3");
+
+    nodes.get("search").value = "";
+    nodes.get("mine").checked = true;
+    nodes.get("others").checked = false;
+    nodes.get("mine").events.input();
+    assert.equal(nodes.get("pr-count").textContent, "1 / 3");
+    assert.equal(buttons(cards()[0]).length, Object.keys(KIND_LABELS).length);
+    assert.equal(requests.length, reads);
+});
 
 test("renderer preserves safe history and shows per-task buttons with direct dispatch and activity", async () => {
     const s = fixture({ stage: "blocked", reason: "target_ci_failed",

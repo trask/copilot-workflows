@@ -32,7 +32,10 @@
       <h2 id="prs-title">Open PRs <span id="pr-count" class="badge"></span></h2>
       <div class="filters">
         <label>Repository<select id="repo"></select></label>
-        <label class="toggle"><input id="mine" type="checkbox"> My PRs</label>
+        <div class="ownership" role="radiogroup" aria-label="PR author">
+          <label class="toggle"><input id="mine" type="radio" name="ownership" checked> My PRs</label>
+          <label class="toggle"><input id="others" type="radio" name="ownership"> Not my PRs</label>
+        </div>
         <label class="toggle"><input id="reviewers" type="checkbox"> Waiting on reviewers</label>
         <label class="search">Search<input id="search" type="search" placeholder="Title, PR number, or author"></label>
       </div>
@@ -40,7 +43,7 @@
         <span class="task-marker spinner" aria-hidden="true"></span>
         <span id="loading-message"></span>
       </p>
-      <p class="muted">Reviewer routing comes from the OpenTelemetry PR dashboard. Unknown or stale classifications stay in All PRs.</p>
+      <p class="muted">Reviewer routing comes from the OpenTelemetry PR dashboard. Unknown or stale classifications do not match Waiting on reviewers.</p>
       <p class="muted">Run and Cancel dispatch immediately. These tasks can publish changes using Actions secrets.</p>
       <div id="warnings" class="notice" hidden></div>
       <div id="prs" aria-busy="false"></div>

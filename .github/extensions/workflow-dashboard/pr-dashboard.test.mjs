@@ -114,7 +114,8 @@ test("all open rows include drafts, bots and missing dashboard data; routing is 
     const missing = normalizePull(pull({ number: 14, user: { login: "bot", id: 21, type: "Bot" } }), repo, state(), account);
     assert.equal(draft.dashboardStatus, "draft");
     assert.equal(missing.dashboardStatus, "missing");
-    assert.equal(filterPulls([matching, draft, missing]).length, 3);
+    assert.deepEqual(filterPulls([matching, draft, missing]), [matching, draft]);
+    assert.deepEqual(filterPulls([matching, draft, missing], { mine: false }), [missing]);
     assert.deepEqual(filterPulls([matching, draft, missing], { reviewers: true }), [matching]);
     for (const record of [
         cached({ facts: facts({ head_sha: "d".repeat(40) }) }),
@@ -134,13 +135,17 @@ test("all open rows include drafts, bots and missing dashboard data; routing is 
     assert.throws(() => normalizePull(pull({ state: "closed" }), repo, state(), account), /invalid/);
 });
 
-test("my-PR and reviewer filters compose and search is case-insensitive", () => {
+test("ownership views are disjoint and compose with reviewer and case-insensitive search filters", () => {
     const mine = normalizePull(pull({ user: { ...account, login: "TrAsK", type: "User" } }), repo, state(), account);
     const other = normalizePull(pull({ user: { login: "someone", id: 22, type: "User" } }),
         repo, state(cached({ facts: facts({ author: "someone" }) })), account);
     assert.deepEqual(filterPulls([mine, other], { mine: true, reviewers: true, search: "UNTRUSTED" }), [mine]);
     assert.deepEqual(filterPulls([mine, other], { mine: true, search: "someone" }), []);
-    assert.equal(filterPulls([mine, other], { reviewers: true }).length, 2);
+    assert.deepEqual(filterPulls([mine, other]), [mine]);
+    assert.deepEqual(filterPulls([mine, other], { mine: false }), [other]);
+    assert.deepEqual(filterPulls([mine, other], { reviewers: true }), [mine]);
+    assert.deepEqual(filterPulls([mine, other], { mine: false, reviewers: true, search: "SOMEONE" }), [other]);
+    assert.deepEqual(filterPulls([mine, other], { mine: false, search: "trask" }), []);
     assert.deepEqual(taskChoices(mine, account), Object.keys(KIND_LABELS));
     assert.deepEqual(taskChoices(other, account), ["pr_review"]);
     assert.deepEqual(taskChoices(mine, { ...account, id: 99 }), []);

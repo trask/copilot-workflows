@@ -72,9 +72,9 @@ export function normalizePull(pr, repo, dashboard, viewer) {
     };
 }
 
-export function filterPulls(prs, { mine = false, reviewers = false, search = "" } = {}) {
+export function filterPulls(prs, { mine = true, reviewers = false, search = "" } = {}) {
     const query = search.trim().toLowerCase();
-    return prs.filter((pr) => (!mine || pr.mine) &&
+    return prs.filter((pr) => pr.mine === mine &&
         (!reviewers || !pr.draft && pr.dashboardStatus === "current" && pr.route === "approver") &&
         [pr.title, pr.target, pr.author].join(" ").toLowerCase().includes(query));
 }
