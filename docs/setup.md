@@ -42,7 +42,27 @@ The bot accepts an explicit `owner/repo#number` or GitHub PR URL. It has no lang
 
 ## Credentials only when needed
 
+### Protected Actions environment
+
+Store all custom Actions secrets in the `protected` environment in `trask/copilot-workflows`, not at repository level. Its deployment policy allows only branch refs named `main` or matching `review-loop-revisions/*`. Both are needed because continuations run on immutable automation revision branches. Do not allow tags or arbitrary branches.
+
+No required reviewers or wait timer are configured, so authorized jobs run automatically. This is a branch restriction, not a manual approval gate. Jobs that read custom secrets, including credential-presence checks, worker activation, inference and detection, explicitly reference `protected`. Fast checks and the structural verifier do not.
+
+The worker's `on.manual-approval: protected` compiler setting binds its activation job to the same environment. It requires human approval only if the environment has required reviewers.
+
+Add the tokens through the environment's secrets UI or the CLI's interactive prompts:
+
+```bash
+gh secret set COPILOT_GITHUB_TOKEN --repo trask/copilot-workflows --env protected
+gh secret set TEST_PUBLISH_TOKEN --repo trask/copilot-workflows --env protected
+gh secret set OPENTELEMETRY_PUBLISH_TOKEN --repo trask/copilot-workflows --env protected
+```
+
+Do not keep repository-level copies of these secrets: jobs without the environment can access repository secrets. GitHub cannot retrieve existing secret values; adding or moving a secret requires its token value.
+
 Public PR/review reads use the central Actions token because GraphQL requires authentication. An optional `REVIEW_LOOP_SOURCE_READ_TOKEN` can supply scoped public API reads, but cannot authorize a private target or head and is never passed to Git source retrieval. Missing API access stops as `human_gate_target_repository_read_access`. The controller never reads local CLI credentials or borrows inference auth.
+
+If used, store `REVIEW_LOOP_SOURCE_READ_TOKEN` in `protected` too. Keep the non-secret `PUBLISHER_SECRETS` routing map as a repository variable.
 
 Workers also need `COPILOT_GITHUB_TOKEN`, a personal inference credential with Copilot Requests read access and no repository write access. The pinned engine proxies inference and excludes it from the agent environment. Do not add inherited MCP, OTLP or broad repository credentials to the worker.
 
@@ -50,7 +70,7 @@ Launch uses explicit `publication_auth=fine_grained_pat`. The two review loops p
 
 ### Owner-scoped publisher secrets
 
-Create one fine-grained PAT per resource owner, limited to the repositories that the workflow should publish to. Use `TEST_PUBLISH_TOKEN` for personal test PRs and `OPENTELEMETRY_PUBLISH_TOKEN` for OpenTelemetry PRs. Store these as Actions secrets in `trask/copilot-workflows`, not as plaintext variables. These secret names can be shared by other workflows in this repository.
+Create one fine-grained PAT per resource owner, limited to the repositories that the workflow should publish to. Use `TEST_PUBLISH_TOKEN` for personal test PRs and `OPENTELEMETRY_PUBLISH_TOKEN` for OpenTelemetry PRs. Store these as Actions secrets in the repository's `protected` environment, not as plaintext variables. Other workflows using these names must also reference `protected`.
 
 Set the repository's shared Actions variable `PUBLISHER_SECRETS` to:
 

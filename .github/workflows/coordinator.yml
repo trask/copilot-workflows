@@ -42,6 +42,7 @@ permissions: {}
 jobs:
   coordinate:
     if: github.repository == 'trask/copilot-workflows' && (github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'tick' && startsWith(github.ref, 'refs/heads/review-loop-revisions/')))
+    environment: protected
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency:
@@ -147,6 +148,7 @@ jobs:
   finalize:
     needs: [coordinate, verify]
     if: always() && needs.coordinate.outputs.verify == 'true'
+    environment: protected
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -173,6 +175,7 @@ jobs:
   personal_live:
     needs: coordinate
     if: needs.coordinate.outputs.live == 'true'
+    environment: protected
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

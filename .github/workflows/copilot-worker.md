@@ -17,6 +17,7 @@ on:
         type: string
         required: true
   reaction: none
+  manual-approval: protected
   bots: ["github-actions[bot]"]
   status-comment: false
   github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -29,6 +30,7 @@ observability:
   otlp:
     endpoint: []
     if-missing: ignore
+environment: protected
 env:
   OTEL_EXPORTER_OTLP_HEADERS: ""
   OTEL_EXPORTER_OTLP_ENDPOINT: ""

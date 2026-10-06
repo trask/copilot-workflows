@@ -14,6 +14,7 @@ concurrency:
 jobs:
   wait:
     if: github.repository == 'trask/copilot-workflows' && github.ref == 'refs/heads/main'
+    environment: protected
     runs-on: ubuntu-24.04
     timeout-minutes: 65
     permissions:

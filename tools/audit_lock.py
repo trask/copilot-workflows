@@ -92,6 +92,17 @@ def audit():
         "coordinator.yml", "waiter.yml", "validate.yml", "copilot-worker.lock.yml",
     }
     waiter = Path(".github/workflows/waiter.yml").read_text()
+    frontmatter = Path(".github/workflows/copilot-worker.md").read_text().split("\n---\n", 1)[0]
+    assert "\nenvironment: protected\n" in frontmatter
+    assert "\n  manual-approval: protected\n" in frontmatter
+    for workflow in (text, controller, waiter):
+        jobs = workflow.split("\njobs:\n", 1)[1]
+        for job, section in re.findall(
+                r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
+                jobs, re.MULTILINE | re.DOTALL):
+            secrets = re.findall(r"secrets(?:\.([A-Z][A-Z0-9_]*)|\[)", section)
+            if any(secret != "GITHUB_TOKEN" for secret in secrets):
+                assert re.search(r"(?m)^    environment: protected$", section), job
     assert "group: central-review-loop-waiter" in waiter and "cancel-in-progress: false" in waiter
     assert "python3 -m loop.waiter" in waiter and "persist-credentials: false" in waiter
     assert "SOURCE_READ_TOKEN" in waiter and "actions: write" in waiter

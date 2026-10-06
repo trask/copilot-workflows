@@ -9,6 +9,34 @@ from loop.policy import Rejected
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_custom_secrets_require_the_protected_environment(self):
+        root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+        expected = {
+            "coordinator.yml": {"coordinate", "finalize", "personal_live"},
+            "waiter.yml": {"wait"},
+            "copilot-worker.lock.yml": {"activation", "agent", "detection"},
+            "validate.yml": set(),
+        }
+        for name, expected_jobs in expected.items():
+            text = (root / name).read_text(encoding="utf-8")
+            jobs = text.split("\njobs:\n", 1)[1]
+            credential_jobs = set()
+            for job, section in re.findall(
+                    r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
+                    jobs, re.MULTILINE | re.DOTALL):
+                secrets = re.findall(r"secrets(?:\.([A-Z][A-Z0-9_]*)|\[)", section)
+                if any(secret != "GITHUB_TOKEN" for secret in secrets):
+                    credential_jobs.add(job)
+                    with self.subTest(workflow=name, job=job):
+                        self.assertRegex(section, r"(?m)^    environment: protected$")
+                if job in {"verify", "deterministic"}:
+                    self.assertNotIn("environment:", section)
+            self.assertEqual(expected_jobs, credential_jobs, name)
+        frontmatter = (root / "copilot-worker.md").read_text(
+            encoding="utf-8").split("\n---\n", 1)[0]
+        self.assertIn("\nenvironment: protected\n", frontmatter)
+        self.assertIn("\n  manual-approval: protected\n", frontmatter)
+
     def test_repository_checks_are_fast_and_have_no_standalone_integration_workflow(self):
         root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
         self.assertEqual({"validate.yml", "coordinator.yml", "waiter.yml", "copilot-worker.lock.yml"},
