@@ -1,12 +1,13 @@
 """Bounded merge history and deterministic two-parent Git reconstruction."""
 
 import hashlib
+import re
 import tempfile
 from pathlib import Path
 
 from loop.candidates import message
-from loop.policy import CENTRAL, canonical, commit_author, digest, require
-from loop.verify import MAX_PATCH, git, safe_path
+from loop.policy import canonical, commit_author, digest, require
+from loop.verify import MAX_PATCH, git, patch_stats, safe_path, tree_entries as entries
 
 
 def history(directory, request):
@@ -18,14 +19,9 @@ def history(directory, request):
     return ancestor == base
 
 
-def entries(directory, tree):
-    return {record.split(b"\t", 1)[1].decode("utf-8"):
-            tuple(record.split(b"\t", 1)[0].decode().split())
-            for record in git(["ls-tree", "-r", "-z", tree], directory).split(b"\0")[:-1]}
-
-
 def resolved_tree(directory, request, tree):
-    output = git(["merge-tree", "--write-tree", "--name-only", "-z", "--no-messages",
+    output = git(["--attr-source=" + request["frozen_sha"],
+                  "merge-tree", "--write-tree", "--name-only", "-z", "--no-messages",
                   request["frozen_sha"], request["base_sha"]], directory, allowed=(0, 1))
     records = output.split(b"\0")
     automatic = records[0].decode().strip()
@@ -36,25 +32,27 @@ def resolved_tree(directory, request, tree):
             "Merge altered or omitted a cleanly merged incoming change")
     before = entries(directory, request["frozen_sha"])
     incoming = entries(directory, request["base_sha"])
+    original_blobs = {oid for side in (before, incoming) for _, kind, oid in side.values()
+                      if kind == "blob"}
     paths = sorted(p for p in before.keys() | proposed.keys() if before.get(p) != proposed.get(p))
     require(len(paths) <= 100, "Merge changed path count exceeds limit")
     for path in paths:
-        central = request["head_repo"] == CENTRAL and path.split("/")[0].casefold() in {".github", "loop", "tools"}
-        carried = path not in conflicts and proposed.get(path) == incoming.get(path)
-        if not carried or central:
-            safe_path(path, request)
-            require((before.get(path) or ("100644",))[0] == "100644"
-                    and (proposed.get(path) or ("100644",))[0] == "100644",
-                    "Worker-authored executable, symlink or submodule resolution")
+        safe_path(path, request)
     for path in conflicts:
         safe_path(path, request)
-        require(path not in proposed or proposed[path][0] == "100644",
-                "Unsupported conflict resolution mode")
-        if path in proposed:
-            blob = git(["cat-file", "blob", proposed[path][2]], directory)
-            require(b"\x00" not in blob and not any(
-                line.startswith((b"<<<<<<< ", b"=======", b">>>>>>> "))
-                for line in blob.splitlines()), "Unresolved conflict markers")
+        automatic_entry = clean.get(path)
+        if (path in proposed and proposed[path][1] == "blob"
+                and automatic_entry is not None and automatic_entry[1] == "blob"
+                and automatic_entry[2] not in original_blobs):
+            automatic_blob = git(["cat-file", "blob", automatic_entry[2]], directory)
+            marker = re.search(br"(?m)^(<+) " + request["frozen_sha"].encode() + br"(?=\r?$|:)",
+                               automatic_blob)
+            if marker is not None:
+                width = len(marker[1])
+                blob = git(["cat-file", "blob", proposed[path][2]], directory)
+                require(not any(
+                    line.startswith((b"<" * width + b" ", b"=" * width, b">" * width + b" "))
+                    for line in blob.splitlines()), "Unresolved conflict markers")
     return paths
 
 
@@ -63,8 +61,7 @@ def reconstruct_merge(files, request, fetch_source, package_dir):
     result = parse_json(files["result.json"])
     patch = files["candidate.patch"]
     require(fetch_source is not None and len(patch) <= MAX_PATCH
-            and b"\x00" not in patch and b"GIT binary patch" not in patch
-            and b"Binary files " not in patch, "Merge requires supported bound source/patch")
+            and b"\x00" not in patch, "Merge requires supported bound source/patch")
     with tempfile.TemporaryDirectory(prefix="verify-merge-") as directory:
         git(["init", "--bare", "--quiet"], directory)
         fetch_source(directory)
@@ -79,14 +76,8 @@ def reconstruct_merge(files, request, fetch_source, package_dir):
         git(["read-tree", request["frozen_sha"]], directory)
         if patch:
             require(result["outcome"] == "merge", "No-change merge contains a patch")
-            stats = git(["apply", "--numstat", "-z", "-"], directory, patch)
-            lines = 0
-            for record in stats.split(b"\0")[:-1]:
-                added, removed, path = record.decode().split("\t", 2)
-                require(added.isdigit() and removed.isdigit(), "Unsupported merge patch")
-                from loop.verify import safe_source_path
-                safe_source_path(path)
-                lines += int(added) + int(removed)
+            lines = sum((added or 0) + (removed or 0)
+                        for added, removed, _ in patch_stats(patch, directory))
             require(lines <= 10000, "Merge patch line limit exceeded")
             git(["apply", "--cached", "--whitespace=error-all", "-"], directory, patch)
         tree = git(["write-tree"], directory).decode().strip()
@@ -104,7 +95,8 @@ def reconstruct_merge(files, request, fetch_source, package_dir):
                         "parents": [request["frozen_sha"], request["base_sha"]],
                         "subject": subject, "changed_paths": paths,
                         "patch_sha256": hashlib.sha256(patch).hexdigest()}]
-        cumulative = git(["diff", "--cached", "--no-renames", "--binary", request["frozen_sha"]], directory)
+        cumulative = git(["--attr-source=" + tree, "diff", "--cached", "--no-ext-diff",
+                          "--no-textconv", "--no-renames", "--binary", request["frozen_sha"]], directory)
         require(len(cumulative) <= MAX_PATCH, "Merge cumulative patch exceeds limit")
         from loop.publication import object_bounds
         object_bounds(directory)

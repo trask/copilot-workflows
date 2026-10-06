@@ -15,44 +15,37 @@ def description_diff(text):
 
 def diff_anchors(text):
     require(isinstance(text, str) and len(text.encode("utf-8")) <= MAX_DIFF
-            and "\x00" not in text and "GIT binary patch" not in text
-            and "Binary files " not in text, "Unavailable or unsupported complete PR diff")
+            and "\x00" not in text, "Unavailable or unsupported complete PR diff")
+    from loop.verify import patch_sections
     anchors, counts = {}, {}
-    path, old_left, new_left, line = None, 0, 0, 0
-    for record in text.splitlines():
-        if record.startswith("diff --git "):
-            require(old_left == new_left == 0, "Truncated PR diff hunk")
-            match = re.fullmatch(r"diff --git a/(.+) b/(.+)", record)
-            require(match is not None, "Unsupported PR diff path encoding")
-            from loop.verify import safe_source_path
-            safe_source_path(match[1])
-            safe_source_path(match[2])
-            path = match[2]
-            require(path not in counts, "Duplicate PR diff file")
-            counts[path] = [0, 0]
-            anchors[path] = []
-        elif record.startswith("@@"):
-            require(path is not None and old_left == new_left == 0, "Truncated PR diff")
-            match = re.fullmatch(r"@@ -([0-9]+)(?:,([0-9]+))? \+([0-9]+)(?:,([0-9]+))? @@.*", record)
-            require(match is not None, "Malformed PR diff hunk")
-            old_left = int(match[2]) if match[2] is not None else 1
-            line = int(match[3])
-            new_left = int(match[4]) if match[4] is not None else 1
-        elif old_left or new_left:
-            require(record[:1] in {" ", "+", "-", "\\"}, "Truncated PR diff contents")
-            if record.startswith("+"):
-                anchors[path].append(line)
-                counts[path][0] += 1
-            if record.startswith("-"):
-                counts[path][1] += 1
-            if record.startswith((" ", "-")):
-                old_left -= 1
-            if record.startswith((" ", "+")):
-                new_left -= 1
-                line += 1
-            require(old_left >= 0 and new_left >= 0, "Malformed PR diff lengths")
-    require(old_left == new_left == 0 and sum(len(a) for a in anchors.values()) <= 10000,
-            "Truncated or oversized PR diff")
+    for section, _, path, added, deleted in patch_sections(text.encode("utf-8")):
+        require(path not in counts, "Duplicate PR diff file")
+        counts[path], anchors[path] = [0, 0], []
+        old_left, new_left, line = 0, 0, 0
+        for record in section.decode("utf-8").split("\n")[1:]:
+            if record.startswith("@@"):
+                require(old_left == new_left == 0, "Truncated PR diff")
+                match = re.fullmatch(r"@@ -([0-9]+)(?:,([0-9]+))? \+([0-9]+)(?:,([0-9]+))? @@.*", record)
+                require(match is not None, "Malformed PR diff hunk")
+                old_left = int(match[2]) if match[2] is not None else 1
+                line = int(match[3])
+                new_left = int(match[4]) if match[4] is not None else 1
+            elif old_left or new_left:
+                require(record[:1] in {" ", "+", "-", "\\"}, "Truncated PR diff contents")
+                if record.startswith("+"):
+                    anchors[path].append(line)
+                    counts[path][0] += 1
+                if record.startswith("-"):
+                    counts[path][1] += 1
+                if record.startswith((" ", "-")):
+                    old_left -= 1
+                if record.startswith((" ", "+")):
+                    new_left -= 1
+                    line += 1
+                require(old_left >= 0 and new_left >= 0, "Malformed PR diff lengths")
+        require(old_left == new_left == 0 and counts[path] == [added or 0, deleted or 0],
+                "Truncated or inconsistent PR diff")
+    require(sum(len(a) for a in anchors.values()) <= 10000, "Oversized PR diff")
     return anchors, counts
 
 

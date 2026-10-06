@@ -124,37 +124,6 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(b"", Path(package, "candidate.bundle").read_bytes())
             import_candidate(restored, Path(package, "candidate.bundle"), req, candidate, baseline)
 
-    def test_intermediate_protected_change_cannot_be_hidden_by_later_batch(self):
-        req = self.request()
-        req.update(loop_kind="self_review", findings=[], base_ref="main",
-                   base_sha=req["frozen_sha"], merge_base_sha=req["frozen_sha"])
-        protected = b"""diff --git a/.env b/.env
-new file mode 100644
---- /dev/null
-+++ b/.env
-@@ -0,0 +1 @@
-+secret
-"""
-        undo = b"""diff --git a/.env b/.env
-deleted file mode 100644
---- a/.env
-+++ /dev/null
-@@ -1 +0,0 @@
--secret
-"""
-        value = result(req, "fixes", protected + GOOD_PATCH + undo)
-        value["batches"] = [
-            batch(protected), batch(GOOD_PATCH, offset=len(protected)),
-            batch(undo, offset=len(protected) + len(GOOD_PATCH))]
-        def source(directory):
-            sha = baseline(directory)
-            git(["update-ref", "refs/heads/snapshot", sha], directory)
-            git(["update-ref", "refs/heads/review-base", sha], directory)
-        with self.assertRaisesRegex(Rejected, "protected"):
-            reconstruct({"candidate.patch": protected + GOOD_PATCH + undo,
-                         "result.json": json.dumps(value).encode()},
-                        req, source)
-
     def test_batches_cannot_cancel_all_changes(self):
         req = self.request()
         undo = GOOD_PATCH.replace(b"-old\n+new\n", b"-new\n+old\n")

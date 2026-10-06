@@ -347,8 +347,8 @@ def import_candidate(directory, bundle, request, candidate, fetch_source=None):
         object_bounds(directory)
         git(["fsck", "--strict", "--no-reflogs"], directory)
         return
-    header = Path(bundle).read_bytes().split(b"\n\n", 1)[0].decode("ascii")
-    require(header.splitlines() == [
+    header = Path(bundle).read_bytes().split(b"\n\n", 1)[0].decode("utf-8")
+    require(header.split("\n") == [
         "# v2 git bundle", "-" + request["frozen_sha"] + " " +
         git(["show", "-s", "--format=%s", request["frozen_sha"]], directory).decode().strip(),
         candidate["commit"] + " refs/heads/candidate"], "Unexpected bundle refs/prerequisites")
@@ -366,14 +366,14 @@ def import_candidate(directory, bundle, request, candidate, fetch_source=None):
                 == entry["tree"]
                 and git(["show", "-s", "--format=%s", entry["commit"]], directory).decode().strip()
                 == entry["subject"], "Candidate has wrong batch parent/tree/subject")
-        changed = git(["diff", "--name-only", "--no-renames", entry["parent"], entry["commit"]],
-                      directory).decode().splitlines()
+        changed = git(["diff", "--name-only", "--no-renames", "-z", entry["parent"], entry["commit"]],
+                      directory).decode("utf-8").split("\0")[:-1]
         require(changed == entry["changed_paths"], "Intermediate candidate paths differ")
         for path in changed:
             safe_path(path, request)
     git(["fsck", "--strict", "--no-reflogs"], directory)
-    paths = git(["diff", "--name-only", request["frozen_sha"],
-                 candidate["commit"]], directory).decode().splitlines()
+    paths = git(["diff", "--name-only", "--no-renames", "-z", request["frozen_sha"],
+                 candidate["commit"]], directory).decode("utf-8").split("\0")[:-1]
     require(paths == candidate["changed_paths"], "Candidate paths differ")
     for path in paths:
         safe_path(path, request)

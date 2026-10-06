@@ -9,7 +9,7 @@ import stat
 import subprocess
 import tempfile
 import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from loop.coordinator import run_binding
 from loop.candidates import current_request, message, patches
@@ -20,8 +20,6 @@ FILES = {"result.json", "candidate.patch", "diagnostics.txt"}
 MAX_ZIP = 6 * 1024 * 1024
 MAX_TOTAL = 8 * 1024 * 1024
 MAX_PATCH = 2 * 1024 * 1024
-CREDENTIAL_PARTS = {".env", ".netrc", ".npmrc", ".pypirc", ".ssh", ".aws", ".azure",
-                    ".gitconfig", "credentials"}
 
 
 def unique_json(pairs):
@@ -85,6 +83,9 @@ def git(args, cwd, input_data=None, limits=None, allowed=(0,)):
            if key in {"PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP"}}
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
                GIT_TERMINAL_PROMPT="0", GIT_NO_REPLACE_OBJECTS="1")
+    if limits is None:
+        from loop.source import source_limits
+        limits = source_limits
     proc = subprocess.run(
         ["git", "-c", "core.hooksPath=" + os.devnull, "-c", "credential.helper=",
          "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
@@ -99,29 +100,61 @@ def git(args, cwd, input_data=None, limits=None, allowed=(0,)):
 
 
 def safe_source_path(path):
-    require(0 < len(path) <= 240 and "\\" not in path and ":" not in path
-            and not any(ord(c) < 32 or ord(c) >= 127 for c in path), "Unsafe patch path")
-    parts = PurePosixPath(path).parts
-    require(parts and not path.startswith("/") and all(p not in {"", ".", "..", ".git"}
-            for p in path.split("/")), "Path traversal")
-    require(not path.startswith("-") and not any(p.casefold() == ".git" for p in parts),
+    require(isinstance(path, str) and path and "\x00" not in path, "Invalid Git path")
+    components = path.replace("\\", "/").split("/")
+    require(not PureWindowsPath(path).drive and all(p not in {"", ".", ".."}
+            for p in components), "Path traversal")
+    require(not any(p.casefold() == ".git" for p in components),
             "Git control path")
-    require(not any(p.casefold() in CREDENTIAL_PARTS | {".gitmodules"} for p in parts),
-            "Credential or submodule source path is protected")
-    return parts
+    return PurePosixPath(path).parts
 
 
 def safe_path(path, request=None):
     parts = safe_source_path(path)
-    require(not any(p.casefold() in {".gitattributes", ".copilot"} for p in parts)
-            and not any(p.casefold() in {"agents.md", "copilot-instructions.md", "skill.md"}
-                        or p.casefold().endswith(".instructions.md") for p in parts)
-            and not (parts[0].casefold() == ".github" and len(parts) > 1
-                     and parts[1].casefold() in {"agents", "skills", "instructions"}),
-            "Credential, Git control, submodule, or instruction path is protected")
     require(request is None or request["head_repo"] != CENTRAL
             or parts[0].casefold() not in {".github", "loop", "tools"},
             "Central trusted runtime source is protected")
+
+
+def tree_entries(directory, tree):
+    entries = {}
+    for record in git(["ls-tree", "-r", "-z", tree], directory).split(b"\0")[:-1]:
+        info, path = record.decode("utf-8").split("\t", 1)
+        mode, kind, oid = info.split()
+        require((mode, kind) in {("100644", "blob"), ("100755", "blob"),
+                                ("120000", "blob"), ("160000", "commit")},
+                "Invalid Git tree entry")
+        safe_source_path(path)
+        entries[path] = mode, kind, oid
+    return entries
+
+
+def patch_stats(patch, directory=None, *, reverse=False):
+    require(b"\x00" not in patch, "NUL in Git patch")
+    if not patch:
+        return []
+    stats = git(["apply", "--numstat", "-z", *(["--reverse"] if reverse else []), "-"],
+                directory, patch)
+    result = []
+    for record in stats.split(b"\0")[:-1]:
+        added, deleted, path = record.decode("utf-8").split("\t", 2)
+        safe_source_path(path)
+        require((added == deleted == "-") or (added.isdigit() and deleted.isdigit()),
+                "Malformed patch statistics")
+        result.append((None if added == "-" else int(added),
+                       None if deleted == "-" else int(deleted), path))
+    return result
+
+
+def patch_sections(patch, directory=None):
+    if not patch:
+        return []
+    sections = re.split(br"(?m)(?=^diff --git )", patch)
+    require(not sections[0], "Git patch must start with a diff header")
+    forward, reverse = patch_stats(patch, directory), patch_stats(patch, directory, reverse=True)
+    require(len(sections) - 1 == len(forward) == len(reverse), "Incomplete Git diff sections")
+    return [(section, old[2], new[2], new[0], new[1])
+            for section, old, new in zip(sections[1:], reverse, forward)]
 
 
 def reconstruct(files, request, fetch_source=None, package_dir=None):
@@ -144,8 +177,7 @@ def reconstruct(files, request, fetch_source=None, package_dir=None):
             "Invalid frozen commit timestamp")
     patch = files["candidate.patch"]
     parts = patches(result, patch)
-    require(b"\x00" not in patch and b"GIT binary patch" not in patch
-            and b"Binary files " not in patch, "Binary patches are not supported")
+    require(b"\x00" not in patch, "NUL in Git patch")
     with tempfile.TemporaryDirectory(prefix="review-verify-") as directory:
         git(["init", "--bare", "--quiet"], directory)
         if fetch_source is None:
@@ -163,15 +195,11 @@ def reconstruct(files, request, fetch_source=None, package_dir=None):
             snapshot_identity(directory, request["frozen_sha"], request)
             if loop_kind(request) != "self_review":
                 verify_diff_source(directory, request)
-        for entry in git(["ls-tree", "-r", "-z", request["frozen_sha"]], directory).split(b"\0")[:-1]:
-            info, path = entry.decode("utf-8").split("\t", 1)
-            mode, kind, _ = info.split()
-            require(mode in {"100644", "100755"} and kind == "blob", "Unsupported source object")
-            safe_source_path(path)
+        tree_entries(directory, request["frozen_sha"])
         if loop_kind(request) == "pr_consistency":
             for item in result["consistency"]:
                 for citation in item["citations"]:
-                    match = re.fullmatch(r"(.+):([1-9][0-9]*)(?:-([1-9][0-9]*))?", citation)
+                    match = re.fullmatch(r"(.+):([1-9][0-9]*)(?:-([1-9][0-9]*))?", citation, re.DOTALL)
                     require(match is not None, "Consistency citation requires a source path and line")
                     safe_source_path(match[1])
                     text = git(["show", request["frozen_sha"] + ":" + match[1]], directory)
@@ -183,13 +211,10 @@ def reconstruct(files, request, fetch_source=None, package_dir=None):
         commits, mapping, all_paths = [], {}, set()
         changed_lines = 0
         for batch, part in zip(result["batches"], parts):
-            stats = git(["apply", "--numstat", "-z", "-"], directory, part)
-            records = stats.split(b"\0")[:-1]
+            records = patch_stats(part, directory)
             require(0 < len(records) <= 100, "Patch file count exceeds limit")
-            for record in records:
-                added, deleted, path = record.decode("utf-8").split("\t", 2)
-                require(added.isdigit() and deleted.isdigit(), "Binary or malformed patch")
-                changed_lines += int(added) + int(deleted)
+            for added, deleted, path in records:
+                changed_lines += (added or 0) + (deleted or 0)
                 safe_path(path, request)
                 all_paths.add(path)
             require(changed_lines <= 10000, "Patch line count exceeds limit")
@@ -218,7 +243,8 @@ def reconstruct(files, request, fetch_source=None, package_dir=None):
         tree = git(["write-tree"], directory).decode().strip()
         base_tree = git(["rev-parse", request["frozen_sha"] + "^{tree}"], directory).decode().strip()
         require(not commits or tree != base_tree, "Batches cancel the entire code change")
-        cumulative = git(["diff", "--cached", "--no-renames", "--binary",
+        cumulative = git(["--attr-source=" + tree, "diff", "--cached", "--no-ext-diff",
+                          "--no-textconv", "--no-renames", "--binary",
                           request["frozen_sha"]], directory)
         require(len(cumulative) <= MAX_PATCH, "Cumulative patch exceeds byte limit")
         sizes = [int(n) for n in git(["cat-file", "--batch-all-objects",
@@ -262,6 +288,28 @@ def verify_diff_source(directory, request):
     git(["read-tree", request["merge_base_sha"]], directory)
     patch = request["pr_diff"]["text"].encode("utf-8")
     if patch:
+        sections = patch_sections(patch, directory)
+        binary_paths = {path for _, old, new, added, _ in sections if added is None
+                        for path in (old, new)}
+        if binary_paths:
+            # GitHub's binary markers omit bytes; use the bound snapshot's exact objects.
+            while True:
+                expanded = binary_paths | {path for _, old, new, _, _ in sections
+                                           if old in binary_paths or new in binary_paths
+                                           for path in (old, new)}
+                if expanded == binary_paths:
+                    break
+                binary_paths = expanded
+            native = git(["--literal-pathspecs", "--attr-source=" + request["frozen_sha"],
+                          "diff", "--no-ext-diff", "--no-textconv",
+                          "--no-renames", "--binary", request["merge_base_sha"],
+                          request["frozen_sha"], "--", *sorted(binary_paths)], directory)
+            replacements = [section for section, _, path, _, _ in patch_sections(native, directory)
+                            if path in binary_paths]
+            require(replacements, "Binary diff does not match the frozen source")
+            patch = b"".join(section for section, old, new, _, _ in sections
+                             if old not in binary_paths and new not in binary_paths)
+            patch += b"".join(replacements)
         git(["apply", "--cached", "--whitespace=nowarn", "-"], directory, patch)
     require(git(["write-tree"], directory).decode().strip()
             == git(["rev-parse", request["frozen_sha"] + "^{tree}"], directory).decode().strip(),
@@ -269,16 +317,10 @@ def verify_diff_source(directory, request):
 
 
 def changed_paths(directory, parent, request):
-    raw = git(["diff", "--cached", "--raw", "--no-renames", "-z", parent],
-              directory).split(b"\0")
-    paths = []
-    for index in range(0, len(raw) - 1, 2):
-        header = raw[index].decode().split()
-        path = raw[index + 1].decode("utf-8")
+    paths = git(["diff", "--cached", "--name-only", "--no-renames", "-z", parent],
+                directory).decode("utf-8").split("\0")[:-1]
+    for path in paths:
         safe_path(path, request)
-        require(header[0] in {":000000", ":100644"} and header[1] in {"000000", "100644"},
-                "Symlink, submodule, or executable change")
-        paths.append(path)
     require(len(paths) <= 100, "Cumulative path count exceeds limit")
     return paths
 

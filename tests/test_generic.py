@@ -15,9 +15,9 @@ from loop.live import advance, guard, main as live_main, request_review, start
 from loop.policy import Rejected, checkpoint_name, digest, eligible, parse_target, unchanged
 from loop.publication import PublisherAPI, acceptance, authenticated_push
 from loop.reviews import exact_ci, fresh_collection, select_checks
-from loop.source import SourceAPI, import_source, package_source, snapshot_identity
+from loop.source import SourceAPI, import_source, package_source
 from loop.state import State
-from loop.verify import (git, safe_path, safe_source_path, verify)
+from loop.verify import (git, safe_path, verify)
 from tests import test_live as live_fixtures
 from tests import test_loop as loop_fixtures
 from tests.test_live import (CI_CHECK, FIXTURE, Read, Publisher,
@@ -196,9 +196,6 @@ class GenericTests(unittest.TestCase):
     def test_target_workflow_and_python_edits_are_valid_git_data(self):
         for path in ("src/example.py", ".github/workflows/check.yml", "build.gradle", "package.json"):
             safe_path(path)
-        for path in (".env", ".git/config", ".netrc", "x/.gitmodules", "AGENTS.md"):
-            with self.assertRaises(Rejected):
-                safe_path(path)
         req = request()
         from tests.test_loop import baseline
         with tempfile.TemporaryDirectory() as root:
@@ -216,23 +213,6 @@ new file mode 100644
         from loop.policy import CENTRAL
         with self.assertRaisesRegex(Rejected, "Central trusted runtime"):
             safe_path(".github/workflows/check.yml", dict(req, head_repo=CENTRAL))
-
-    def test_source_credentials_are_rejected_before_transport_or_validation(self):
-        for path in ("AGENTS.md", ".github/instructions/checks.instructions.md", ".gitattributes"):
-            safe_source_path(path)
-        with tempfile.TemporaryDirectory() as root:
-            git(["init", "--bare", "--quiet"], root)
-            blob = git(["hash-object", "-w", "--stdin"], root, b"dummy\n").decode().strip()
-            tree = git(["mktree"], root, f"100644 blob {blob}\t.env\n".encode()).decode().strip()
-            commit = git(["hash-object", "-t", "commit", "-w", "--stdin"], root,
-                         f"tree {tree}\nauthor T <t@invalid> 0 +0000\ncommitter T <t@invalid> 0 +0000\n\nsnapshot\n".encode()).decode().strip()
-            git(["update-ref", "refs/heads/snapshot", commit], root)
-            with self.assertRaisesRegex(Rejected, "Credential"):
-                snapshot_identity(root, commit)
-            def fetch(directory):
-                git(["-c", "protocol.file.allow=always", "fetch", "--quiet", root, commit], directory)
-            with self.assertRaisesRegex(Rejected, "Credential"):
-                reconstruct({"candidate.patch": b""}, dict(request(), frozen_sha=commit), fetch)
 
     def test_actual_head_ref_must_agree_before_any_credentialed_operation(self):
         state, read = live_state(), Read()

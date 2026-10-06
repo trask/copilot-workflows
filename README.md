@@ -147,9 +147,9 @@ Workers run on hosted Ubuntu 24.04 with pinned AWF and its available tools. Not 
 
 Public Git retrieval is unauthenticated. Private source requires an explicitly configured `REVIEW_LOOP_SOURCE_READ_TOKEN` with actual target/head read access. Trusted Git-only acquisition creates a bounded shallow snapshot artifact; workers and verifiers receive that bundle, never the credential. Every self-review pass uses this transport, including public PRs, with both complete frozen head and merge-base trees. API file-list or diff truncation cannot reduce the review scope. No App is created or registered.
 
-Snapshots and publisher reconstruction are bounded to 16 MiB of Git objects, 4 MiB per object and regular files only. Self-review also limits the combined expanded head and merge-base trees to 16 MiB. Unsupported source structure or size fails explicitly, never as a partial review.
+Snapshots and publisher reconstruction are bounded to 16 MiB of Git objects and 4 MiB per object. Source preserves regular/executable files, symlinks and submodule pointers without following links or fetching submodule repositories in trusted jobs. Self-review also limits the combined expanded head and merge-base trees to 16 MiB. Missing source or exceeded limits fail explicitly, never as a partial review.
 
-Target YAML and workflow fixes are allowed. Git control/credential paths, instruction edits, traversal, binary patches, executable changes, symlinks and submodules remain protected. Central trusted runtime source has separate protections. GitHub enforces the selected publisher's actual workflow-file permissions; YAML is not rejected for being non-Java.
+Repository configuration and instruction files, binary files, executable files, symlinks and submodule pointers are valid source and edits. UTF-8 filenames, including Git-quoted names, have no ASCII-only or 240-character policy limit. Paths must remain relative without traversal, NUL or `.git` metadata components. Target instructions remain untrusted task input, and actual secrets must never enter candidate artifacts. Central trusted runtime source has separate protections. GitHub enforces the selected publisher's actual workflow-file permissions.
 
 ## Reviews, CI and state
 
@@ -182,7 +182,7 @@ python tools/test_docker.py tests.test_generic
 python tools/test_docker.py
 ```
 
-The first image build needs network; warm runs reuse it. Python 3.12 and Git can also run `python -m unittest discover -q` directly on Linux.
+The first image build needs network; warm runs reuse it. Python 3.12 and Git 2.43 or newer can also run `python -m unittest discover -q` directly on Linux.
 
 The canvas has dependency-free Node tests:
 

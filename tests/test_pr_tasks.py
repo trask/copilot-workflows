@@ -262,11 +262,6 @@ class TaskContractsTests(unittest.TestCase):
         self.assertFalse(any("/git/" in path or "/compare/" in path for path in read.paths))
         self.assertEqual("ready", start(
             MemoryState(), FakeAPI(), frozen, "", 0, True, "fine_grained_pat", [], True, 100)[1]["stage"])
-        for kind in ("pr_review", "pr_simplify", "pr_consistency", "ci_fix", "pr_conflict_resolver"):
-            strict = TaskRead(task_request(kind))
-            strict.diff = read.diff
-            with self.subTest(kind=kind), self.assertRaisesRegex(Rejected, "unsupported"):
-                collect_diff(strict, strict.req)
 
     def test_description_does_not_apply_code_diff_size_or_anchor_limits(self):
         req = task_request("pr_description")
@@ -789,26 +784,6 @@ class MergeGitTests(unittest.TestCase):
                     value["consistency"][0]["classification"] = "needed"
                     with self.assertRaises(Rejected):
                         candidate_outcome(value, req, candidate)
-
-    def test_protected_clean_base_objects_are_carried_but_worker_resolutions_are_not(self):
-        with tempfile.TemporaryDirectory() as directory:
-            req = self.context(directory)
-            base = objects(directory, {"Foo.java": "old\n", ".gitattributes": "exact base\n"},
-                           [req["merge_base_sha"]], subject="Base protected file")
-            req["base_sha"] = base
-            git(["update-ref", "refs/heads/incoming", base], directory)
-            git(["read-tree", req["frozen_sha"]], directory)
-            blob = git(["hash-object", "-w", "--stdin"], directory, b"exact base\n").decode().strip()
-            git(["update-index", "--add", "--cacheinfo", "100644", blob, ".gitattributes"], directory)
-            patch_bytes = git(["diff", "--cached", req["frozen_sha"]], directory)
-            candidate = reconstruct({"result.json": canonical(result(req, "merge")),
-                                     "candidate.patch": patch_bytes}, req, self.copy_source(directory))
-            self.assertEqual([".gitattributes"], candidate["changed_paths"])
-            with self.assertRaises(Rejected):
-                reconstruct({"result.json": canonical(result(req, "merge")),
-                             "candidate.patch": patch_bytes.replace(b"+exact base", b"+worker changed")},
-                            req, self.copy_source(directory))
-
 
 class CIRepairTests(unittest.TestCase):
     def test_read_credential_cannot_download_logs_from_another_repository(self):

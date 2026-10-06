@@ -17,7 +17,7 @@ from loop.api import API
 from loop.policy import (AUTHOR_ID, BOT_IDENTITY_PATH, CENTRAL, DEFAULTS, REPO, Rejected, canonical,
                          check_target, diff_scope, digest, exact, iso, loop_kind, public_request,
                          require, staged_source)
-from loop.verify import git as object_git, parse_json, safe_source_path
+from loop.verify import git as object_git, parse_json, tree_entries
 
 MAX_SOURCE = 16 * 1024 * 1024
 
@@ -128,23 +128,21 @@ def snapshot_identity(directory, sha, request=None):
     require(0 < count <= 256 if conflict else count == len(commits),
             "Source snapshot history is incomplete or exceeds limits")
     objects = git(["cat-file", "--batch-all-objects",
-                   "--batch-check=%(objecttype) %(objectsize)"], directory).decode().splitlines()
+                   "--batch-check=%(objectname) %(objecttype) %(objectsize)"], directory).decode().splitlines()
     require(len(objects) <= 5000, "Source Git object count exceeds limit")
-    sizes = [int(item.split()[1]) for item in objects]
+    object_sizes = {item.split()[0]: int(item.split()[2]) for item in objects}
+    sizes = list(object_sizes.values())
     require(all(size <= 4 * 1024 * 1024 for size in sizes) and sum(sizes) <= MAX_SOURCE,
             "Source Git object sizes exceed limit")
     total = 0
     for ref in refs:
-        entries = git(["ls-tree", "-r", "-z", ref], directory).split(b"\0")[:-1]
-        require(0 < len(entries) <= 100000, "Source exceeds file limit")
-        for entry in entries:
-            info, path = entry.decode("utf-8").split("\t", 1)
-            mode, kind, oid = info.split()
-            require(mode in {"100644", "100755"} and kind == "blob", "Unsupported source object")
-            safe_source_path(path)
-            size = int(git(["cat-file", "-s", oid], directory))
-            require(size <= 4 * 1024 * 1024, "Source blob exceeds limit")
-            total += size
+        entries = tree_entries(directory, ref)
+        require(len(entries) <= 100000, "Source exceeds file limit")
+        for _, kind, oid in entries.values():
+            if kind == "commit":
+                continue
+            require(oid in object_sizes, "Source snapshot is missing a blob")
+            total += object_sizes[oid]
     require(total <= MAX_SOURCE, "Source snapshot exceeds expanded limit")
     git(["fsck", "--strict", "--no-reflogs"], directory)
     return git(["rev-parse", "snapshot^{tree}"], directory).decode().strip(), count
