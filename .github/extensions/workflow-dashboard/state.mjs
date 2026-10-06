@@ -3,6 +3,7 @@ import { CENTRAL, GitHubError } from "./github.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const PREFIX = `repos/${CENTRAL}/git/`;
+const REF = "refs/heads/review-loop-state";
 
 function check(condition, message) {
     if (!condition) throw new GitHubError(message);
@@ -16,9 +17,26 @@ export class Checkpoints {
     }
 
     async load() {
-        const ref = (await this.github.get(PREFIX + "ref/heads/review-loop-state")).data;
+        const listing = await this.github.get(PREFIX + "matching-refs/heads/review-loop-state");
+        const refs = listing.data;
+        check(Array.isArray(refs) && refs.length <= 1000 &&
+            !listing.link?.split(",").some((item) => /;\s*rel="next"/.test(item)),
+        "State branch listing is incomplete or oversized.");
+        check(refs.every((item) => typeof item?.ref === "string" && item.ref.startsWith(REF)),
+            "State branch listing contains invalid references.");
+        const matches = refs.filter((item) => item.ref === REF);
+        check(matches.length <= 1, "State branch listing contains duplicate references.");
+        if (!matches.length) {
+            this.blobs.clear();
+            if (this.snapshot?.sha !== null) {
+                this.snapshot = { sha: null, entries: new Map(), current: [], history: null };
+            }
+            return this.snapshot;
+        }
+        const ref = matches[0];
         const sha = ref.object?.sha;
-        check(typeof sha === "string" && SHA.test(sha), "State branch has an invalid commit identity.");
+        check(ref.object?.type === "commit" && typeof sha === "string" && SHA.test(sha),
+            "State branch has an invalid commit identity.");
         if (this.snapshot?.sha === sha) return this.snapshot;
         const commit = (await this.github.get(PREFIX + "commits/" + sha)).data;
         check(commit.sha === sha && SHA.test(commit.tree?.sha), "State commit does not match its pinned identity.");

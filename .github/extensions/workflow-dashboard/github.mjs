@@ -58,7 +58,7 @@ function safePath(path) {
                 (!query.has("page") || /^[1-9][0-9]{0,2}$/.test(query.get("page")))) return path;
         }
     }
-    if (!new RegExp(`^repos/${CENTRAL}/(?:git/(?:ref/heads/review-loop-state|commits/[0-9a-f]{40}|trees/[0-9a-f]{40}|blobs/[0-9a-f]{40})|actions/runs)(?:\\?[^\\r\\n]*)?$`).test(path)) {
+    if (!new RegExp(`^repos/${CENTRAL}/(?:git/(?:(?:ref|matching-refs)/heads/review-loop-state|commits/[0-9a-f]{40}|trees/[0-9a-f]{40}|blobs/[0-9a-f]{40})|actions/runs)(?:\\?[^\\r\\n]*)?$`).test(path)) {
         throw new GitHubError("Dashboard GitHub read is outside the allowed repository endpoints.");
     }
     return path;

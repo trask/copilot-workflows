@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import { runInNewContext } from "node:vm";
 import { GitHub, CENTRAL, MAX_RESPONSE } from "./github.mjs";
 import { PrDashboard, decodeDashboard } from "./pr-dashboard.mjs";
+import { Checkpoints } from "./state.mjs";
 import { REPOSITORIES, DEFAULT_REPOSITORY, LAUNCH_OWNER_ID, dashboardPath, targetParts } from "./repositories.mjs";
 import { actionBlock, filterPulls, normalizePull, taskChoices, taskPresentation, TASK_EFFECTS } from "./prs.mjs";
 import { startServer } from "./server.mjs";
@@ -159,6 +160,30 @@ test("partial data keeps the complete live list and disables only unsafe task co
     assert.equal(result.workflowReady, false);
     assert.match(result.prs[0].actionBlock, /Refresh/);
     assert.match(result.error, /Central/);
+});
+
+test("fresh checkpoint absence enables Run and is rechecked before the first dispatch", async () => {
+    const c = controller();
+    const get = c.github.get;
+    const path = `repos/${CENTRAL}/git/matching-refs/heads/review-loop-state`;
+    c.github.get = async (requested) => {
+        if (requested !== path) return get(requested);
+        c.calls.push(requested);
+        return { data: [] };
+    };
+    c.canvas.checkpoints = new Checkpoints(c.github);
+    const result = await c.canvas.refresh();
+    assert.equal(result.error, null);
+    assert.equal(result.snapshot, null);
+    assert.equal(result.workflowReady, true);
+    assert.equal(result.prs[0].actionBlock, null);
+    assert.equal(result.prs[0].canCancel, false);
+    await c.canvas.launch({ target, kind: "self_review", confirmed: true });
+    assert.equal(c.calls.filter((call) => call === path).length, 2);
+    assert.equal(c.calls.filter((call) => typeof call === "object").length, 1);
+    const refreshed = await c.canvas.refresh();
+    assert.equal(refreshed.prs[0].dispatch.status, "accepted");
+    assert.match(refreshed.prs[0].actionBlock, /accepted/);
 });
 
 test("failed live reads retain an explicitly stale snapshot and repository changes never leak old rows", async () => {

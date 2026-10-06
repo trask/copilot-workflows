@@ -83,10 +83,10 @@ test("304 requires an actual HTTP response and reuses data without charging prim
     const github = new GitHub(async (args) => {
         calls.push(args);
         return calls.length === 1
-            ? response({ object: { sha: sha("a") } }, { Etag: '"one"', ...rateHeaders() })
+            ? response([], { Etag: '"one"', ...rateHeaders() })
             : response(null, { ...rateHeaders() }, 304);
     });
-    const path = `repos/${CENTRAL}/git/ref/heads/review-loop-state`;
+    const path = `repos/${CENTRAL}/git/matching-refs/heads/review-loop-state`;
     assert.deepEqual((await github.get(path)).data, (await github.get(path)).data);
     assert.ok(calls[1].includes('If-None-Match: "one"'));
     assert.equal(github.requests, 2);
@@ -94,6 +94,8 @@ test("304 requires an actual HTTP response and reuses data without charging prim
     assert.equal(github.cacheHits, 1);
     assert.ok(calls.every((args) => args.includes("GET") && args.includes("--hostname")));
     assert.throws(() => github.get("repos/example/project/issues"), /outside/);
+    assert.throws(() => github.get(path + "-other"), /outside/);
+    assert.throws(() => github.get(`repos/${CENTRAL}/git/matching-refs/heads`), /outside/);
     assert.throws(() => parseResponse('error: token=do-not-echo'), /no HTTP/);
     const emptyCache = new GitHub(async () => response(null, {}, 304));
     await assert.rejects(emptyCache.get(path), /without cached/);
@@ -236,7 +238,9 @@ function stateClient() {
     archive.entry.path = `request-${requestId("b")}.json`;
     const calls = [];
     const objects = new Map([
-        ["ref/heads/review-loop-state", { object: { sha: sha("c") } }],
+        ["matching-refs/heads/review-loop-state", [{
+            ref: "refs/heads/review-loop-state", object: { type: "commit", sha: sha("c") },
+        }]],
         ["commits/" + sha("c"), { sha: sha("c"), tree: { sha: sha("d") } }],
         ["trees/" + sha("d"), { sha: sha("d"), truncated: false, tree: [current.entry, archive.entry] }],
         ["blobs/" + current.entry.sha, current.blob], ["blobs/" + archive.entry.sha, archive.blob],
@@ -265,10 +269,74 @@ test("state pins commit/tree/blob identities, defers archives, and caches immuta
     await store.history(snapshot);
     assert.equal(client.calls.length, 6);
     const nextCommit = sha("e");
-    client.objects.set("ref/heads/review-loop-state", { object: { sha: nextCommit } });
+    client.objects.set("matching-refs/heads/review-loop-state", [{
+        ref: "refs/heads/review-loop-state", object: { type: "commit", sha: nextCommit },
+    }]);
     client.objects.set("commits/" + nextCommit, { sha: nextCommit, tree: { sha: sha("d") } });
     await store.load();
     assert.equal(client.calls.filter((path) => path.startsWith("blobs/")).length, 2);
+});
+
+test("absent state is explicit empty history, detects initialization, and clears removed state", async () => {
+    const client = stateClient();
+    const refs = client.objects.get("matching-refs/heads/review-loop-state");
+    client.objects.set("matching-refs/heads/review-loop-state", []);
+    const store = new Checkpoints(client.github);
+    const empty = await store.load();
+    assert.equal(empty.sha, null);
+    assert.equal(empty.entries.size, 0);
+    assert.deepEqual(empty.current, []);
+    assert.deepEqual(await store.history(empty), []);
+    assert.equal(await store.load(), empty);
+    assert.deepEqual(client.calls, [
+        "matching-refs/heads/review-loop-state", "matching-refs/heads/review-loop-state",
+    ]);
+    client.objects.set("matching-refs/heads/review-loop-state", refs);
+    assert.equal((await store.load()).current.length, 1);
+    assert.equal(store.blobs.size, 1);
+    client.objects.set("matching-refs/heads/review-loop-state", []);
+    const cleared = await store.load();
+    assert.equal(cleared.sha, null);
+    assert.deepEqual(cleared.current, []);
+    assert.equal(cleared.entries.size, 0);
+    assert.equal(store.blobs.size, 0);
+    assert.deepEqual(await store.history(cleared), []);
+    client.objects.set("matching-refs/heads/review-loop-state", refs);
+    assert.equal((await store.load()).current.length, 1);
+    assert.equal(client.calls.filter((path) => path.startsWith("blobs/")).length, 2);
+});
+
+test("state requires the exact branch, not another matching prefix", async () => {
+    const client = stateClient();
+    client.objects.get("matching-refs/heads/review-loop-state")[0].ref += "-archive";
+    const snapshot = await new Checkpoints(client.github).load();
+    assert.equal(snapshot.sha, null);
+    assert.deepEqual(snapshot.current, []);
+    assert.deepEqual(client.calls, ["matching-refs/heads/review-loop-state"]);
+});
+
+test("state listing access failures never become an empty snapshot", async () => {
+    for (const status of [401, 403, 404, 500]) {
+        const store = new Checkpoints(new GitHub(async () => response({}, {}, status, 1)));
+        await assert.rejects(store.load(), new RegExp(`HTTP ${status}`));
+        assert.equal(store.snapshot, null);
+    }
+});
+
+test("state rejects malformed, duplicate, unpinned and incomplete reference listings", async () => {
+    const ref = { ref: "refs/heads/review-loop-state", object: { type: "commit", sha: sha("c") } };
+    for (const refs of [
+        null, {}, [null], [{ ...ref, ref: "refs/heads/main" }], [ref, ref],
+        [{ ...ref, object: { type: "tree", sha: sha("c") } }],
+        [{ ...ref, object: { type: "commit", sha: "invalid" } }],
+        Array.from({ length: 1001 }, () => ref),
+    ]) {
+        await assert.rejects(new Checkpoints(new GitHub(async () => response(refs))).load(), /State/);
+    }
+    const incomplete = new GitHub(async () => response([], {
+        Link: `<https://api.github.com/repos/${CENTRAL}/git/matching-refs/heads/review-loop-state?page=2>; rel="next"`,
+    }));
+    await assert.rejects(new Checkpoints(incomplete).load(), /incomplete/);
 });
 
 test("state rejects truncation, oversized trees, unsafe paths, and corrupted objects", async () => {
@@ -451,6 +519,26 @@ function fakeDashboard(now = () => 2000000) {
     };
     return dashboard;
 }
+
+test("a fresh state branch absence loads Actions and failed launches without inventing history", async () => {
+    const github = new GitHub(async (args) => {
+        const path = args.at(-1);
+        if (path.endsWith("/git/matching-refs/heads/review-loop-state")) return response([]);
+        if (path === FAILED_COORDINATORS) return response({ total_count: 1, workflow_runs: [failedCoordinator()] });
+        assert.match(path, /\/actions\/runs\?status=/);
+        return response({ total_count: 0, workflow_runs: [] });
+    });
+    const dashboard = new Dashboard(github, () => 2000000);
+    const state = await dashboard.refresh();
+    assert.equal(state.error, null);
+    assert.equal(state.loadedAt, 2000000);
+    assert.equal(state.snapshot, null);
+    assert.equal(state.auto, true);
+    assert.deepEqual(state.phases, []);
+    assert.deepEqual(state.actions, []);
+    assert.equal(state.failures[0].id, failedCoordinator().id);
+    await assert.rejects(dashboard.history(target), /not in/);
+});
 
 test("refresh coalesces, keeps stale data on failure, and respects manual/low-capacity mode", async () => {
     const dashboard = fakeDashboard();
