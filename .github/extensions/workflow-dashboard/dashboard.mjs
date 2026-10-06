@@ -59,7 +59,7 @@ export class Dashboard {
         if (enabled && this.github.rate && this.github.rate.remaining < this.github.rate.limit * 0.1 &&
             this.github.rate.reset > this.now()) throw new Error("Automatic refresh is paused while less than 10 percent of GitHub capacity remains.");
         this.auto = enabled;
-        this.pauseReason = enabled ? null : "Manual refresh selected.";
+        this.pauseReason = null;
         this.schedule();
         return this.state();
     }
@@ -119,8 +119,8 @@ export class Dashboard {
             if (rate && rate.remaining < rate.limit * 0.1) this.pauseReason = "Less than 10 percent of GitHub capacity remains.";
             else if (warm && this.value.latency > 10000) this.pauseReason = "Refresh took more than 10 seconds.";
             else if (warm && this.value.cost > 12) this.pauseReason = "Refresh used more than 12 primary-counted GitHub requests.";
-            else if (!this.auto) this.pauseReason = "Manual refresh selected.";
-            if (this.pauseReason && this.pauseReason !== "Manual refresh selected.") this.auto = false;
+            else this.pauseReason = null;
+            if (this.pauseReason) this.auto = false;
         } catch (error) {
             this.value = { ...this.value, loading: false, error: error.message,
                 latency: this.now() - started, cost: this.github.counted - counted };

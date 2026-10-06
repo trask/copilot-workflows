@@ -791,6 +791,27 @@ test("refresh coalesces, keeps stale data on failure, and respects manual/low-ca
     assert.equal((await initialFailure.refresh()).loadedAt, null);
 });
 
+test("manual refresh stays off without a notice, but read failures still report an automatic pause", async () => {
+    const dashboard = fakeDashboard();
+    const manual = dashboard.setAuto(false);
+    assert.equal(manual.auto, false);
+    assert.equal(manual.pauseReason, null);
+    dashboard.heartbeat("manual-viewer", true);
+    assert.equal(dashboard.timer, null);
+    const refreshed = await dashboard.refresh();
+    assert.equal(refreshed.auto, false);
+    assert.equal(refreshed.pauseReason, null);
+    assert.equal(dashboard.timer, null);
+    dashboard.github.pages = async () => { throw new Error("Manual read unavailable"); };
+    const failed = await dashboard.refresh();
+    assert.equal(failed.auto, false);
+    assert.match(failed.error, /Manual read unavailable/);
+    assert.equal(failed.pauseReason, "Automatic refresh paused after a failed GitHub read.");
+    const recovered = dashboard.setAuto(false);
+    assert.equal(recovered.pauseReason, null);
+    assert.match(recovered.error, /Manual read unavailable/);
+});
+
 test("parallel refresh reads settle before releasing refresh coalescing after a failure", async () => {
     const dashboard = fakeDashboard();
     let release;
@@ -1448,6 +1469,7 @@ test("renderer omits routine header metadata but retains read errors and refresh
     };
     const { renderer, nodes, html } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
     assert.doesNotMatch(html, /Open PRs, dashboard routing|id="freshness"|id="cost"/);
+    assert.doesNotMatch(html, /Reviewer routing comes|Run and Cancel dispatch immediately/);
     assert.equal(nodes.has("freshness"), false);
     assert.equal(nodes.has("cost"), false);
     assert.equal(nodes.get("error").hidden, true);
