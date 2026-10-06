@@ -30,6 +30,9 @@ code { font: 12px var(--font-mono, Consolas, monospace); overflow-wrap: anywhere
 .ownership { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .pr-card { border: 1px solid var(--border-color-default, #d1d9e0); border-radius: 8px; padding: 14px; margin-bottom: 12px; overflow-wrap: anywhere; }
 .pr-card > .row > a { font-weight: var(--font-weight-semibold, 600); }
+.pr-heading { align-items: baseline; }
+.pr-heading > a { flex: 1; min-width: 0; }
+.pr-author { margin-left: auto; font-size: 12px; }
 .pr-card .card { margin-top: 14px; margin-bottom: 0; }
 .task-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(144px, 1fr)); gap: 8px; margin-top: 16px; }
 .task-grid[data-mine="false"] { grid-template-columns: repeat(auto-fit, minmax(144px, 180px)); }
