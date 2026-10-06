@@ -41,6 +41,17 @@ The workflow configuration matches the pinned setup action's supported LTS selec
 **Review effort:** Balanced\u0020\u0020
 **Findings:** None
 """
+HUMAN_REVIEW = """<!-- ccr-overview-v2 -->
+
+## Copilot review overview
+
+### \U0001f535 Needs a closer look
+
+Cross-run force-cancellation depends on delivery coverage and changing job state, requiring final human validation.
+
+**Review effort:** Balanced\u0020\u0020
+**Findings:** None
+"""
 RESOLVED = """
 <details>
 <summary><strong>Resolved since last review (1)</strong></summary>
@@ -1232,6 +1243,33 @@ class ReviewTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertEqual("unknown", body_classification(body))
 
+    def test_no_finding_human_review_uses_the_same_bounded_clean_grammar(self):
+        self.assertEqual("clean", body_classification(HUMAN_REVIEW))
+        two = RESOLVED.replace("(1)", "(2)").replace(
+            "#discussion_r20", "#discussion_r4175448985").replace(
+            "\n</details>",
+            "\n- [Cross-PR publisher recovery is blocked by scope check]"
+            "(#discussion_r4171051071)\n</details>")
+        self.assertEqual("clean", body_classification(HUMAN_REVIEW + two))
+        for body in (HUMAN_REVIEW.replace("Needs a closer look", "Looks good"),
+                     HUMAN_REVIEW.replace("\U0001f535", "\U0001f7e2"),
+                     HUMAN_REVIEW.replace("Balanced", "Unknown"),
+                     HUMAN_REVIEW.replace("**Findings:** None", "**Findings:** 0"),
+                     HUMAN_REVIEW + "<details>Unknown finding</details>",
+                     HUMAN_REVIEW + "\nUnexpected finding",
+                     HUMAN_REVIEW + "**Findings:** None",
+                     HUMAN_REVIEW + two.replace("(2)", "(1)"),
+                     HUMAN_REVIEW + two.replace("#discussion_r4171051071",
+                                                "#discussion_r4175448985")):
+            with self.subTest(body=body):
+                self.assertNotEqual("clean", body_classification(body))
+        for extra in (MISSED, "<details><strong>Open (1)</strong> bug</details>",
+                      "[Another finding](#discussion_r21)"):
+            with self.subTest(extra=extra):
+                self.assertEqual("findings", body_classification(HUMAN_REVIEW + extra))
+        self.assertEqual("findings", body_classification(HUMAN_REVIEW.replace(
+            "**Findings:** None", "**Findings:** 1") + two))
+
     def test_clean_review_accepts_only_a_complete_resolved_section(self):
         for resolved in (RESOLVED, RESOLVED + "\n", RESOLVED.replace(
                 RESOLVED.splitlines()[4].split(" [", 1)[0], "-")):
@@ -1297,19 +1335,54 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual("findings", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
 
     def test_watcher_finishes_resolved_clean_review_without_another_pipeline(self):
+        for body in (CLEAN, HUMAN_REVIEW):
+            with self.subTest(body=body):
+                state = live_state(stage="waiting_review")
+                state["review_request"] = {"recorded_at": 100, "baseline_review_ids": [12]}
+                read = Read()
+                read.resolved = True
+                read.reviews.append(review(id=13, body=body + RESOLVED, submitted_at=iso(200)))
+                store, name = stored(state)
+                publisher = Mock()
+                result = advance(store, name, state, FakeAPI(), read, publisher, 400)
+                self.assertEqual("clean", result["stage"])
+                self.assertEqual("fresh_review_and_exact_target_CI", result["reason"])
+                self.assertEqual(1, result["iteration"])
+                self.assertEqual("passed", result["ci"]["decision"])
+                self.assertEqual([], publisher.mock_calls)
+
+    def test_no_finding_human_review_still_requires_closed_verified_threads_and_passing_ci(self):
+        read, req = Read(), personal_request()
+        read.comments[0]["commit_id"] = REVISION
+        read.reviews.append(review(id=13, body=HUMAN_REVIEW + RESOLVED, submitted_at=iso(200)))
+        self.assertEqual("findings", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
+        read.resolved = True
+        self.assertEqual("clean", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
+        read.reviews[-1]["state"] = "CHANGES_REQUESTED"
+        self.assertEqual("findings", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
+        read.reviews[-1]["state"] = "COMMENTED"
+        read.comments[0]["user"] = {"id": AUTHOR_ID, "type": "User"}
+        self.assertEqual("unknown", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
+
         state = live_state(stage="waiting_review")
         state["review_request"] = {"recorded_at": 100, "baseline_review_ids": [12]}
-        read = Read()
-        read.resolved = True
-        read.reviews.append(review(id=13, body=CLEAN + RESOLVED, submitted_at=iso(200)))
-        store, name = stored(state)
-        publisher = Mock()
-        result = advance(store, name, state, FakeAPI(), read, publisher, 400)
-        self.assertEqual("clean", result["stage"])
-        self.assertEqual("fresh_review_and_exact_target_CI", result["reason"])
-        self.assertEqual(1, result["iteration"])
-        self.assertEqual("passed", result["ci"]["decision"])
-        self.assertEqual([], publisher.mock_calls)
+        for ci, expected in (("pending", "waiting_ci"), ("failed", "blocked"), ("missing", "blocked")):
+            read = Read()
+            read.resolved = True
+            read.reviews.append(review(id=13, body=HUMAN_REVIEW + RESOLVED, submitted_at=iso(200)))
+            if ci == "pending":
+                read.checks[0].update(status="in_progress", conclusion=None)
+            elif ci == "failed":
+                read.checks[0]["conclusion"] = "failure"
+            else:
+                read.checks = []
+            store, name = stored(state)
+            with self.subTest(ci=ci):
+                result = watch_review(store, name, state, read, 400)
+                self.assertEqual(expected, result["stage"])
+                self.assertEqual("clean", result["fresh_review"]["decision"])
+                self.assertEqual(ci, result["ci"]["decision"])
+                self.assertEqual(1, result["iteration"])
 
     def test_fresh_review_requires_submitted_exact_head_verified_bot_and_propagation(self):
         read = Read()

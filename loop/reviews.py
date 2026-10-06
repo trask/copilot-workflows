@@ -40,7 +40,8 @@ def _body_classification(body):
     if re.search(r"discussion_r[0-9]+|Previously missed|Open \([1-9]|New \([1-9]", body):
         return "findings", []
     clean = (r"<!-- ccr-overview-v2 -->\n\n## Copilot review overview\n\n"
-             r"### \U0001f7e2 Approval recommended\n\n[^\n<>#*]+\n\n"
+             r"### (?:\U0001f7e2 Approval recommended|\U0001f535 Needs a closer look)"
+             r"\n\n[^\n<>#*]+\n\n"
              r"\*\*Review effort:\*\* Balanced  \n\*\*Findings:\*\* None\n?")
     if counts == ["None"] and re.fullmatch(clean, body):
         return "clean", resolved_ids
