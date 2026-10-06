@@ -131,7 +131,7 @@ Expand a PR's saved workflow details for previous phases, worker iterations, pub
 
 The Recent coordinator failures section shows up to 20 failed dispatches across all repositories, including launches that failed before saving a task checkpoint. Run links remain available after the canvas restarts. Launch titles include the task and target; older unmatched runs require inspecting their logs. These failures do not replace saved PR status or unlock unconfirmed dispatches.
 
-Automatic refresh runs every 60 seconds while visible, with cached conditional requests and on-demand history. The canvas shows request counts, refresh time and remaining GitHub capacity. Failed data sources, slow or expensive steady-state refreshes, low capacity and API errors switch it to manual refresh. Individual stale or missing classifications show warnings without stopping refresh. See [dashboard troubleshooting](docs/setup.md#dashboard-troubleshooting).
+Automatic refresh runs every 60 seconds while visible, with cached conditional requests and on-demand history. Failed data sources, slow or expensive steady-state refreshes, low capacity and API errors switch it to manual refresh. Read errors and pause reasons remain visible without routine load timestamps, account details or request metrics. Individual stale or missing classifications show warnings without stopping refresh. See [dashboard troubleshooting](docs/setup.md#dashboard-troubleshooting).
 
 ## Worker checks and structural verification
 

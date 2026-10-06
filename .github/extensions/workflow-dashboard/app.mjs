@@ -100,10 +100,10 @@ function render() {
     $("auto").checked = state.auto;
     $("pause").hidden = !state.pauseReason;
     $("pause").textContent = state.pauseReason ?? "";
-    $("freshness").textContent = `PRs ${state.prError ? "stale, last loaded" : "loaded"} ${date(state.prLoadedAt)}. Workflow state ${state.error ? "stale, last loaded" : "loaded"} ${date(state.loadedAt)}.${state.viewer ? ` Signed in as ${state.viewer.login}.` : ""}`;
-    const rate = state.rate;
-    $("cost").textContent = `Last refresh: ${state.cost ?? 0} primary-counted reads. Session: ${state.metrics.requests} requests, ${state.metrics.cacheHits} unchanged cache hits.${state.metrics.readRetries ? ` Network read retries: ${state.metrics.readRetries}.` : ""} ${rate ? `${rate.remaining.toLocaleString()} / ${rate.limit.toLocaleString()} GitHub capacity left, resets ${date(rate.reset)}.` : ""} Refresh uses no model tokens.`;
-    error([state.prError, state.error].filter(Boolean).join(" "));
+    error([
+        state.prError ? `Open PRs are ${state.prLoadedAt ? "stale" : "unavailable"}. ${state.prError}` : null,
+        state.error ? `Workflow status is ${state.loadedAt ? "stale" : "unavailable"}. ${state.error}` : null,
+    ].filter(Boolean).join(" "));
     $("repo").replaceChildren();
     for (const repo of state.repositories) {
         const option = element("option", repo);

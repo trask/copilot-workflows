@@ -1441,9 +1441,31 @@ test("manual and background refreshes display busy status without replacing the 
     assert.equal(nodes.get("prs")["aria-busy"], "false");
 });
 
-test("renderer reports transport retry attempts in the session metrics", async () => {
-    const { nodes } = await rendererFixture(async () => ({ ok: true, json: async () => ({
-        ...rendererState(), metrics: { requests: 12, cacheHits: 10, readRetries: 1 },
-    }) }));
-    assert.match(nodes.get("cost").textContent, /Network read retries: 1\./);
+test("renderer omits routine header metadata but retains read errors and refresh pause notices", async () => {
+    const state = {
+        ...rendererState(), metrics: { requests: 46, cacheHits: 30, readRetries: 1 },
+        rate: { remaining: 14990, limit: 15000, reset: 2000000 },
+    };
+    const { renderer, nodes, html } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
+    assert.doesNotMatch(html, /Open PRs, dashboard routing|id="freshness"|id="cost"/);
+    assert.equal(nodes.has("freshness"), false);
+    assert.equal(nodes.has("cost"), false);
+    assert.equal(nodes.get("error").hidden, true);
+    assert.equal(nodes.get("pause").hidden, true);
+    Object.assign(state, {
+        prError: "PR read unavailable", error: "Workflow read unavailable",
+        pauseReason: "Automatic refresh paused for low GitHub capacity.", workflowReady: false,
+    });
+    for (const loaded of [true, false]) {
+        state.prLoadedAt = loaded ? 2000000 : null;
+        state.loadedAt = loaded ? 2000000 : null;
+        renderer.render();
+        assert.equal(nodes.get("error").hidden, false);
+        assert.equal(nodes.get("error").textContent,
+            `Open PRs are ${loaded ? "stale" : "unavailable"}. PR read unavailable Workflow status is ${loaded ? "stale" : "unavailable"}. Workflow read unavailable`);
+        assert.equal(nodes.get("pause").hidden, false);
+        assert.equal(nodes.get("pause").textContent, state.pauseReason);
+        assert.ok(nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid")
+            .children.every((button) => button.disabled));
+    }
 });
