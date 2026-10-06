@@ -81,9 +81,18 @@ export class Dashboard {
         const warm = this.value.loadedAt !== null;
         this.value.loading = true;
         try {
-            const failedRuns = await this.github.failedCoordinators();
-            this.value.failures = failedRuns.map((run) => failedActionSummary(run, []));
-            const snapshot = await this.checkpoints.load();
+            const reads = await Promise.allSettled([
+                this.github.failedCoordinators(),
+                this.checkpoints.load(),
+                ...ACTIVE_STATUSES.map((status) =>
+                    this.github.pages(`repos/${CENTRAL}/actions/runs?status=${status}`)),
+            ]);
+            if (reads[0].status === "fulfilled") {
+                this.value.failures = reads[0].value.map((run) => failedActionSummary(run, []));
+            }
+            const failure = reads.find((read) => read.status === "rejected");
+            if (failure) throw failure.reason;
+            const [failedRuns, snapshot, ...runPages] = reads.map((read) => read.value);
             const phases = [];
             const warnings = [];
             for (const record of snapshot.current) {
@@ -94,8 +103,7 @@ export class Dashboard {
                 }
             }
             const runs = new Map();
-            for (const status of ACTIVE_STATUSES) {
-                const items = await this.github.pages(`repos/${CENTRAL}/actions/runs?status=${status}`);
+            for (const items of runPages) {
                 for (const item of items) runs.set(item.id, item);
             }
             const actions = [...runs.values()].filter((run) => run.status !== "completed")

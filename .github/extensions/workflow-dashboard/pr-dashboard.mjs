@@ -97,14 +97,19 @@ export class PrDashboard extends Dashboard {
         const warm = this.prLoadedAt !== null;
         this.value.loading = true;
         try {
-            this.viewer = viewer((await this.github.get("user")).data);
-            const pulls = await this.github.pulls(this.repository);
-            let dashboard = null;
+            const [account, livePulls, reviewerDashboard] = await Promise.allSettled([
+                this.github.get("user").then((response) => viewer(response.data)),
+                this.github.pulls(this.repository),
+                this.github.get(dashboardPath(this.repository)).then((response) => decodeDashboard(response.data)),
+            ]);
+            if (account.status === "rejected") throw account.reason;
+            this.viewer = account.value;
+            if (livePulls.status === "rejected") throw livePulls.reason;
+            const pulls = livePulls.value;
+            const dashboard = reviewerDashboard.status === "fulfilled" ? reviewerDashboard.value : null;
             const warnings = [];
-            try {
-                dashboard = decodeDashboard((await this.github.get(dashboardPath(this.repository))).data);
-            } catch (error) {
-                warnings.push(`Reviewer dashboard unavailable: ${error.message}`);
+            if (reviewerDashboard.status === "rejected") {
+                warnings.push(`Reviewer dashboard unavailable: ${reviewerDashboard.reason.message}`);
             }
             const prs = pulls.map((pr) => normalizePull(pr, this.repository, dashboard, this.viewer));
             const incomplete = prs.filter((pr) => !["current", "draft"].includes(pr.dashboardStatus)).length;

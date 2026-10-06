@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { runInNewContext } from "node:vm";
-import { GitHub, CENTRAL, MAX_RESPONSE } from "./github.mjs";
+import { GitHub, CENTRAL, MAX_RESPONSE, FAILED_COORDINATORS } from "./github.mjs";
 import { PrDashboard, decodeDashboard } from "./pr-dashboard.mjs";
 import { Checkpoints } from "./state.mjs";
 import { REPOSITORIES, DEFAULT_REPOSITORY, LAUNCH_OWNER_ID, dashboardPath, targetParts } from "./repositories.mjs";
@@ -160,6 +160,65 @@ test("partial data keeps the complete live list and disables only unsafe task co
     assert.equal(result.workflowReady, false);
     assert.match(result.prs[0].actionBlock, /Refresh/);
     assert.match(result.error, /Central/);
+});
+
+test("viewer, PR and reviewer-dashboard reads start together and settle on a failed viewer read", async () => {
+    const c = controller();
+    const get = c.github.get;
+    const reads = [];
+    let release;
+    c.github.get = async (path) => {
+        reads.push(path);
+        if (path === "user") throw new Error("Viewer read unavailable");
+        return get(path);
+    };
+    c.github.pulls = () => {
+        reads.push("pulls");
+        return new Promise((resolve) => release = resolve);
+    };
+    const first = c.canvas.refresh();
+    let done = false;
+    first.then(() => done = true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(reads, ["user", "pulls", dashboardPath(repo)]);
+    assert.equal(done, false);
+    assert.equal(c.canvas.refresh(), first);
+    release([pull()]);
+    const result = await first;
+    assert.match(result.prError, /Viewer read unavailable/);
+    assert.equal(result.prLoadedAt, null);
+    assert.equal(result.workflowReady, false);
+    assert.deepEqual(result.prs, []);
+});
+
+test("a complete PR refresh uses three concurrent reads without adding GitHub requests", async () => {
+    let active = 0;
+    let maximum = 0;
+    const github = new GitHub(async (args) => {
+        maximum = Math.max(maximum, ++active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active--;
+        const path = args.at(-1);
+        let data;
+        if (path === "user") data = account;
+        else if (path === `repos/${repo}/pulls?state=open&per_page=100`) data = [pull()];
+        else if (path === dashboardPath(repo)) data = file(state());
+        else if (path === `repos/${CENTRAL}/git/matching-refs/heads/review-loop-state`) data = [];
+        else if (path === FAILED_COORDINATORS || path.startsWith(`repos/${CENTRAL}/actions/runs?status=`)) {
+            data = { total_count: 0, workflow_runs: [] };
+        } else throw new Error(`Unexpected refresh read ${path}`);
+        return { code: 0, stdout: `HTTP/2.0 200 OK\r\n\r\n${JSON.stringify(data)}` };
+    });
+    const canvas = new PrDashboard(github, () => 2000000);
+    const result = await canvas.refresh();
+    assert.equal(maximum, 3);
+    assert.equal(github.requests, 10);
+    assert.equal(result.cost, 10);
+    assert.equal(result.error, null);
+    assert.equal(result.prError, null);
+    assert.equal(result.workflowReady, true);
+    assert.equal(result.prs.length, 1);
+    assert.equal(result.prs[0].actionBlock, null);
 });
 
 test("fresh checkpoint absence enables Run and is rechecked before the first dispatch", async () => {

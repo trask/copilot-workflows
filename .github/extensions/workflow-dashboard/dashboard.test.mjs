@@ -101,7 +101,7 @@ test("304 requires an actual HTTP response and reuses data without charging prim
     await assert.rejects(emptyCache.get(path), /without cached/);
 });
 
-test("GitHub calls are serial, and missing CLI output never becomes empty data", async () => {
+test("GitHub reads run concurrently with a maximum of three, and missing output stays an error", async () => {
     let active = 0;
     let maximum = 0;
     const github = new GitHub(async () => {
@@ -110,11 +110,92 @@ test("GitHub calls are serial, and missing CLI output never becomes empty data",
         active--;
         return response({ workflow_runs: [], total_count: 0 });
     });
-    await Promise.all(["queued", "pending", "waiting"].map((status) =>
+    await Promise.all(["queued", "pending", "waiting", "requested", "in_progress"].map((status) =>
         github.get(`repos/${CENTRAL}/actions/runs?status=${status}`)));
-    assert.equal(maximum, 1);
+    assert.equal(maximum, 3);
+    assert.equal(github.activeReads, 0);
+    assert.equal(github.readQueue.length, 0);
+    assert.equal(github.inFlightReads.size, 0);
     const bad = new GitHub(async () => ({ code: 1, stdout: "" }));
     await assert.rejects(bad.get(`repos/${CENTRAL}/actions/runs`), /no HTTP/);
+});
+
+test("concurrent reads of one path share an in-flight response, not a later refresh", async () => {
+    let release;
+    const calls = [];
+    const github = new GitHub(async (args) => {
+        calls.push(args);
+        if (calls.length === 1) return new Promise((resolve) => release = resolve);
+        return response(null, rateHeaders(), 304);
+    });
+    const path = `repos/${CENTRAL}/git/matching-refs/heads/review-loop-state`;
+    const first = github.get(path);
+    const second = github.get(path);
+    assert.equal(first, second);
+    release(response([], { Etag: '"shared"', ...rateHeaders() }));
+    assert.equal(await first, await second);
+    assert.equal(calls.length, 1);
+    await github.get(path);
+    assert.equal(calls.length, 2);
+    assert.ok(calls[1].includes('If-None-Match: "shared"'));
+    assert.equal(github.counted, 1);
+    assert.equal(github.cacheHits, 1);
+});
+
+test("a rejected shared read releases its slot and permits a fresh read", async () => {
+    let release;
+    let calls = 0;
+    const github = new GitHub(async () => ++calls === 1
+        ? new Promise((resolve) => release = resolve) : response([]));
+    const path = `repos/${CENTRAL}/git/matching-refs/heads/review-loop-state`;
+    const first = github.get(path);
+    const second = github.get(path);
+    const settled = Promise.allSettled([first, second]);
+    release(response({}, {}, 500, 1));
+    assert.ok((await settled).every((read) => read.status === "rejected"));
+    assert.deepEqual((await github.get(path)).data, []);
+    assert.equal(calls, 2);
+    assert.equal(github.activeReads, 0);
+    assert.equal(github.inFlightReads.size, 0);
+});
+
+test("out-of-order rate headers cannot increase capacity or replace a newer reset window", () => {
+    const github = new GitHub();
+    github.recordRate(parseResponse(response({}, rateHeaders(100)).stdout).headers, 200);
+    github.recordRate(parseResponse(response({}, rateHeaders(4990)).stdout).headers, 200);
+    assert.equal(github.rate.remaining, 100);
+    github.recordRate(parseResponse(response({}, {
+        ...rateHeaders(), "X-Ratelimit-Reset": "10000",
+    }).stdout).headers, 200);
+    assert.equal(github.rate.remaining, 5000);
+    assert.equal(github.rate.reset, 10000000);
+    github.recordRate(parseResponse(response({}, rateHeaders(0)).stdout).headers, 200);
+    assert.equal(github.rate.remaining, 5000);
+    assert.equal(github.rate.reset, 10000000);
+});
+
+test("rate limits stop queued CLI reads and preserve the longest concurrent backoff", async () => {
+    const releases = [];
+    const github = new GitHub(async () => new Promise((resolve) => releases.push(resolve)), () => 1000000);
+    const pending = ["queued", "pending", "waiting", "requested", "in_progress"].map((status) =>
+        github.get(`repos/${CENTRAL}/actions/runs?status=${status}`));
+    const settled = Promise.allSettled(pending);
+    assert.equal(releases.length, 3);
+    releases[0](response({}, { "Retry-After": "120" }, 429, 1));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(github.retryAt, 1120000);
+    assert.equal(releases.length, 3);
+    releases[1](response({}, { "Retry-After": "30" }, 429, 1));
+    releases[2](response({ total_count: 0, workflow_runs: [] }, rateHeaders()));
+    const results = await settled;
+    assert.deepEqual(results.map((read) => read.status), [
+        "rejected", "rejected", "fulfilled", "rejected", "rejected",
+    ]);
+    assert.match(results[3].reason.message, /paused/);
+    assert.equal(github.retryAt, 1120000);
+    assert.equal(github.requests, 3);
+    assert.equal(github.activeReads, 0);
+    assert.equal(github.readQueue.length, 0);
 });
 
 test("pagination follows trusted links and rejects malformed, oversized, or hostile listings", async () => {
@@ -559,6 +640,41 @@ test("refresh coalesces, keeps stale data on failure, and respects manual/low-ca
     const initialFailure = fakeDashboard();
     initialFailure.checkpoints.load = async () => { throw new Error("state missing"); };
     assert.equal((await initialFailure.refresh()).loadedAt, null);
+});
+
+test("parallel refresh reads settle before releasing refresh coalescing after a failure", async () => {
+    const dashboard = fakeDashboard();
+    let release;
+    const waiting = new Promise((resolve) => release = resolve);
+    dashboard.github.failedCoordinators = async () => { throw new Error("Failure listing unavailable"); };
+    dashboard.github.pages = async () => { await waiting; return []; };
+    const first = dashboard.refresh();
+    let done = false;
+    first.then(() => done = true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(done, false);
+    assert.equal(dashboard.refresh(), first);
+    release();
+    const state = await first;
+    assert.match(state.error, /Failure listing unavailable/);
+    assert.equal(state.loadedAt, null);
+    assert.equal(state.loading, false);
+    assert.equal(state.auto, false);
+});
+
+test("a late failure listing remains visible when another parallel state read fails", async () => {
+    const dashboard = fakeDashboard();
+    let release;
+    dashboard.github.failedCoordinators = () => new Promise((resolve) => release = resolve);
+    dashboard.checkpoints.load = async () => { throw new Error("State unavailable"); };
+    const pending = dashboard.refresh();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(dashboard.refresh(), pending);
+    release([failedCoordinator()]);
+    const state = await pending;
+    assert.match(state.error, /State unavailable/);
+    assert.equal(state.failures[0].id, failedCoordinator().id);
+    assert.equal(state.loadedAt, null);
 });
 
 test("failed launches survive a fresh controller without inventing a checkpoint or PR association", async () => {

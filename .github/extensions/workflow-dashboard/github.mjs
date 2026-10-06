@@ -4,6 +4,7 @@ import { KIND_LABELS } from "./kinds.mjs";
 
 export const CENTRAL = "trask/copilot-workflows";
 export const MAX_RESPONSE = 16 * 1024 * 1024;
+const READ_CONCURRENCY = 3;
 export const ACTIVE_STATUSES = ["queued", "in_progress", "waiting", "pending", "requested"];
 export const FAILED_COORDINATORS = `repos/${CENTRAL}/actions/workflows/coordinator.yml/runs?event=workflow_dispatch&status=failure&per_page=20`;
 
@@ -69,7 +70,9 @@ export class GitHub {
         this.run = run;
         this.now = now;
         this.cache = new Map();
-        this.queue = Promise.resolve();
+        this.readQueue = [];
+        this.inFlightReads = new Map();
+        this.activeReads = 0;
         this.requests = 0;
         this.counted = 0;
         this.cacheHits = 0;
@@ -79,25 +82,45 @@ export class GitHub {
 
     get(path) {
         safePath(path);
-        const task = this.queue.then(() => this.read(path));
-        this.queue = task.catch(() => {});
+        if (this.inFlightReads.has(path)) return this.inFlightReads.get(path);
+        const task = new Promise((resolve, reject) => {
+            this.readQueue.push({ path, resolve, reject });
+        }).finally(() => this.inFlightReads.delete(path));
+        this.inFlightReads.set(path, task);
+        this.drainReads();
         return task;
+    }
+
+    drainReads() {
+        while (this.activeReads < READ_CONCURRENCY && this.readQueue.length) {
+            const { path, resolve, reject } = this.readQueue.shift();
+            this.activeReads++;
+            this.read(path).then(resolve, reject).finally(() => {
+                this.activeReads--;
+                this.drainReads();
+            });
+        }
     }
 
     recordRate(headers, status) {
         if (headers["x-ratelimit-limit"] && headers["x-ratelimit-remaining"] && headers["x-ratelimit-reset"]) {
-            this.rate = {
+            const rate = {
                 limit: Number(headers["x-ratelimit-limit"]),
                 remaining: Number(headers["x-ratelimit-remaining"]),
                 reset: Number(headers["x-ratelimit-reset"]) * 1000,
             };
+            if (!this.rate || rate.reset > this.rate.reset) this.rate = rate;
+            else if (rate.reset === this.rate.reset) {
+                this.rate = { ...rate, remaining: Math.min(this.rate.remaining, rate.remaining) };
+            }
         }
         const limited = status === 429 || status === 403 &&
             (headers["retry-after"] || this.rate?.remaining === 0);
         if (limited) {
-            this.retryAt = headers["retry-after"]
+            const retryAt = headers["retry-after"]
                 ? this.now() + Number(headers["retry-after"]) * 1000
                 : this.rate?.remaining === 0 ? this.rate.reset : this.now() + 60000;
+            this.retryAt = Math.max(this.retryAt ?? 0, retryAt);
         }
         return Boolean(limited);
     }
