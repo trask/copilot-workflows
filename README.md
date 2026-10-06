@@ -123,7 +123,7 @@ My PRs shows all eight task buttons. Not my PRs shows only PR Reviewer, includin
 
 Busy indicators rotate normally and become static hourglasses when reduced motion is enabled.
 
-PR headings show the linked title with the author's username on the right, without routing, dashboard-status or draft pills. PR cards show workflow status in the task buttons rather than separate head, waiting-time, CI, conflict, reviewer or current-task rows. Buttons, including Cancel when available, share one row on wide panels and wrap on narrower panels. Expand Saved run details for head, timing, worker and coordinator links, and iteration evidence.
+PR headings show the linked title with the author's username on the right in Not my PRs. My PRs omits the author. Neither view shows routing, dashboard-status or draft pills. PR cards show workflow status in the task buttons rather than separate head, waiting-time, CI, conflict, reviewer or current-task rows. Buttons, including Cancel when available, share one row on wide panels and wrap on narrower panels. Expand Saved run details for head, timing, worker and coordinator links, and iteration evidence.
 
 The canvas uses existing `gh` authentication for target PR/dashboard reads, central Contents/Actions reads and central Actions write access for dispatch. It never reads Actions secrets or uses local credentials to publish to targets. Only the workflow's configured personal owner can launch tasks; the central publisher still requires its separately configured credentials. No local agent sessions or model calls run in the canvas. Refreshes and iteration summaries use no model tokens.
 

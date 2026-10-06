@@ -1214,7 +1214,7 @@ test("every task dispatches directly on click and locks duplicate and competing 
     }
 });
 
-test("PR headings show the linked title and author without routing, dashboard or draft pills in either view", async () => {
+test("PR headings show the author only in Not my PRs without routing, dashboard or draft pills", async () => {
     const state = rendererState();
     const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
     for (const mine of [true, false]) {
@@ -1230,14 +1230,16 @@ test("PR headings show the linked title and author without routing, dashboard or
                 renderer.render();
                 const card = nodes.get("prs").firstChild;
                 const heading = card.firstChild;
-                assert.equal(heading.children.length, 2);
+                assert.equal(heading.children.length, mine ? 1 : 2);
                 assert.equal(heading.className, "row pr-heading");
                 assert.equal(heading.firstChild.tag, "a");
                 assert.equal(heading.firstChild.textContent, "#12 PR in example/project");
                 assert.equal(heading.firstChild.href, state.prs[0].url);
-                assert.equal(heading.children[1].tag, "span");
-                assert.equal(heading.children[1].className, "pr-author muted");
-                assert.equal(heading.children[1].textContent, mine ? "@trask" : "@renovate[bot]");
+                if (!mine) {
+                    assert.equal(heading.children[1].tag, "span");
+                    assert.equal(heading.children[1].className, "pr-author muted");
+                    assert.equal(heading.children[1].textContent, "@renovate[bot]");
+                }
                 assert.equal(card.children.find((node) => node.className === "task-grid").children.length,
                     mine ? 8 : 1);
             }

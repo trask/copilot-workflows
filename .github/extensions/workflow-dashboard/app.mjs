@@ -202,8 +202,8 @@ function taskIcon(kind) {
 function prCard(pr) {
     const card = element("article", null, "pr-card");
     const heading = element("div", null, "row pr-heading");
-    heading.append(link(`#${pr.number} ${pr.title}`, pr.url),
-        element("span", `@${pr.author}`, "pr-author muted"));
+    heading.append(link(`#${pr.number} ${pr.title}`, pr.url));
+    if (!pr.mine) heading.append(element("span", `@${pr.author}`, "pr-author muted"));
     card.append(heading);
     const tasks = element("div", null, "task-grid");
     tasks.setAttribute("data-mine", String(pr.mine));
