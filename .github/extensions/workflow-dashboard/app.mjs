@@ -205,17 +205,7 @@ function prCard(pr) {
     heading.append(link(`#${pr.number} ${pr.title}`, pr.url),
         element("span", pr.routeLabel, "badge"));
     if (pr.draft) heading.append(element("span", "Draft", "badge"));
-    card.append(heading, element("p", `${pr.author}${pr.mine ? " · yours" : ""} · Head ${short(pr.sha)}${pr.waitingSince ? ` · Waiting since ${date(pr.waitingSince)}` : ""}`, "muted"));
-    if (pr.dashboardStatus === "current") {
-        card.append(element("p", `CI: ${pr.ciFailing ?? "unknown"} failing, ${pr.ciPending ?? "unknown"} pending. Conflicts: ${pr.conflicts}.`, "muted"));
-        if (pr.reviewers.length) card.append(element("p", `Reviewers: ${pr.reviewers.map((item) =>
-            `${item.login}${item.approved ? " (approved)" : item.feedback ? " (feedback)" : ""}`).join(", ")}`, "muted"));
-    }
-    if (pr.phase) {
-        card.append(element("p", `${KIND_LABELS[pr.phase.kind] ?? pr.phase.kind}: ${words(pr.phase.stage)}${pr.phase.reason ? ` · ${pr.phase.reason}` : ""}`));
-        if (pr.phase.runUrl) card.append(link("Current worker", pr.phase.runUrl));
-        if (pr.phase.coordinatorUrl) card.append(link("Coordinator", pr.phase.coordinatorUrl));
-    } else card.append(element("p", state.workflowReady ? "No saved central task for this PR." : "Central task status is unavailable.", "muted"));
+    card.append(heading);
     const tasks = element("div", null, "task-grid");
     tasks.setAttribute("role", "group");
     tasks.setAttribute("aria-label", `Workflow tasks for ${pr.target}`);
@@ -241,17 +231,16 @@ function prCard(pr) {
         button.addEventListener("click", () => taskAction(pr, kind));
         tasks.append(button);
     }
-    card.append(tasks);
-    const controls = element("div", null, "controls");
     const cancel = element("button", "Cancel current task");
+    cancel.type = "button";
+    cancel.className = "task-button";
     cancel.disabled = !pr.canCancel || Boolean(pr.dispatch);
     cancel.title = "Cancel the current task. This does not undo published changes or guarantee termination of an already authorized effect.";
     const message = element("p", pr.dispatch?.message ?? "", "notice");
     message.hidden = !pr.dispatch;
     cancel.addEventListener("click", () => taskAction(pr, pr.phase?.kind, true));
-    if (pr.canCancel || pr.dispatch?.operation === "cancel") controls.append(cancel);
-    controls.append(link("Central Actions", "https://github.com/trask/copilot-workflows/actions/workflows/coordinator.yml"));
-    card.append(controls);
+    if (pr.canCancel || pr.dispatch?.operation === "cancel") tasks.append(cancel);
+    card.append(tasks);
     if (pr.actionBlock && !pr.dispatch) card.append(element("p", pr.actionBlock, "muted"));
     card.append(message);
     if (pr.phase) card.append(phaseCard(pr.phase));
@@ -260,8 +249,10 @@ function prCard(pr) {
 
 function phaseCard(phase) {
     const card = element("details", null, "card");
-    const summary = element("summary");
-    summary.append(element("span", phase.target, "title"), document.createTextNode(" "),
+    const summary = element("summary", "Saved run details");
+    const detail = element("div", null, "detail");
+    const heading = element("div", null, "row");
+    heading.append(element("span", phase.target, "title"),
         element("span", words(phase.stage), `badge ${phase.category}`));
     const meta = element("div", null, "meta");
     for (const value of [
@@ -269,11 +260,10 @@ function phaseCard(phase) {
         `Head ${short(phase.sha)}`, `Started ${date(phase.started)}`,
         `Deadline ${date(phase.deadline)}${phase.deadline < Date.now() && ["active", "waiting"].includes(phase.category) ? " · overdue" : ""}`,
     ]) meta.append(element("span", value));
-    summary.append(meta);
-    if (phase.reason) summary.append(element("p", `${words(phase.reason)} (${phase.reason})`, "reason"));
-    if (phase.historical) summary.append(element("p", "Historical protocol evidence. Not an active generic phase.", "reason"));
-    if (phase.unknownStage) summary.append(element("p", "Unknown controller stage. Inspect its recorded evidence.", "reason"));
-    const detail = element("div", null, "detail");
+    detail.append(heading, meta);
+    if (phase.reason) detail.append(element("p", `${words(phase.reason)} (${phase.reason})`, "reason"));
+    if (phase.historical) detail.append(element("p", "Historical protocol evidence. Not an active generic phase.", "reason"));
+    if (phase.unknownStage) detail.append(element("p", "Unknown controller stage. Inspect its recorded evidence.", "reason"));
     const links = element("div", null, "links");
     links.append(link("Pull request", phase.url), link(`Head ${short(phase.sha)}`, phase.commitUrl));
     if (phase.runUrl) links.append(link("Current worker", phase.runUrl));

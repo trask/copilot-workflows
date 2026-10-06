@@ -123,6 +123,8 @@ Each PR has an icon button for every task. Eligible tasks can run; unavailable t
 
 Busy indicators rotate normally and become static hourglasses when reduced motion is enabled.
 
+PR cards show workflow status in the task buttons rather than separate author, head, waiting-time, CI, conflict, reviewer or current-task rows. Buttons, including Cancel when available, share one row on wide panels and wrap on narrower panels. Expand Saved run details for head, timing, worker and coordinator links, and iteration evidence.
+
 The canvas uses existing `gh` authentication for target PR/dashboard reads, central Contents/Actions reads and central Actions write access for dispatch. It never reads Actions secrets or uses local credentials to publish to targets. Only the workflow's configured personal owner can launch tasks; the central publisher still requires its separately configured credentials. No local agent sessions or model calls run in the canvas. Refreshes and iteration summaries use no model tokens.
 
 Expand a PR's saved workflow details for previous phases, worker iterations, published commits, finding/thread links, merge parents, CI diagnoses/reruns, description proposals, pending reviews and consistency reports. Completion, publication and recorded CI stay separate. Missing evidence stays explicit, legacy records stay historical, and unpublished candidates are not shown as published fixes. No-change iterations have no new commit.

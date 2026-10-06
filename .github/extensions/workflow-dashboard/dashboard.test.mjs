@@ -1116,6 +1116,36 @@ test("every task dispatches directly on click and locks duplicate and competing 
     }
 });
 
+test("PR cards put status in task buttons and keep saved run metadata inside expandable details", async () => {
+    const state = rendererState();
+    Object.assign(state.prs[0], {
+        waitingSince: 2000000, dashboardStatus: "current",
+        ciFailing: 0, ciPending: 0, conflicts: "no", reviewers: [{ login: "laurit", approved: true }],
+    });
+    const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
+    const row = () => nodes.get("prs").firstChild;
+    const texts = () => row().children.filter((node) => node.tag === "p").map((node) => node.textContent).join("\n");
+    assert.doesNotMatch(texts(), /yours|Head |Waiting since|CI:|Conflicts:|Reviewers:|No saved central task/);
+    assert.equal(row().children.find((node) => node.className === "controls"), undefined);
+    assert.equal(row().children.find((node) => node.tag === "details"), undefined);
+    const phase = phaseSummary(record(fixture({ stage: "clean" })));
+    state.prs[0].phase = phase;
+    renderer.render();
+    assert.doesNotMatch(texts(), /yours|Head |Waiting since|CI:|Conflicts:|Reviewers:|Copilot review: clean/);
+    const buttons = row().children.find((node) => node.className === "task-grid").children;
+    assert.equal(buttons.length, Object.keys(KIND_LABELS).length);
+    assert.ok(buttons.some((node) => node["aria-label"] === "Copilot review: Clean"));
+    const details = row().children.find((node) => node.tag === "details");
+    assert.equal(details.firstChild.textContent, "Saved run details");
+    assert.equal(details.open, undefined);
+    assert.ok(details.children[1].children.find((node) => node.className === "meta")
+        .children.some((node) => node.textContent === `Head ${sha("a").slice(0, 8)}`));
+    const all = [];
+    const visit = (node) => { all.push(node); for (const child of node.children ?? []) visit(child); };
+    visit(row());
+    assert.equal(all.some((node) => node.textContent === "Central Actions"), false);
+});
+
 test("Cancel dispatches the exact displayed identity directly and stays locked pending confirmation", async () => {
     const state = rendererState();
     const phase = phaseSummary(record(fixture()));
@@ -1133,7 +1163,7 @@ test("Cancel dispatches the exact displayed identity directly and stays locked p
         return { ok: true, json: async () => state };
     });
     const cancelButton = () => nodes.get("prs").firstChild.children.find((node) =>
-        node.className === "controls").children.find((node) => node.textContent === "Cancel current task");
+        node.className === "task-grid").children.find((node) => node.textContent === "Cancel current task");
     const button = cancelButton();
     assert.equal(button.disabled, false);
     assert.match(button.title, /does not undo published changes/);

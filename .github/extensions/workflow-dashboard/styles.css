@@ -1,7 +1,7 @@
 :root { color-scheme: light dark; }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--background-color-default, #fff); color: var(--text-color-default, #1f2328); font: var(--text-body-medium, 14px)/var(--leading-body-medium, 20px) var(--font-sans, system-ui, sans-serif); }
-header, main { padding: 20px; max-width: 1200px; margin: auto; }
+header, main { padding: 20px; max-width: 1440px; margin: auto; }
 header { padding-bottom: 0; }
 h1 { margin: 6px 0; font-size: var(--text-title-large, 26px); line-height: var(--leading-title-large, 32px); }
 h2 { font-size: 18px; margin: 24px 0 12px; }
@@ -30,9 +30,7 @@ code { font: 12px var(--font-mono, Consolas, monospace); overflow-wrap: anywhere
 .pr-card { border: 1px solid var(--border-color-default, #d1d9e0); border-radius: 8px; padding: 14px; margin-bottom: 12px; overflow-wrap: anywhere; }
 .pr-card > .row > a { font-weight: var(--font-weight-semibold, 600); }
 .pr-card .card { margin-top: 14px; margin-bottom: 0; }
-.pr-card .controls { gap: 8px; }
-.pr-card > a { margin-right: 10px; }
-.task-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 8px; margin-top: 16px; }
+.task-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(144px, 1fr)); gap: 8px; margin-top: 16px; }
 .task-button { display: flex; align-items: center; gap: 10px; min-height: 62px; padding: 10px; text-align: left; }
 .task-button:disabled { cursor: default; opacity: .6; }
 .task-icon { width: 28px; height: 28px; flex: none; color: var(--text-color-muted, #59636e); }
