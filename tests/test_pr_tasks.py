@@ -793,6 +793,7 @@ class MergeGitTests(unittest.TestCase):
                     for line in range(1300))
                 for file in range(101)}
             incoming["Foo.java"] = "base\n"
+            incoming["Inherited.txt"] = "Incoming content \t\n\n"
             req["base_sha"] = objects(directory, incoming, [req["merge_base_sha"]])
             git(["update-ref", "refs/heads/incoming", req["base_sha"]], directory)
             resolved = dict(incoming, **{"Foo.java": "head\nbase\n"})
@@ -830,6 +831,8 @@ class MergeGitTests(unittest.TestCase):
             self.assertEqual(candidate["commit"] + " " + req["frozen_sha"] + " " + req["base_sha"],
                              git(["rev-list", "--parents", "-1", candidate["commit"]], imported).decode().strip())
             self.assertEqual(b"head\nbase\n", git(["show", candidate["commit"] + ":Foo.java"], imported))
+            self.assertEqual(b"Incoming content \t\n\n",
+                             git(["show", candidate["commit"] + ":Inherited.txt"], imported))
 
     def test_bound_history_source_package_roundtrip(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as root, \

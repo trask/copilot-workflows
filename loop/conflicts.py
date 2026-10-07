@@ -73,7 +73,7 @@ def reconstruct_merge(files, request, fetch_source, package_dir):
         git(["read-tree", request["frozen_sha"]], directory)
         if patch:
             require(result["outcome"] == "merge", "No-change merge contains a patch")
-            git(["apply", "--cached", "--whitespace=error-all", "-"], directory, patch)
+            git(["apply", "--cached", "--whitespace=nowarn", "-"], directory, patch)
         tree = git(["write-tree"], directory).decode().strip()
         paths, commits = [], []
         commit = request["frozen_sha"]
