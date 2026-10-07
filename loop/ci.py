@@ -127,6 +127,17 @@ def collect(api, request, required):
               "runs": [{"id": r["id"], "attempt": r["run_attempt"], "status": r["status"],
                         "conclusion": r["conclusion"]} for r, _ in executions.values()],
               "decision": decision}
+    metadata = len(canonical(dict(result, failures=[dict(f, evidence="") for f in failures])))
+    require(metadata <= 120000, "CI diagnosis metadata exceeds limit")
+    labels = sum(5 for f in failures if f["evidence"]
+                 and not f["availability"].endswith("_tail"))
+    remaining = min(60000, 120000 - metadata - labels)
+    evidence_limit = max(2, remaining // max(1, len(failures)))
+    for failure in failures:
+        bounded = excerpt(failure["evidence"], evidence_limit)
+        if bounded != failure["evidence"] and not failure["availability"].endswith("_tail"):
+            failure["availability"] += "_tail"
+        failure["evidence"] = bounded
     require(len(canonical(result)) <= 120000, "Combined CI diagnosis evidence exceeds limit")
     check_target(api, request)
     return result

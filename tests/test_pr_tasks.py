@@ -874,22 +874,22 @@ class CIRepairTests(unittest.TestCase):
         read.log = (b"verbose output\n" * 10000
                     + ("unicode \u00e9 and escaped \x1b output\n" * 3000).encode()
                     + b"FAILURE: exact root cause\n")
-        for offset in range(1, 10):
+        for offset in range(1, 60):
             read.checks.append(dict(
-                read.checks[0], id=333 + offset, name=f"check-{offset}",
+                read.checks[0], id=333 + offset, name=f"check-{offset}-" + "x" * 250,
                 details_url=f"https://github.com/{FIXTURE}/actions/runs/200/job/{333 + offset}"))
             read.jobs.append(dict(
-                read.jobs[0], id=333 + offset, name=f"check-{offset}",
+                read.jobs[0], id=333 + offset, name=read.checks[-1]["name"],
                 check_run_url=f"https://api.github.com/repos/{FIXTURE}/check-runs/{333 + offset}"))
         read.signed_download = Mock(wraps=read.signed_download)
         evidence = collect(read, req, [c["name"] for c in read.checks])
         self.assertEqual("failed", evidence["decision"])
-        self.assertEqual(10, len(evidence["failures"]))
+        self.assertEqual(60, len(evidence["failures"]))
         self.assertLessEqual(len(canonical(evidence)), 120000)
         self.assertTrue(all(f["availability"] == "job_log_tail"
                             and f["evidence"].endswith("FAILURE: exact root cause\n")
                             for f in evidence["failures"]))
-        self.assertTrue(all(c.args[1] == 6000 and c.kwargs["tail"]
+        self.assertTrue(all(c.args[1] == 1000 and c.kwargs["tail"]
                             for c in read.signed_download.call_args_list))
         req["ci_evidence"] = evidence
         self.assertEqual(evidence, same_attempts(read, req))
