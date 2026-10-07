@@ -205,7 +205,10 @@ export function taskPresentation(pr, kind, workflowReady, actions = []) {
     });
     if (dispatch) {
         if (dispatch.status === "uncertain") return result("Dispatch uncertain", "attention");
-        if (dispatch.operation === "cancel") return result("Cancelling", "active", true);
+        if (dispatch.status === "finished") return result(
+            dispatch.conclusion === "failure" ? "Launch failed" : dispatch.conclusion === "cancelled" ? "Launch cancelled" : "Launch finished", "attention");
+        if (dispatch.status === "failed") return result("Cancellation failed", "attention");
+        if (["cancel", "cancel_dispatch"].includes(dispatch.operation)) return result("Cancelling", "active", true);
         return result(dispatch.status === "accepted" ? "Starting" : "Dispatching", "active", true);
     }
     if (!workflowReady) return result("Status unavailable", "unknown");

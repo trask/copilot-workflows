@@ -122,7 +122,7 @@ function safePath(path) {
                 (!query.has("page") || /^[1-9][0-9]{0,2}$/.test(query.get("page")))) return path;
         }
     }
-    if (!new RegExp(`^repos/${CENTRAL}/(?:git/(?:(?:ref|matching-refs)/heads/review-loop-state|commits/[0-9a-f]{40}|trees/[0-9a-f]{40}|blobs/[0-9a-f]{40})|actions/runs)(?:\\?[^\\r\\n]*)?$`).test(path)) {
+    if (!new RegExp(`^repos/${CENTRAL}/(?:git/(?:(?:ref|matching-refs)/heads/review-loop-state|commits/[0-9a-f]{40}|trees/[0-9a-f]{40}|blobs/[0-9a-f]{40})|actions/runs(?:/[1-9][0-9]*)?)(?:\\?[^\\r\\n]*)?$`).test(path)) {
         throw new GitHubError("Dashboard GitHub read is outside the allowed repository endpoints.");
     }
     return path;
@@ -445,27 +445,51 @@ export class GitHub {
         } else throw new GitHubError("Only launch and cancel dispatches are supported.");
         const target = /^(.*)#([1-9][0-9]{0,7})$/.exec(inputs.target);
         if (!target || !REPOSITORIES.includes(target[1])) throw new GitHubError("Dispatch target is outside the configured repositories.");
+        const response = await this.write(`repos/${CENTRAL}/actions/workflows/coordinator.yml/dispatches`,
+            ["-f", "ref=main", ...Object.entries(inputs).flatMap(([key, value]) => ["-f", `inputs[${key}]=${value}`])],
+            200, "Coordinator dispatch");
+        let receipt;
+        try {
+            receipt = JSON.parse(response.body);
+            if (!Number.isSafeInteger(receipt.workflow_run_id) || receipt.workflow_run_id < 1 ||
+                receipt.run_url !== `https://api.github.com/repos/${CENTRAL}/actions/runs/${receipt.workflow_run_id}` ||
+                receipt.html_url !== `https://github.com/${CENTRAL}/actions/runs/${receipt.workflow_run_id}`) {
+                throw new Error("Invalid dispatch receipt.");
+            }
+        } catch {
+            const error = new GitHubError("Dispatch was not bound to an exact run. Inspect central Actions and refresh; do not blindly retry.");
+            error.uncertain = true;
+            throw error;
+        }
+        return { status: "accepted", runId: receipt.workflow_run_id, runUrl: receipt.html_url };
+    }
+
+    cancelRun(runId) {
+        if (!Number.isSafeInteger(runId) || runId < 1) return Promise.reject(new GitHubError("Use an exact launch run ID."));
+        return this.write(`repos/${CENTRAL}/actions/runs/${runId}/cancel`, [], 202, "Launch cancellation");
+    }
+
+    async write(path, fields, successStatus, label) {
         if (this.retryAt > this.now()) throw new GitHubError("Wait for the GitHub rate-limit reset before dispatching.", this.retryAt);
         this.requests++;
         this.counted++;
         let result;
         try {
             result = await this.run(["api", "--hostname", "github.com", "--method", "POST", "--include",
-                "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28",
-                `repos/${CENTRAL}/actions/workflows/coordinator.yml/dispatches`,
-                "-f", "ref=main", ...Object.entries(inputs).flatMap(([key, value]) => ["-f", `inputs[${key}]=${value}`])]);
+                "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2026-03-10",
+                path, ...fields]);
             const response = parseResponse(result.stdout);
             this.recordRate(response.headers, response.status);
             if (response.status >= 400 && response.status < 500 && result.code !== 0) {
-                const rejected = new GitHubError(`Coordinator dispatch was rejected with HTTP ${response.status}. Check gh authentication and central Actions write access.`, this.retryAt);
+                const rejected = new GitHubError(`${label} was rejected with HTTP ${response.status}. Check gh authentication and central Actions write access.`, this.retryAt);
                 rejected.rejected = true;
                 throw rejected;
             }
-            if (response.status !== 204 || result.code !== 0) throw new Error("Unconfirmed dispatch response.");
-            return { status: "accepted" };
+            if (response.status !== successStatus || result.code !== 0) throw new Error("Unconfirmed write response.");
+            return response;
         } catch (error) {
             if (error.rejected) throw error;
-            const uncertain = new GitHubError("Dispatch outcome is uncertain. Inspect central Actions and refresh; do not blindly retry.");
+            const uncertain = new GitHubError(`${label} outcome is uncertain. Inspect central Actions and refresh; do not blindly retry.`);
             uncertain.uncertain = true;
             throw uncertain;
         }

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { Dashboard } from "./dashboard.mjs";
-import { GitHub } from "./github.mjs";
+import { CENTRAL, GitHub } from "./github.mjs";
 import { KIND_LABELS } from "./kinds.mjs";
 import { phaseSummary, TERMINAL } from "./model.mjs";
 import { DEFAULT_REPOSITORY, REPOSITORIES, configuredRepository, dashboardPath, targetParts, LAUNCH_OWNER_ID } from "./repositories.mjs";
@@ -36,6 +36,17 @@ function viewer(data) {
     return { id: data.id, login: data.login };
 }
 
+function checkedLaunch(run, target, entry, account) {
+    if (run?.id !== entry.runId || run.run_attempt !== 1 || run.event !== "workflow_dispatch" ||
+        run.path !== ".github/workflows/coordinator.yml" || run.head_branch !== "main" ||
+        run.repository?.full_name !== CENTRAL || run.actor?.id !== account?.id ||
+        run.display_title !== `Review loop launch ${entry.kind} ${target}` ||
+        !["queued", "in_progress", "waiting", "pending", "requested", "completed"].includes(run.status)) {
+        throw new Error("The recorded launch run does not match this task and account. Inspect central Actions.");
+    }
+    return run;
+}
+
 export class PrDashboard extends Dashboard {
     constructor(github = new GitHub(), now = () => Date.now()) {
         super(github, now);
@@ -67,6 +78,9 @@ export class PrDashboard extends Dashboard {
                     ...pr, phase: phase ?? null, dispatch: dispatch ?? null,
                     tasks: taskChoices(pr, this.viewer),
                     actionBlock: actionBlock(pr, this.viewer, phase, ready, dispatch),
+                    canCancelDispatch: Boolean(ready && this.viewer?.id === LAUNCH_OWNER_ID &&
+                        dispatch?.operation === "launch" && dispatch.status === "accepted" &&
+                        Number.isSafeInteger(dispatch.runId) && dispatch.runId > 0),
                     canCancel: Boolean(ready && this.viewer?.id === LAUNCH_OWNER_ID && !dispatch && phase &&
                         !phase.historical && !phase.unknownStage && !TERMINAL.has(phase.stage) &&
                         Number.isSafeInteger(phase.generation) && phase.generation > 0),
@@ -133,12 +147,12 @@ export class PrDashboard extends Dashboard {
                     warnings.push(`${pr.target}: ${error.message}`);
                 }
             }
+            await this.observeDispatches(account.value, warnings);
             this.viewer = account.value;
             this.prs = prs;
             this.prWarnings = warnings;
             this.prLoadedAt = this.now();
             this.prError = null;
-            this.observeDispatches();
             this.value.latency = this.now() - started;
             this.value.cost = this.github.counted - counted;
             if (prs.some((pr) => pr.evidence?.error)) {
@@ -169,19 +183,68 @@ export class PrDashboard extends Dashboard {
         return this.state();
     }
 
-    observeDispatches() {
+    schedule() {
+        const cancelling = [...this.dispatches.values()].some((entry) =>
+            (entry.operation === "cancel_dispatch" || entry.operation === "cancel" && entry.cancelRunId) &&
+            entry.status === "accepted" && !entry.reconcileError);
+        if (this.auto || !cancelling) return super.schedule();
+        if (this.timer) clearTimeout(this.timer);
+        this.timer = null;
+        if (!this.visible() || this.value.error || this.prError || this.github.retryAt > this.now() ||
+            [this.github.rate, this.github.graphqlRate].some((rate) => rate && rate.remaining < rate.limit * 0.1)) return;
+        const delay = Math.max(1000, (this.value.loadedAt ?? this.now()) + 60000 - this.now());
+        this.timer = setTimeout(() => {
+            this.timer = null;
+            if (this.visible()) void this.refresh();
+        }, delay);
+        this.timer.unref?.();
+    }
+
+    async observeDispatches(account = this.viewer, warnings = this.prWarnings) {
         if (this.value.error || this.value.snapshot !== this.checkpoints.snapshot?.sha) return;
-        for (const [target, entry] of this.dispatches) {
-            if (entry.status === "pending") continue;
+        await Promise.all([...this.dispatches].map(async ([target, entry]) => {
+            if (entry.status === "pending") return;
             const phase = this.value.phases.find((item) => item.target === target);
-            if ((entry.operation === "launch" && phase && phase.launchId &&
-                phase.launchId !== entry.previousLaunch && phase.kind === entry.kind &&
-                phase.authorizedActorId === this.viewer?.id) ||
+            const matched = phase && phase.kind === entry.kind && phase.authorizedActorId === account?.id &&
+                (entry.runId ? phase.launchId === entry.runId : phase.launchId && phase.launchId !== entry.previousLaunch);
+            if ((entry.operation === "launch" && matched) ||
                 (entry.operation === "cancel" && phase?.requestId === entry.requestId &&
                 phase.generation > entry.generation && phase.stage === "cancelled")) {
                 this.dispatches.delete(target);
+                return;
             }
-        }
+            if (!entry.runId || entry.status !== "accepted" ||
+                !["launch", "cancel_dispatch"].includes(entry.operation)) return;
+            try {
+                if (entry.operation === "cancel_dispatch" && matched) {
+                    if (TERMINAL.has(phase.stage)) this.dispatches.delete(target);
+                    else await this.cancelPhase(target, entry, phase, account);
+                    return;
+                }
+                const run = checkedLaunch((await this.github.get(`repos/${CENTRAL}/actions/runs/${entry.runId}`)).data,
+                    target, entry, account);
+                if (entry.status !== "accepted" || this.dispatches.get(target) !== entry) return;
+                delete entry.reconcileError;
+                if (run.status !== "completed") return;
+                if (entry.operation === "cancel_dispatch" && run.conclusion === "cancelled") {
+                    const current = await this.current(target);
+                    if (current.phase?.launchId === entry.runId && !TERMINAL.has(current.phase.stage)) {
+                        await this.cancelPhase(target, entry, current.phase, current.viewer);
+                    } else this.dispatches.delete(target);
+                } else {
+                    entry.status = "finished";
+                    entry.conclusion = run.conclusion;
+                    entry.message = `Launch finished with ${run.conclusion ?? "unknown conclusion"}, without a confirmed task. Inspect its Actions run; do not blindly relaunch.`;
+                }
+            } catch (error) {
+                if (entry.operation === "cancel" || error.uncertain) entry.status = error.uncertain ? "uncertain" : "failed";
+                entry.message = error.message;
+                entry.reconcileError = error.message;
+                warnings.push(`${target}: ${error.message}`);
+                this.auto = false;
+                this.pauseReason = "Dispatch status could not be reconciled. Inspect central Actions.";
+            }
+        }));
     }
 
     async current(target) {
@@ -220,6 +283,7 @@ export class PrDashboard extends Dashboard {
     }
 
     cancel(input) {
+        if (input && Object.hasOwn(input, "runId")) return this.cancelDispatch(input);
         if (!input || Object.keys(input).some((key) => !["target", "requestId", "generation", "confirmed"].includes(key)) ||
             input.confirmed !== true || !/^[0-9a-f]{32}$/.test(input.requestId) ||
             !Number.isSafeInteger(input.generation) || input.generation < 1) {
@@ -239,6 +303,62 @@ export class PrDashboard extends Dashboard {
         });
     }
 
+    async cancelPhase(target, entry, phase, account) {
+        if (phase.historical || phase.unknownStage || phase.kind !== entry.kind || phase.authorizedActorId !== account?.id ||
+            !Number.isSafeInteger(phase.generation) || phase.generation < 1) {
+            throw new Error("The task checkpoint is unsupported. Inspect central state before cancelling.");
+        }
+        Object.assign(entry, { operation: "cancel", status: "pending", requestId: phase.requestId,
+            generation: phase.generation, message: "Cancelling the confirmed task." });
+        const receipt = await this.github.dispatch({
+            operation: "cancel", target, previous_request: phase.requestId, previous_generation: String(phase.generation),
+        });
+        entry.cancelRunId = receipt.runId;
+        entry.status = "accepted";
+        entry.message = "Task cancellation accepted. Refresh to confirm it has stopped.";
+    }
+
+    async cancelDispatch(input) {
+        if (Object.keys(input).some((key) => !["target", "runId", "confirmed"].includes(key)) ||
+            input.confirmed !== true || !Number.isSafeInteger(input.runId) || input.runId < 1) {
+            throw new Error("Confirm cancellation with the exact accepted launch run ID.");
+        }
+        targetParts(input.target);
+        const entry = this.dispatches.get(input.target);
+        if (entry?.operation !== "launch" || entry.status !== "accepted" || entry.runId !== input.runId) {
+            throw new Error("The accepted dispatch selection is stale or unsupported. Refresh before cancelling.");
+        }
+        if (this.selecting) throw new Error("Wait for repository selection to finish.");
+        const previous = { ...entry };
+        Object.assign(entry, { operation: "cancel_dispatch", status: "pending", message: "Cancelling the accepted dispatch." });
+        try {
+            if (this.pending) await this.pending;
+            const { viewer: account, phase } = await this.current(input.target);
+            if (phase?.launchId === entry.runId) {
+                if (TERMINAL.has(phase.stage)) throw new Error("The dispatched task has already finished. Refresh its result.");
+                await this.cancelPhase(input.target, entry, phase, account);
+            } else {
+                const run = checkedLaunch((await this.github.get(`repos/${CENTRAL}/actions/runs/${entry.runId}`)).data,
+                    input.target, entry, account);
+                if (run.status === "completed") {
+                    throw new Error(`The launch has already finished with ${run.conclusion ?? "unknown conclusion"}. Inspect its Actions run.`);
+                }
+                await this.github.cancelRun(entry.runId);
+                entry.status = "accepted";
+                entry.message = "Dispatch cancellation requested. Refresh to confirm it has stopped.";
+            }
+            this.schedule();
+            return { target: input.target, operation: entry.operation, status: entry.status,
+                runId: entry.runId, message: entry.message };
+        } catch (error) {
+            if (error.uncertain) {
+                entry.status = "uncertain";
+                entry.message = error.message;
+            } else this.dispatches.set(input.target, previous);
+            throw error;
+        }
+    }
+
     async mutate(target, operation, prepare, kind = null) {
         targetParts(target);
         if (this.selecting) throw new Error("Wait for repository selection to finish.");
@@ -254,10 +374,13 @@ export class PrDashboard extends Dashboard {
             const prepared = await prepare();
             Object.assign(entry, prepared);
             delete entry.inputs;
-            await this.github.dispatch(prepared.inputs);
+            const receipt = await this.github.dispatch(prepared.inputs);
+            entry.runId = receipt.runId;
+            entry.runUrl = receipt.runUrl;
             entry.status = "accepted";
             entry.message = "Dispatch accepted. Execution is not yet confirmed; refresh to observe central state.";
-            return { target, operation, status: entry.status, message: entry.message };
+            return { target, operation, status: entry.status, message: entry.message,
+                runId: entry.runId, runUrl: entry.runUrl };
         } catch (error) {
             if (error.uncertain) {
                 entry.status = "uncertain";

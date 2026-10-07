@@ -143,18 +143,23 @@ function render() {
 async function taskAction(pr, kind, cancel = false) {
     const displayed = state.prs.find((item) => item.target === pr.target);
     const dispatch = displayed?.dispatch ?? pr.dispatch;
-    if (dispatch) {
+    const cancelDispatch = cancel && dispatch?.operation === "launch" && dispatch.status === "accepted" &&
+        Boolean(displayed?.canCancelDispatch ?? pr.canCancelDispatch);
+    if (dispatch && !cancelDispatch) {
         error(dispatch.message);
         return;
     }
-    pr.dispatch = { operation: cancel ? "cancel" : "launch", kind, status: "pending",
+    const cancellation = cancelDispatch
+        ? { target: pr.target, runId: dispatch.runId, confirmed: true }
+        : cancel ? { target: pr.target, requestId: pr.phase.requestId, generation: pr.phase.generation, confirmed: true } : null;
+    pr.dispatch = { ...dispatch, operation: cancelDispatch ? "cancel_dispatch" : cancel ? "cancel" : "launch", kind, status: "pending",
         message: "Dispatching. Do not submit again." };
     if (displayed) displayed.dispatch = pr.dispatch;
     render();
     let failureMessage = null;
     try {
         const result = await api(cancel ? "/api/cancel" : "/api/launch", "POST", cancel
-            ? { target: pr.target, requestId: pr.phase.requestId, generation: pr.phase.generation, confirmed: true }
+            ? cancellation
             : { target: pr.target, kind, confirmed: true });
         pr.dispatch = { ...pr.dispatch, ...result };
     } catch (failure) {
@@ -229,15 +234,22 @@ function prCard(pr) {
         button.addEventListener("click", () => taskAction(pr, kind));
         tasks.append(button);
     }
-    const cancel = element("button", "Cancel current task");
+    const cancelDispatch = pr.dispatch?.operation === "cancel_dispatch" ||
+        pr.dispatch?.operation === "launch" && pr.dispatch.status === "accepted";
+    const cancel = element("button", cancelDispatch ? "Cancel dispatch" : "Cancel current task");
     cancel.type = "button";
     cancel.className = "task-button";
-    cancel.disabled = !pr.canCancel || Boolean(pr.dispatch);
-    cancel.title = "Cancel the current task. This does not undo published changes or guarantee termination of an already authorized effect.";
+    cancel.disabled = cancelDispatch
+        ? !pr.canCancelDispatch || pr.dispatch.operation !== "launch" || pr.dispatch.status !== "accepted"
+        : !pr.canCancel || Boolean(pr.dispatch);
+    cancel.title = cancelDispatch && !pr.dispatch.runId
+        ? "This dispatch has no recorded run ID. Inspect its Actions launch or refresh to identify its saved task."
+        : "Cancel the selected launch or task. This does not undo published changes or guarantee termination of an already authorized effect.";
     const message = element("p", pr.dispatch?.message ?? "", "notice");
     message.hidden = !pr.dispatch;
-    cancel.addEventListener("click", () => taskAction(pr, pr.phase?.kind, true));
-    if (pr.canCancel || pr.dispatch?.operation === "cancel") tasks.append(cancel);
+    if (pr.dispatch?.runUrl) message.append(document.createTextNode(" "), link("View launch", pr.dispatch.runUrl));
+    cancel.addEventListener("click", () => taskAction(pr, pr.dispatch?.kind ?? pr.phase?.kind, true));
+    if (pr.canCancel || cancelDispatch || pr.dispatch?.operation === "cancel") tasks.append(cancel);
     card.append(tasks);
     if (pr.actionBlock && !pr.dispatch) card.append(element("p", pr.actionBlock, "muted"));
     card.append(message);

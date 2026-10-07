@@ -24,6 +24,16 @@ function action(name, description, properties, required, handler) {
     };
 }
 
+const cancelAction = action("cancel", "Cancel an exact accepted launch run or observed nonterminal task on explicit user request. Does not undo publication.",
+    { target, runId: { type: "integer", minimum: 1 },
+        requestId: { type: "string", pattern: "^[0-9a-f]{32}$" },
+        generation: { type: "integer", minimum: 1 }, confirmed },
+    ["target", "confirmed"], (input) => dashboard.cancel(input));
+cancelAction.inputSchema.oneOf = [
+    { required: ["runId"], not: { anyOf: [{ required: ["requestId"] }, { required: ["generation"] }] } },
+    { required: ["requestId", "generation"], not: { required: ["runId"] } },
+];
+
 await joinSession({
     canvases: [createCanvas({
         id: "workflow-dashboard",
@@ -50,10 +60,7 @@ await joinSession({
             action("launch", "Dispatch the selected PR task on explicit user request, without a separate confirmation dialog.",
                 { target, kind: { type: "string", enum: Object.keys(KIND_LABELS) }, confirmed },
                 ["target", "kind", "confirmed"], (input) => dashboard.launch(input)),
-            action("cancel", "Cancel an exact observed nonterminal request on explicit user request, without a separate confirmation dialog. Does not undo publication.",
-                { target, requestId: { type: "string", pattern: "^[0-9a-f]{32}$" },
-                    generation: { type: "integer", minimum: 1 }, confirmed },
-                ["target", "requestId", "generation", "confirmed"], (input) => dashboard.cancel(input)),
+            cancelAction,
             {
                 name: "history",
                 description: "Read saved iteration history and previous phases for a dashboard target.",

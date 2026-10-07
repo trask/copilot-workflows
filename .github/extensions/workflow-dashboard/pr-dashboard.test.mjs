@@ -16,6 +16,14 @@ const target = `${repo}#12`;
 const sha = "a".repeat(40);
 const id = "b".repeat(32);
 const account = { id: LAUNCH_OWNER_ID, login: "trask" };
+const receipt = (runId = 20) => ({
+    status: "accepted", runId, runUrl: `https://github.com/${CENTRAL}/actions/runs/${runId}`,
+});
+const launchRun = (changes = {}) => ({
+    id: 20, run_attempt: 1, event: "workflow_dispatch", path: ".github/workflows/coordinator.yml",
+    head_branch: "main", repository: { full_name: CENTRAL }, actor: account,
+    display_title: `Review loop launch self_review ${target}`, status: "queued", conclusion: null, ...changes,
+});
 const pull = (changes = {}) => ({
     number: 12, state: "open", title: "Handle <untrusted> input", draft: false,
     user: { ...account, type: "User" }, head: { sha, repo: { full_name: repo } },
@@ -70,11 +78,13 @@ function controller({ records = [], pulls = [pull()], dashboardState = state() }
     let listing = pulls;
     let supplement = dashboardState;
     let currentRecords = records;
+    let currentRun = launchRun();
     const github = {
         requests: 0, counted: 0, cacheHits: 0, rate: null,
         get: async (path) => {
             calls.push(path); github.requests++; github.counted++;
             if (path === "user") return { data: viewerAccount };
+            if (path === `repos/${CENTRAL}/actions/runs/20`) return { data: structuredClone(currentRun) };
             if (path === dashboardPath(repo) || REPOSITORIES.slice(1).some((r) => path === dashboardPath(r))) {
                 if (supplement instanceof Error) throw supplement;
                 return { data: file(supplement) };
@@ -89,7 +99,14 @@ function controller({ records = [], pulls = [pull()], dashboardState = state() }
         }])),
         pages: async () => [],
         failedCoordinators: async () => [],
-        dispatch: async (inputs) => { calls.push(inputs); return { status: "accepted" }; },
+        dispatch: async (inputs) => {
+            calls.push(inputs);
+            if (inputs.operation === "launch") currentRun = launchRun({
+                display_title: `Review loop launch ${inputs.loop_kind} ${inputs.target}`,
+            });
+            return receipt(inputs.operation === "launch" ? 20 : 21);
+        },
+        cancelRun: async (runId) => { calls.push({ cancelRun: runId }); },
     };
     const canvas = new PrDashboard(github, () => 2000000);
     canvas.checkpoints = {
@@ -105,6 +122,7 @@ function controller({ records = [], pulls = [pull()], dashboardState = state() }
         canvas, calls, github, setViewer: (v) => viewerAccount = v,
         setPulls: (v) => listing = v, setDashboard: (v) => supplement = v,
         setRecords: (v) => currentRecords = v,
+        setRun: (v) => currentRun = v,
     };
 }
 
@@ -610,12 +628,207 @@ test("cancellation uses the exact rendered identity and rejects stale generation
     assert.equal(c.canvas.state().prs[0].canCancel, false);
 });
 
+test("dispatch confirmation matches the receipt run, not another launch of the same kind", async () => {
+    const c = controller();
+    await c.canvas.refresh();
+    const launched = await c.canvas.launch({ target, kind: "self_review", confirmed: true });
+    assert.equal(launched.runId, 20);
+    c.setRecords([checkpoint({}, { launch_run: { id: 21 } })]);
+    const unmatched = await c.canvas.refresh();
+    assert.equal(unmatched.prs[0].dispatch.runId, 20);
+    assert.equal(unmatched.prs[0].canCancelDispatch, true);
+    c.setRecords([checkpoint({}, { launch_run: { id: 20 } })]);
+    assert.equal((await c.canvas.refresh()).prs[0].dispatch, null);
+});
+
+test("accepted dispatch cancellation locks duplicate clicks and waits for confirmed cancellation", async () => {
+    const c = controller();
+    await c.canvas.refresh();
+    await c.canvas.launch({ target, kind: "self_review", confirmed: true });
+    c.canvas.setAuto(false);
+    c.canvas.heartbeat("test", true);
+    let release;
+    let cancelled = 0;
+    c.github.cancelRun = async (runId) => {
+        assert.equal(runId, 20);
+        cancelled++;
+        await new Promise((resolve) => release = resolve);
+    };
+    const input = { target, runId: 20, confirmed: true };
+    const pending = c.canvas.cancel(input);
+    await assert.rejects(c.canvas.cancel(input), /stale/);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(cancelled, 1);
+    assert.equal(c.canvas.state().prs[0].dispatch.status, "pending");
+    release();
+    await pending;
+    assert.equal(c.canvas.state().prs[0].dispatch.operation, "cancel_dispatch");
+    assert.equal(c.canvas.state().prs[0].canCancelDispatch, false);
+    assert.equal(c.canvas.auto, false);
+    assert.ok(c.canvas.timer);
+    c.setRun(launchRun({ status: "completed", conclusion: "cancelled" }));
+    assert.equal((await c.canvas.refresh()).prs[0].dispatch, null);
+    assert.equal(c.canvas.timer, null);
+});
+
+test("cancelling an unconfirmed running launch stops its exact saved task if a checkpoint appears", async () => {
+    const c = controller();
+    await c.canvas.refresh();
+    await c.canvas.launch({ target, kind: "self_review", confirmed: true });
+    c.canvas.setAuto(false);
+    c.canvas.heartbeat("test", true);
+    c.setRun(launchRun({ status: "in_progress" }));
+    await c.canvas.cancel({ target, runId: 20, confirmed: true });
+    assert.deepEqual(c.calls.filter((call) => typeof call === "object").at(-1), { cancelRun: 20 });
+    c.setRecords([checkpoint({ generation: 4 }, { launch_run: { id: 20 } })]);
+    const cancelling = await c.canvas.refresh();
+    assert.equal(cancelling.prs[0].dispatch.operation, "cancel");
+    assert.equal(c.canvas.auto, false);
+    assert.ok(c.canvas.timer);
+    assert.deepEqual(c.calls.filter((call) => typeof call === "object").at(-1), {
+        operation: "cancel", target, previous_request: id, previous_generation: "4",
+    });
+    c.setRecords([checkpoint({ stage: "cancelled", generation: 5 }, { launch_run: { id: 20 } })]);
+    assert.equal((await c.canvas.refresh()).prs[0].dispatch, null);
+    assert.equal(c.canvas.timer, null);
+});
+
+test("cancellation reconciliation reports run-read failures and stops manual-mode polling", async () => {
+    const c = controller();
+    await c.canvas.refresh();
+    await c.canvas.launch({ target, kind: "self_review", confirmed: true });
+    c.canvas.setAuto(false);
+    c.canvas.heartbeat("test", true);
+    await c.canvas.cancel({ target, runId: 20, confirmed: true });
+    const get = c.github.get;
+    c.github.get = async (path) => {
+        if (path === `repos/${CENTRAL}/actions/runs/20`) throw new Error("Run access denied");
+        return get(path);
+    };
+    const snapshot = await c.canvas.refresh();
+    assert.match(snapshot.prs[0].dispatch.message, /access denied/);
+    assert.ok(snapshot.prWarnings.some((warning) => warning.includes("Run access denied")));
+    assert.match(snapshot.pauseReason, /could not be reconciled/);
+    assert.equal(c.canvas.timer, null);
+    assert.equal(c.calls.filter((call) => typeof call === "object").length, 2);
+});
+
+test("accepted dispatch cancellation adopts only its own fresh checkpoint, not a newer launch", async () => {
+    const c = controller();
+    await c.canvas.refresh();
+    await c.canvas.launch({ target, kind: "self_review", confirmed: true });
+    c.setRecords([checkpoint({ generation: 4 }, { launch_run: { id: 20 } })]);
+    await c.canvas.cancel({ target, runId: 20, confirmed: true });
+    assert.deepEqual(c.calls.filter((call) => typeof call === "object").at(-1), {
+        operation: "cancel", target, previous_request: id, previous_generation: "4",
+    });
+    assert.equal(c.calls.some((call) => call.cancelRun), false);
+
+    const other = controller();
+    await other.canvas.refresh();
+    await other.canvas.launch({ target, kind: "self_review", confirmed: true });
+    await other.canvas.cancel({ target, runId: 20, confirmed: true });
+    other.setRun(launchRun({ status: "completed", conclusion: "cancelled" }));
+    other.setRecords([checkpoint({}, { launch_run: { id: 21 } })]);
+    assert.equal((await other.canvas.refresh()).prs[0].dispatch, null);
+    assert.equal(other.calls.filter((call) => call.operation === "cancel").length, 0);
+});
+
+test("cancelled launch reconciliation reloads checkpoints before considering cancellation finished", async () => {
+    const c = controller();
+    await c.canvas.refresh();
+    await c.canvas.launch({ target, kind: "self_review", confirmed: true });
+    await c.canvas.cancel({ target, runId: 20, confirmed: true });
+    const get = c.github.get;
+    c.github.get = async (path) => {
+        if (path !== `repos/${CENTRAL}/actions/runs/20`) return get(path);
+        c.setRecords([checkpoint({}, { launch_run: { id: 20 } })]);
+        return { data: launchRun({ status: "completed", conclusion: "cancelled" }) };
+    };
+    const result = await c.canvas.refresh();
+    assert.equal(result.prs[0].dispatch.operation, "cancel");
+    assert.equal(c.calls.filter((call) => call.operation === "cancel").length, 1);
+});
+
+test("accepted launch cancellation rejects stale run IDs and mismatched run ownership without mutations", async () => {
+    const c = controller();
+    await c.canvas.refresh();
+    await c.canvas.launch({ target, kind: "self_review", confirmed: true });
+    await assert.rejects(c.canvas.cancel({ target, runId: 21, confirmed: true }), /stale/);
+    await assert.rejects(c.canvas.cancel({ target, runId: 20, requestId: id, generation: 3, confirmed: true }), /exact/);
+    for (const run of [launchRun({ actor: { id: 99 } }), launchRun({ run_attempt: 2 })]) {
+        c.setRun(run);
+        await assert.rejects(c.canvas.cancel({ target, runId: 20, confirmed: true }), /does not match/);
+        assert.equal(c.canvas.state().prs[0].dispatch.operation, "launch");
+    }
+    assert.equal(c.calls.filter((call) => typeof call === "object").length, 1);
+});
+
+test("uncertain accepted-launch cancellation stays locked and is never automatically retried", async () => {
+    const c = controller();
+    await c.canvas.refresh();
+    await c.canvas.launch({ target, kind: "self_review", confirmed: true });
+    let calls = 0;
+    c.github.cancelRun = async () => {
+        calls++;
+        const error = new Error("Cancellation outcome is uncertain");
+        error.uncertain = true;
+        throw error;
+    };
+    const input = { target, runId: 20, confirmed: true };
+    await assert.rejects(c.canvas.cancel(input), /uncertain/);
+    assert.equal(c.canvas.state().prs[0].dispatch.status, "uncertain");
+    await c.canvas.refresh();
+    await assert.rejects(c.canvas.cancel(input), /stale/);
+    await assert.rejects(c.canvas.launch({ target, kind: "self_review", confirmed: true }), /uncertain/);
+    assert.equal(calls, 1);
+});
+
+test("a failed launch stops spinning but retains its unconfirmed-task lock and run link", async () => {
+    const c = controller();
+    await c.canvas.refresh();
+    await c.canvas.launch({ target, kind: "self_review", confirmed: true });
+    c.setRun(launchRun({ status: "completed", conclusion: "failure" }));
+    const snapshot = await c.canvas.refresh();
+    const pr = snapshot.prs[0];
+    assert.equal(pr.dispatch.status, "finished");
+    assert.equal(pr.dispatch.runUrl, receipt().runUrl);
+    assert.equal(pr.canCancelDispatch, false);
+    assert.match(pr.dispatch.message, /failure/);
+    assert.equal(taskPresentation(pr, "self_review", true).label, "Launch failed");
+    assert.equal(taskPresentation(pr, "self_review", true).busy, false);
+    await assert.rejects(c.canvas.launch({ target, kind: "self_review", confirmed: true }), /finished/);
+});
+
+test("refresh retains previous PR and workflow evidence while exact launch status is being read", async () => {
+    const c = controller();
+    await c.canvas.refresh();
+    await c.canvas.launch({ target, kind: "self_review", confirmed: true });
+    const nextSha = "f".repeat(40);
+    c.setPulls([pull({ head: { sha: nextSha, repo: { full_name: repo } } })]);
+    c.setRecords([checkpoint({}, { launch_run: { id: 21 } })]);
+    const get = c.github.get;
+    let release;
+    c.github.get = (path) => path === `repos/${CENTRAL}/actions/runs/20`
+        ? new Promise((resolve) => release = resolve) : get(path);
+    const pending = c.canvas.refresh();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(c.canvas.state().loading, true);
+    assert.equal(c.canvas.state().prs[0].sha, sha);
+    assert.equal(c.canvas.state().prs[0].phase, null);
+    release({ data: launchRun() });
+    const refreshed = await pending;
+    assert.equal(refreshed.prs[0].sha, nextSha);
+    assert.equal(refreshed.prs[0].phase.launchId, 21);
+    assert.equal(refreshed.prs[0].dispatch.runId, 20);
+});
+
 test("duplicate calls coalesce no mutations and ambiguous outcomes cannot be blindly retried", async () => {
     const c = controller();
     await c.canvas.refresh();
     let release;
     let calls = 0;
-    c.github.dispatch = async () => { calls++; await new Promise((resolve) => release = resolve); };
+    c.github.dispatch = async () => { calls++; await new Promise((resolve) => release = resolve); return receipt(); };
     const first = c.canvas.launch({ target, kind: "self_review", confirmed: true });
     await assert.rejects(c.canvas.launch({ target, kind: "self_review", confirmed: true }), /pending/);
     await new Promise((resolve) => setImmediate(resolve));
@@ -702,27 +915,46 @@ test("PR pagination completes all pages, deduplicates drift, and never follows a
     await assert.rejects(overflow.pulls(repo), /10,000/);
 });
 
-test("GitHub writes are only central coordinator dispatches at main and never retry", async () => {
+test("GitHub dispatches bind the documented exact run receipt and never retry", async () => {
     const calls = [];
-    const github = new GitHub(async (args) => { calls.push(args); return response(null, 204); });
+    const runReceipt = { workflow_run_id: 20, run_url: `https://api.github.com/repos/${CENTRAL}/actions/runs/20`,
+        html_url: receipt().runUrl };
+    const github = new GitHub(async (args) => { calls.push(args); return response(runReceipt); });
     const inputs = { operation: "launch", target, loop_kind: "self_review", publication_auth: "fine_grained_pat" };
-    assert.deepEqual(await github.dispatch(inputs), { status: "accepted" });
+    assert.deepEqual(await github.dispatch(inputs), receipt());
     assert.ok(calls[0].includes(`repos/${CENTRAL}/actions/workflows/coordinator.yml/dispatches`));
     assert.ok(calls[0].includes("ref=main"));
     assert.ok(calls[0].includes("inputs[loop_kind]=self_review"));
+    assert.ok(calls[0].includes("X-GitHub-Api-Version: 2026-03-10"));
     assert.equal(calls[0].includes("GET"), false);
     for (const value of [
         { ...inputs, target: "other/repo#12" }, { ...inputs, operation: "tick" },
         { ...inputs, loop_kind: "bad" }, { ...inputs, publication_auth: "disabled" }, { ...inputs, ref: "evil" },
     ]) await assert.rejects(github.dispatch(value));
     assert.equal(calls.length, 1);
-    for (const result of [response(null, 500), { code: 1, stdout: "" }]) {
+    for (const result of [response(null, 500), { code: 1, stdout: "" }, response(null, 204),
+        response({ ...runReceipt, workflow_run_id: "20" }), response({ ...runReceipt, html_url: "https://github.com/other/repo/actions/runs/20" })]) {
         let count = 0;
         const uncertain = new GitHub(async () => { count++; return result; });
         await assert.rejects(uncertain.dispatch(inputs), (error) => error.uncertain === true);
         assert.equal(count, 1);
     }
     await assert.rejects(new GitHub(async () => response(null, 403)).dispatch(inputs), /rejected.*403/);
+});
+
+test("GitHub cancels only the exact central run and never retries an ambiguous cancellation", async () => {
+    const calls = [];
+    const github = new GitHub(async (args) => { calls.push(args); return response(null, 202); });
+    await github.cancelRun(20);
+    assert.ok(calls[0].includes(`repos/${CENTRAL}/actions/runs/20/cancel`));
+    assert.ok(calls[0].includes("POST"));
+    await assert.rejects(github.cancelRun("20"), /exact/);
+    assert.equal(calls.length, 1);
+    let count = 0;
+    const uncertain = new GitHub(async () => { count++; return { code: 1, stdout: "" }; });
+    await assert.rejects(uncertain.cancelRun(20), (error) => error.uncertain === true);
+    assert.equal(count, 1);
+    await assert.rejects(new GitHub(async () => response(null, 409)).cancelRun(20), /rejected.*409/);
 });
 
 test("new reads are allowlisted and read cache does not apply to dispatch", async () => {

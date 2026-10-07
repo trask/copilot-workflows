@@ -1428,6 +1428,47 @@ test("Cancel dispatches the exact displayed identity directly and stays locked p
     assert.equal(cancelButton(), undefined);
 });
 
+test("Cancel dispatch uses the exact accepted run receipt and locks duplicate clicks", async () => {
+    const state = rendererState();
+    const pr = state.prs[0];
+    Object.assign(pr, { canCancelDispatch: true, actionBlock: "Dispatch accepted", dispatch: {
+        operation: "launch", kind: "self_review", status: "accepted", runId: 20,
+        runUrl: "https://github.com/trask/copilot-workflows/actions/runs/20", message: "Dispatch accepted",
+    } });
+    const cancellations = [];
+    let release;
+    const { nodes, renderer } = await rendererFixture(async (path, options) => {
+        if (path === "/api/cancel") {
+            cancellations.push(JSON.parse(options.body));
+            return new Promise((resolve) => release = () => {
+                pr.dispatch.status = "accepted";
+                pr.dispatch.message = "Dispatch cancellation requested";
+                pr.canCancelDispatch = false;
+                resolve({ ok: true, json: async () => pr.dispatch });
+            });
+        }
+        return { ok: true, json: async () => state };
+    });
+    const grid = () => nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid");
+    const cancelButton = () => grid().children.find((node) => node.textContent === "Cancel dispatch");
+    const button = cancelButton();
+    assert.equal(button.disabled, false);
+    const pending = button.events.click();
+    assert.deepEqual(cancellations, [{ target: pr.target, runId: 20, confirmed: true }]);
+    assert.equal(cancelButton().disabled, true);
+    await button.events.click();
+    assert.equal(cancellations.length, 1);
+    release();
+    await pending;
+    assert.equal(cancelButton().disabled, true);
+    assert.ok(grid().children.some((node) => node["aria-label"] === `${KIND_LABELS.self_review}: Cancelling`));
+    const notice = nodes.get("prs").firstChild.children.find((node) => node.className === "notice");
+    assert.equal(notice.children.find((node) => node.tag === "a").href, pr.dispatch.runUrl);
+    Object.assign(pr, { dispatch: null, actionBlock: null });
+    renderer.render();
+    assert.equal(cancelButton(), undefined);
+});
+
 test("repository selection shows loading before its response and hides old cards until completion", async () => {
     const previous = rendererState();
     const next = rendererState("example/other");
