@@ -196,7 +196,7 @@ manifest after initializing `/tmp/target`. It imports only bound Git objects and
 preserves the shallow boundaries; never treat a source bundle as executable setup.
 It also imports `refs/heads/review-base` at the exact `merge_base_sha` for diff-based tasks.
 Conflict resolution additionally imports `refs/heads/incoming` at `base_sha`,
-with bounded history through the merge base. Symlinks and submodule pointers are
+with history through the merge base. Symlinks and submodule pointers are
 preserved as Git objects. Trusted jobs do not follow links or fetch submodule repositories.
 If checks require submodule contents, retrieve only their recorded commits inside AWF
 using public unauthenticated access and the existing network sandbox.
@@ -246,7 +246,7 @@ Read relevant surrounding code and applicable instructions from the complete sna
 ## Independent task contracts
 
 `pr_conflict_resolver` performs one local merge of frozen `base_sha` into frozen
-`frozen_sha`, never a rebase or landing. Read the bounded history with `git log`,
+`frozen_sha`, never a rebase or landing. Read the frozen history with `git log`,
 `git show` and `git diff` before resolving each conflict. Keep both sides' intent.
 Contradictory intent or incomplete history is blocked. Preserve every cleanly merged
 incoming change. Return the complete resolved head-to-merge-tree patch in

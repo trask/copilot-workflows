@@ -1,4 +1,4 @@
-"""Bounded merge history and deterministic two-parent Git reconstruction."""
+"""Frozen merge history and deterministic two-parent Git reconstruction."""
 
 import hashlib
 import re
@@ -9,15 +9,11 @@ from loop.candidates import message
 from loop.policy import canonical, commit_author, digest, require
 from loop.verify import git, safe_path, tree_entries as entries
 
-MAX_HISTORY = 1024
-
 
 def history(directory, request):
     head, base, ancestor = (request[k] for k in ("frozen_sha", "base_sha", "merge_base_sha"))
     require(git(["merge-base", head, base], directory).decode().strip() == ancestor,
             "Incomplete or contradictory frozen merge history")
-    require(int(git(["rev-list", "--count", head, base], directory)) <= MAX_HISTORY,
-            "Merge history exceeds commit limit")
     return ancestor == base
 
 

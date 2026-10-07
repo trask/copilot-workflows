@@ -14,7 +14,6 @@ import zipfile
 from pathlib import Path
 
 from loop.api import API
-from loop.conflicts import MAX_HISTORY
 from loop.policy import (AUTHOR_ID, BOT_IDENTITY_PATH, CENTRAL, DEFAULTS, REPO, Rejected, canonical,
                          check_target, diff_scope, digest, exact, iso, loop_kind, public_request,
                          require, staged_source)
@@ -131,8 +130,8 @@ def snapshot_identity(directory, sha, request=None):
             from loop.conflicts import history
             history(directory, request)
     count = int(git(["rev-list", "--count", *refs], directory))
-    require(0 < count <= MAX_HISTORY if conflict else count == len(commits),
-            "Source snapshot history is incomplete or exceeds limits")
+    if not conflict:
+        require(count == len(commits), "Source snapshot contains unexpected history")
     object_sizes = object_bounds(directory)
     for ref in refs:
         total = 0
@@ -160,9 +159,17 @@ def package_source(request, generation, api, destination, fetch=None):
         shallow_path = Path(directory, "shallow")
         if fetch is None:
             if loop_kind(request) == "pr_conflict_resolver":
-                public_fetch(directory, request, request["repo"], request["base_sha"], depth=MAX_HISTORY)
-                git(["update-ref", "refs/heads/incoming", request["base_sha"]], directory)
-                public_fetch(directory, request, depth=MAX_HISTORY)
+                depth = 256
+                while True:
+                    public_fetch(directory, request, request["repo"], request["base_sha"], depth=depth)
+                    git(["update-ref", "refs/heads/incoming", request["base_sha"]], directory)
+                    public_fetch(directory, request, depth=depth)
+                    if all(request["merge_base_sha"].encode() in git(
+                            ["rev-list", request[key]], directory).splitlines()
+                           for key in ("frozen_sha", "base_sha")):
+                        break
+                    require(shallow_path.exists(), "Frozen merge base is not reachable")
+                    depth *= 2
                 git(["update-ref", "refs/heads/review-base", request["merge_base_sha"]], directory)
                 revisions = git(["rev-list", "--boundary", request["frozen_sha"],
                                  request["base_sha"], "^" + request["merge_base_sha"]],
@@ -245,14 +252,14 @@ def bind_manifest(manifest, request, generation):
                 and re.fullmatch(r"[0-9a-f]{40}", manifest["merge_history"]["base_tree"]),
                 "Merge history source binding differs")
         boundaries = manifest["merge_history"]["shallow_commits"]
-        require(isinstance(boundaries, list) and len(boundaries) <= MAX_HISTORY
+        require(isinstance(boundaries, list)
                 and all(isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha)
                         for sha in boundaries)
                 and boundaries == sorted(set(boundaries))
                 and bool(boundaries) == manifest["shallow"],
                 "Merge history shallow boundaries differ")
         count = manifest["history_count"]
-        require(type(count) is int and 0 < count <= MAX_HISTORY, "Merge history exceeds limit")
+        require(type(count) is int and count > 0, "Invalid merge history count")
     exact(manifest, fields)
     require(type(manifest["schema"]) is int and manifest["schema"] == 2
             and request["schema"] == 2 and manifest["repo"] == request["repo"]
