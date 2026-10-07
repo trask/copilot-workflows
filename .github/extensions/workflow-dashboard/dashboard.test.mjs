@@ -149,7 +149,7 @@ test("CLI transport diagnostics are sanitized and retain the no-window and bound
         await assert.rejects(runGh(["api", "user"], (command, args, options, callback) => {
             assert.equal(command, "gh");
             assert.equal(options.windowsHide, true);
-            assert.equal(options.timeout, 20000);
+            assert.equal(options.timeout, 60000);
             assert.equal(options.env.GH_PROMPT_DISABLED, "1");
             assert.equal(options.env.GH_DEBUG, undefined);
             callback({ code: 1 }, "", `${diagnostic}\nAuthorization: Bearer must-not-echo`);
@@ -208,7 +208,7 @@ test("authentication, certificate, process and unknown CLI failures do not retry
         [{ code: 1 }, "", "x509: certificate signed by unknown authority", /certificate/],
         [{ code: 1 }, "", "unknown failure must-not-echo", /exited with code 1/],
         [{ code: "ENOENT" }, "", "", /installed/],
-        [{ code: null, killed: true }, "", "", /20-second/],
+        [{ code: null, killed: true }, "", "", /60-second/],
         [{ code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", killed: true }, "", "", /size limit/],
         [{ code: 1 }, "HTTP/2.0 200 OK", "unexpected EOF", /no HTTP/],
     ]) {

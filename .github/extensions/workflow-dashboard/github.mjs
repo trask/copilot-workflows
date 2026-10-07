@@ -51,7 +51,7 @@ function cliFailure(error, stderr) {
     if (error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
         return new GitHubError("GitHub CLI output exceeds the dashboard size limit.");
     }
-    if (error.killed) return new GitHubError("GitHub CLI request exceeded its 20-second time limit.");
+    if (error.killed) return new GitHubError("GitHub CLI request exceeded its 60-second time limit.");
     if (typeof error.code !== "number") {
         return new GitHubError("GitHub CLI could not complete the request. Check that gh is installed, authenticated, and online.");
     }
@@ -80,7 +80,7 @@ export function runGh(args, execute = execFile) {
     const env = { ...process.env, GH_PROMPT_DISABLED: "1", GH_PAGER: "cat" };
     delete env.GH_DEBUG;
     return new Promise((resolve, reject) => {
-        execute("gh", args, { windowsHide: true, timeout: 20000, maxBuffer: MAX_RESPONSE + 65536, env },
+        execute("gh", args, { windowsHide: true, timeout: 60000, maxBuffer: MAX_RESPONSE + 65536, env },
             (error, stdout, stderr) => {
                 if (error && (typeof error.code !== "number" || error.killed ||
                     !/^HTTP\/[\d.]+ \d{3}\b/.test(stdout))) {
