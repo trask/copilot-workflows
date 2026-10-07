@@ -1048,7 +1048,7 @@ function rendererState(repository = "example/project") {
     };
 }
 
-test("ownership toggle defaults to My PRs and shows only PR Reviewer on other authors' PRs", async () => {
+test("ownership toggle defaults to My PRs and shows only Draft review on other authors' PRs", async () => {
     const state = rendererState();
     const own = state.prs[0];
     const phase = phaseSummary(record(fixture({}, { loop_kind: "pr_review" })));
@@ -1086,17 +1086,17 @@ test("ownership toggle defaults to My PRs and shows only PR Reviewer on other au
     assert.equal(cards().length, 2);
     const active = buttons(cards()[0]);
     assert.equal(active.length, 2);
-    assert.equal(active[0]["aria-label"], "PR Reviewer: Running");
+    assert.equal(active[0]["aria-label"], "Draft review: Running");
     assert.equal(active[0]["aria-busy"], "true");
     assert.equal(active[0].disabled, true);
-    assert.equal(active[1].textContent, "Cancel current task");
+    assert.equal(active[1].textContent, "Cancel task");
     assert.equal(active[1].disabled, false);
     assert.ok(cards()[0].children.some((node) => node.tag === "details"));
     assert.equal(buttons(cards()[1]).length, 1);
-    assert.equal(buttons(cards()[1])[0]["aria-label"], "PR Reviewer: Run");
+    assert.equal(buttons(cards()[1])[0]["aria-label"], "Draft review: Run");
     assert.equal(buttons(cards()[1])[0].disabled, false);
     assert.ok(cards().every((card) => !buttons(card).some((button) =>
-        button["aria-label"]?.startsWith("Self-review:"))));
+        button["aria-label"]?.startsWith("Review and fix:"))));
 
     nodes.get("reviewers").checked = true;
     nodes.get("reviewers").events.input();
@@ -1175,7 +1175,10 @@ test("renderer preserves safe history and shows per-task buttons with direct dis
     const buttons = () => nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid").children;
     assert.equal(buttons().length, Object.keys(KIND_LABELS).length);
     assert.ok(buttons().every((button) => button.disabled && button.children[0].firstChild.tag === "svg"));
-    assert.deepEqual(buttons().map((button) => button.children[1].textContent), Object.values(KIND_LABELS));
+    assert.deepEqual(buttons().map((button) => button.children[1].textContent), [
+        "Address Copilot feedback", "Review and fix", "Resolve conflicts", "Fix CI",
+        "Update title & description", "Simplify code", "Draft review", "Align with existing code",
+    ]);
     assert.ok(buttons().every((button) => button.children.length === 2 && button.children[1].children.length === 0));
     assert.equal(row.children.filter((node) => node.tag === "select").length, 0);
 
@@ -1186,24 +1189,24 @@ test("renderer preserves safe history and shows per-task buttons with direct dis
     renderer.render();
     const active = buttons().filter((button) => button["aria-busy"] === "true");
     assert.equal(active.length, 1);
-    assert.equal(active[0]["aria-label"], "Self-review: Running");
+    assert.equal(active[0]["aria-label"], "Review and fix: Running");
     assert.equal(active[0]["data-tone"], "active");
     const icon = active[0].children[0];
     assert.equal(icon.firstChild.className, "spinner");
     assert.equal(icon["aria-hidden"], "true");
-    assert.equal(active[0].children[1].textContent, "Self-review");
+    assert.equal(active[0].children[1].textContent, "Review and fix");
 
     Object.assign(state.prs[0], { tasks: ["pr_description"], actionBlock: null, phase: null });
     renderer.render();
-    const description = buttons().find((button) => button["aria-label"] === "PR Description: Run");
+    const description = buttons().find((button) => button["aria-label"] === "Update title & description: Run");
     assert.equal(description.title, TASK_EFFECTS.pr_description);
     const accept = description.events.click();
     assert.deepEqual(launches, [{ target, kind: "pr_description", confirmed: true }]);
     assert.ok(buttons().every((button) => button.disabled));
-    assert.ok(buttons().some((button) => button["aria-label"] === "PR Description: Dispatching" && button["aria-busy"] === "true"));
+    assert.ok(buttons().some((button) => button["aria-label"] === "Update title & description: Dispatching" && button["aria-busy"] === "true"));
     releaseLaunch();
     await accept;
-    assert.ok(buttons().some((button) => button["aria-label"] === "PR Description: Starting"));
+    assert.ok(buttons().some((button) => button["aria-label"] === "Update title & description: Starting"));
 });
 
 test("every task dispatches directly on click and locks duplicate and competing submissions", async () => {
@@ -1253,9 +1256,9 @@ test("live action hints use amber, explain effects and disable only confirmed un
         assert.ok(button(kind).title.includes(TASK_EFFECTS[kind]));
         assert.equal(button(kind)["aria-description"], taskPresentation(state.prs[0], kind, true).detail);
     }
-    assert.equal(button("pr_conflict_resolver")["aria-label"], "PR Conflict Resolver: Conflicts");
-    assert.equal(button("ci_fix")["aria-label"], "CI Fix Loop: CI failing");
-    assert.equal(button("copilot_review")["aria-label"], "Copilot review: Open Copilot threads");
+    assert.equal(button("pr_conflict_resolver")["aria-label"], "Resolve conflicts: Conflicts");
+    assert.equal(button("ci_fix")["aria-label"], "Fix CI: CI failing");
+    assert.equal(button("copilot_review")["aria-label"], "Address Copilot feedback: Open Copilot threads");
     Object.assign(state.prs[0].evidence, { conflicts: "no", ci: "passing", copilotThreads: 0 });
     renderer.render(state);
     assert.equal(button("pr_conflict_resolver").disabled, true);
@@ -1265,7 +1268,7 @@ test("live action hints use amber, explain effects and disable only confirmed un
     state.prs[0].evidence = { sha: state.prs[0].sha, error: "Status read failed." };
     renderer.render(state);
     assert.equal(button("pr_conflict_resolver").disabled, false);
-    assert.equal(button("pr_conflict_resolver")["aria-label"], "PR Conflict Resolver: Status unknown");
+    assert.equal(button("pr_conflict_resolver")["aria-label"], "Resolve conflicts: Status unknown");
     assert.match(button("pr_conflict_resolver").title, /Status read failed/);
     const css = await readFile(new URL("styles.css", import.meta.url), "utf8");
     assert.match(css, /data-tone="needed"/);
@@ -1321,10 +1324,10 @@ test("PR cards put status in task buttons and keep saved run metadata inside exp
     const phase = phaseSummary(record(fixture({ stage: "clean" })));
     state.prs[0].phase = phase;
     renderer.render();
-    assert.doesNotMatch(texts(), /yours|Head |Waiting since|CI:|Conflicts:|Reviewers:|Copilot review: clean/);
+    assert.doesNotMatch(texts(), /yours|Head |Waiting since|CI:|Conflicts:|Reviewers:|Address Copilot feedback: clean/);
     const buttons = row().children.find((node) => node.className === "task-grid").children;
     assert.equal(buttons.length, Object.keys(KIND_LABELS).length);
-    assert.ok(buttons.some((node) => node["aria-label"] === "Copilot review: Clean"));
+    assert.ok(buttons.some((node) => node["aria-label"] === "Address Copilot feedback: Clean"));
     const details = row().children.find((node) => node.tag === "details");
     assert.equal(details.firstChild.textContent, "Run details");
     assert.equal(details.open, undefined);
@@ -1352,8 +1355,8 @@ test("review cards show the actual outcome above collapsed technical details wit
     const result = () => card().children.find((node) => node.className === "run-result");
     const details = () => card().children.find((node) => node.tag === "details");
     const status = () => card().children.find((node) => node.className === "task-grid")
-        .children.find((node) => node["aria-label"]?.startsWith("PR Reviewer:"));
-    assert.equal(status()["aria-label"], "PR Reviewer: No findings");
+        .children.find((node) => node["aria-label"]?.startsWith("Draft review:"));
+    assert.equal(status()["aria-label"], "Draft review: No findings");
     assert.equal(result().firstChild.textContent, "No new findings. No pending review was created.");
     assert.equal(details().firstChild.textContent, "Run details");
     assert.equal(details().open, undefined);
@@ -1366,7 +1369,7 @@ test("review cards show the actual outcome above collapsed technical details wit
     });
     state.prs[0].phase = phaseSummary(record(s));
     renderer.render();
-    assert.equal(status()["aria-label"], "PR Reviewer: Review ready");
+    assert.equal(status()["aria-label"], "Draft review: Review ready");
     assert.equal(result().firstChild.textContent,
         "1 review comment in a pending GitHub review. Only you can see it until you submit it.");
     assert.equal(result().children[1].href, "https://github.com/example/project/pull/12#pullrequestreview-42");
@@ -1383,11 +1386,11 @@ test("review cards show the actual outcome above collapsed technical details wit
 
     state.prs[0].sha = sha("b");
     renderer.render();
-    assert.equal(status()["aria-label"], "PR Reviewer: Previous head");
+    assert.equal(status()["aria-label"], "Draft review: Previous head");
     assert.equal(result().firstChild.textContent, "Result from a previous PR commit.");
     Object.assign(state.prs[0], { sha: sha("a"), phase: { ...phaseSummary(record(s)), stage: "blocked" } });
     renderer.render();
-    assert.equal(status()["aria-label"], "PR Reviewer: Blocked");
+    assert.equal(status()["aria-label"], "Draft review: Blocked");
     assert.equal(result(), undefined);
 });
 
@@ -1408,7 +1411,7 @@ test("Cancel dispatches the exact displayed identity directly and stays locked p
         return { ok: true, json: async () => state };
     });
     const cancelButton = () => nodes.get("prs").firstChild.children.find((node) =>
-        node.className === "task-grid").children.find((node) => node.textContent === "Cancel current task");
+        node.className === "task-grid").children.find((node) => node.textContent === "Cancel task");
     const button = cancelButton();
     assert.equal(button.disabled, false);
     assert.match(button.title, /does not undo published changes/);
@@ -1421,14 +1424,14 @@ test("Cancel dispatches the exact displayed identity directly and stays locked p
     await pending;
     assert.equal(cancelButton().disabled, true);
     assert.ok(nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid")
-        .children.some((node) => node["aria-label"] === "Copilot review: Cancelling"));
+        .children.some((node) => node["aria-label"] === "Address Copilot feedback: Cancelling"));
     Object.assign(state.prs[0], { phase: { ...phase, stage: "cancelled" },
         canCancel: false, actionBlock: null, dispatch: null });
     renderer.render();
     assert.equal(cancelButton(), undefined);
 });
 
-test("Cancel dispatch uses the exact accepted run receipt and locks duplicate clicks", async () => {
+test("Cancel launch uses the exact accepted run receipt and locks duplicate clicks", async () => {
     const state = rendererState();
     const pr = state.prs[0];
     Object.assign(pr, { canCancelDispatch: true, actionBlock: "Dispatch accepted", dispatch: {
@@ -1450,7 +1453,7 @@ test("Cancel dispatch uses the exact accepted run receipt and locks duplicate cl
         return { ok: true, json: async () => state };
     });
     const grid = () => nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid");
-    const cancelButton = () => grid().children.find((node) => node.textContent === "Cancel dispatch");
+    const cancelButton = () => grid().children.find((node) => node.textContent === "Cancel launch");
     const button = cancelButton();
     assert.equal(button.disabled, false);
     const pending = button.events.click();

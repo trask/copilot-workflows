@@ -16,7 +16,7 @@ export const TASK_EFFECTS = {
     pr_description: "Update the PR title and description only when needed.",
     pr_simplify: "Make one pass of major behavior-preserving simplifications and push qualifying changes.",
     pr_review: "Create a pending review on GitHub for warranted findings. Never submit or approve it.",
-    pr_consistency: "Compare the PR with repository conventions and push fixes for avoidable differences.",
+    pr_consistency: "Compare changed code with nearby examples and applicable instructions, and push fixes for avoidable differences.",
 };
 
 export function checkedPull(pr, repo) {

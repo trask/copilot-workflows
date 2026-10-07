@@ -1,6 +1,6 @@
 export const KIND_LABELS = {
-    copilot_review: "Copilot review", self_review: "Self-review",
-    pr_conflict_resolver: "PR Conflict Resolver", ci_fix: "CI Fix Loop",
-    pr_description: "PR Description", pr_simplify: "PR Simplify",
-    pr_review: "PR Reviewer", pr_consistency: "PR Consistency Review",
+    copilot_review: "Address Copilot feedback", self_review: "Review and fix",
+    pr_conflict_resolver: "Resolve conflicts", ci_fix: "Fix CI",
+    pr_description: "Update title & description", pr_simplify: "Simplify code",
+    pr_review: "Draft review", pr_consistency: "Align with existing code",
 };

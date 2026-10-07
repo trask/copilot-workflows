@@ -236,7 +236,7 @@ function prCard(pr) {
     }
     const cancelDispatch = pr.dispatch?.operation === "cancel_dispatch" ||
         pr.dispatch?.operation === "launch" && pr.dispatch.status === "accepted";
-    const cancel = element("button", cancelDispatch ? "Cancel dispatch" : "Cancel current task");
+    const cancel = element("button", cancelDispatch ? "Cancel launch" : "Cancel task");
     cancel.type = "button";
     cancel.className = "task-button";
     cancel.disabled = cancelDispatch
@@ -319,7 +319,7 @@ function phaseCard(phase) {
         } catch (failure) {
             histories.delete(key);
             timeline.replaceChildren(element("p", failure.message, "error"));
-            const retry = element("button", "Retry history");
+            const retry = element("button", "Retry loading history");
             retry.addEventListener("click", renderHistory);
             timeline.append(retry);
         }
