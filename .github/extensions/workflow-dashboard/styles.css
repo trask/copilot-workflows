@@ -36,12 +36,11 @@ code { font: 12px var(--font-mono, Consolas, monospace); overflow-wrap: anywhere
 .pr-author { margin-left: auto; font-size: 12px; }
 .pr-card .card { margin-top: 14px; margin-bottom: 0; }
 .run-result { margin-top: 12px; }
-.task-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 6px; margin-top: 16px; }
-.task-grid[data-mine="false"] { grid-template-columns: repeat(auto-fit, minmax(100px, 160px)); }
-.task-button { display: flex; align-items: center; gap: 4px; min-height: 40px; padding: 6px; text-align: left; }
+.task-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.task-button { display: flex; align-items: center; gap: 6px; min-height: 40px; max-width: 100%; padding: 8px 10px; text-align: left; }
 .task-button:disabled { cursor: default; opacity: .6; }
 .task-icon { display: flex; align-items: center; justify-content: center; width: 16px; height: 16px; flex: none; color: var(--text-color-muted, #59636e); }
-.task-name { min-width: 0; font-size: 12px; line-height: 16px; font-weight: var(--font-weight-semibold, 600); }
+.task-name { min-width: 0; font-size: 14px; line-height: 20px; font-weight: var(--font-weight-semibold, 600); }
 .task-button[data-tone="active"], .task-button[data-tone="waiting"] { border-color: var(--true-color-blue, #0969da); background: var(--true-color-blue-muted, #ddf4ff); opacity: 1; }
 .task-button[data-tone="active"] .task-icon, .task-button[data-tone="waiting"] .task-icon { color: var(--true-color-blue, #0969da); }
 .task-button[data-tone="complete"] { opacity: 1; }
