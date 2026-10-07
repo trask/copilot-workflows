@@ -215,10 +215,12 @@ function prCard(pr) {
         const button = element("button", null, "task-button");
         button.type = "button";
         button.disabled = presentation.disabled;
-        button.title = !presentation.disabled ? TASK_EFFECTS[kind] : !pr.tasks.includes(kind) && !presentation.busy
-            ? `${presentation.label}. ${presentation.detail}` : presentation.detail;
+        button.title = !pr.tasks.includes(kind) && !presentation.busy
+            ? `${presentation.label}. ${presentation.detail}` : presentation.detail === TASK_EFFECTS[kind]
+                ? presentation.detail : `${presentation.detail} ${TASK_EFFECTS[kind]}`;
         button.setAttribute("data-tone", presentation.tone);
         button.setAttribute("aria-label", `${label}: ${presentation.label}`);
+        button.setAttribute("aria-description", presentation.detail);
         button.setAttribute("aria-busy", String(presentation.busy));
         const icon = element("span", null, "task-icon");
         icon.append(taskIcon(kind));

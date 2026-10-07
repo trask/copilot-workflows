@@ -28,12 +28,12 @@ await joinSession({
     canvases: [createCanvas({
         id: "workflow-dashboard",
         displayName: "PR workflows",
-        description: "Browse open repository PRs, filter by author or dashboard reviewer routing, and run or cancel central Actions tasks.",
+        description: "Browse open repository PRs, see needed work, filter by author or reviewer routing, and run or cancel central Actions tasks.",
         inputSchema: { type: "object", properties: { repo: { type: "string", enum: REPOSITORIES } }, additionalProperties: false },
         actions: [
             {
                 name: "refresh",
-                description: "Refresh open PRs, reviewer dashboard facts and central task status without starting workflows.",
+                description: "Refresh open PRs, reviewer routing, live action evidence and central task status without starting workflows.",
                 inputSchema: emptyInput,
                 handler: async () => {
                     const state = await dashboard.refresh();

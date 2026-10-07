@@ -1220,8 +1220,9 @@ test("every task dispatches directly on click and locks duplicate and competing 
         });
         const buttons = () => nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid").children;
         const original = [...buttons()];
-        const button = original.find((node) => node["aria-label"] === `${label}: Run`);
-        assert.equal(button.title, TASK_EFFECTS[kind]);
+        const presentation = taskPresentation(state.prs[0], kind, state.workflowReady);
+        const button = original.find((node) => node["aria-label"] === `${label}: ${presentation.label}`);
+        assert.ok(button.title.includes(TASK_EFFECTS[kind]));
         const pending = button.events.click();
         assert.deepEqual(launches, [{ target, kind, confirmed: true }]);
         assert.ok(buttons().every((node) => node.disabled));
@@ -1233,6 +1234,39 @@ test("every task dispatches directly on click and locks duplicate and competing 
         assert.ok(buttons().every((node) => node.disabled));
         assert.ok(buttons().some((node) => node["aria-label"] === `${label}: Starting`));
     }
+});
+
+test("live action hints use amber, explain effects and disable only confirmed unnecessary fixes", async () => {
+    const state = rendererState();
+    state.prs[0].evidence = {
+        sha: state.prs[0].sha, conflicts: "yes", ci: "failing", failing: 2, copilotThreads: 1,
+    };
+    const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
+    const buttons = () => nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid").children;
+    const button = (kind) => buttons().find((node) => node["aria-label"].startsWith(`${KIND_LABELS[kind]}:`));
+    for (const kind of ["pr_conflict_resolver", "ci_fix", "copilot_review"]) {
+        assert.equal(button(kind)["data-tone"], "needed");
+        assert.equal(button(kind).disabled, false);
+        assert.ok(button(kind).title.includes(TASK_EFFECTS[kind]));
+        assert.equal(button(kind)["aria-description"], taskPresentation(state.prs[0], kind, true).detail);
+    }
+    assert.equal(button("pr_conflict_resolver")["aria-label"], "PR Conflict Resolver: Conflicts");
+    assert.equal(button("ci_fix")["aria-label"], "CI Fix Loop: CI failing");
+    assert.equal(button("copilot_review")["aria-label"], "Copilot review: Open Copilot threads");
+    Object.assign(state.prs[0].evidence, { conflicts: "no", ci: "passing", copilotThreads: 0 });
+    renderer.render(state);
+    assert.equal(button("pr_conflict_resolver").disabled, true);
+    assert.equal(button("ci_fix").disabled, true);
+    assert.equal(button("copilot_review").disabled, false);
+    assert.match(button("pr_conflict_resolver").title, /unnecessary/);
+    state.prs[0].evidence = { sha: state.prs[0].sha, error: "Status read failed." };
+    renderer.render(state);
+    assert.equal(button("pr_conflict_resolver").disabled, false);
+    assert.equal(button("pr_conflict_resolver")["aria-label"], "PR Conflict Resolver: Status unknown");
+    assert.match(button("pr_conflict_resolver").title, /Status read failed/);
+    const css = await readFile(new URL("styles.css", import.meta.url), "utf8");
+    assert.match(css, /data-tone="needed"/);
+    assert.match(css, /data-color-mode="dark"/);
 });
 
 test("PR headings show the author only in Not my PRs without routing, dashboard or draft pills", async () => {
@@ -1270,6 +1304,7 @@ test("PR headings show the author only in Not my PRs without routing, dashboard 
 
 test("PR cards put status in task buttons and keep saved run metadata inside expandable details", async () => {
     const state = rendererState();
+    state.prs[0].evidence = { sha: state.prs[0].sha, conflicts: "no", ci: "passing", copilotThreads: 0 };
     Object.assign(state.prs[0], {
         waitingSince: 2000000, dashboardStatus: "current",
         ciFailing: 0, ciPending: 0, conflicts: "no", reviewers: [{ login: "laurit", approved: true }],

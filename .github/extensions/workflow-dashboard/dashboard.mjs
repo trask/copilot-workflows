@@ -22,7 +22,7 @@ export class Dashboard {
     state() {
         return {
             ...this.value, auto: this.auto, pauseReason: this.pauseReason,
-            rate: this.github.rate, retryAt: this.github.retryAt,
+            rate: this.github.rate, graphqlRate: this.github.graphqlRate, retryAt: this.github.retryAt,
             metrics: { requests: this.github.requests, counted: this.github.counted, cacheHits: this.github.cacheHits,
                 readRetries: this.github.readRetries ?? 0 },
         };
@@ -56,8 +56,10 @@ export class Dashboard {
 
     setAuto(enabled) {
         if (enabled && this.github.retryAt > this.now()) throw new Error("Wait for the GitHub rate-limit reset before enabling automatic refresh.");
-        if (enabled && this.github.rate && this.github.rate.remaining < this.github.rate.limit * 0.1 &&
-            this.github.rate.reset > this.now()) throw new Error("Automatic refresh is paused while less than 10 percent of GitHub capacity remains.");
+        if (enabled && [this.github.rate, this.github.graphqlRate].some((rate) =>
+            rate && rate.remaining < rate.limit * 0.1 && rate.reset > this.now())) {
+            throw new Error("Automatic refresh is paused while less than 10 percent of GitHub capacity remains.");
+        }
         this.auto = enabled;
         this.pauseReason = null;
         this.schedule();
@@ -115,8 +117,8 @@ export class Dashboard {
                 phases, actions, failures, warnings, loadedAt: this.now(), snapshot: snapshot.sha,
                 error: null, loading: false, latency: this.now() - started, cost: this.github.counted - counted,
             };
-            const rate = this.github.rate;
-            if (rate && rate.remaining < rate.limit * 0.1) this.pauseReason = "Less than 10 percent of GitHub capacity remains.";
+            if ([this.github.rate, this.github.graphqlRate].some((rate) =>
+                rate && rate.remaining < rate.limit * 0.1)) this.pauseReason = "Less than 10 percent of GitHub capacity remains.";
             else if (warm && this.value.latency > 10000) this.pauseReason = "Refresh took more than 10 seconds.";
             else if (warm && this.value.cost > 12) this.pauseReason = "Refresh used more than 12 primary-counted GitHub requests.";
             else this.pauseReason = null;

@@ -7,6 +7,36 @@ export const CENTRAL = "trask/copilot-workflows";
 export const MAX_RESPONSE = 16 * 1024 * 1024;
 const READ_CONCURRENCY = 3;
 const READ_RETRY_DELAY = 250;
+const CHECK_FIELDS = `
+    __typename
+    ... on CheckRun { name status conclusion checkSuite { app { slug } } }
+    ... on StatusContext { context state }`;
+const THREAD_FIELDS = `
+    isResolved isOutdated comments(first: 1) {
+        nodes { author { login __typename } pullRequestReview { state } }
+    }`;
+const EVIDENCE_FIELDS = `
+    number headRefOid
+    mergeRequirements { conditions { __typename result } }
+    commits(last: 1) { nodes { commit { oid statusCheckRollup {
+        contexts(first: 100) {
+            pageInfo { hasNextPage endCursor }
+            nodes { ${CHECK_FIELDS} }
+        }
+    } } } }
+    reviewThreads(first: 100) {
+        pageInfo { hasNextPage endCursor }
+        nodes { ${THREAD_FIELDS} }
+    }`;
+
+function connection(value) {
+    if (!Array.isArray(value?.nodes) || value.nodes.length > 100 ||
+        value.pageInfo?.hasNextPage && !value.nodes.length || typeof value.pageInfo?.hasNextPage !== "boolean" ||
+        value.pageInfo.hasNextPage && typeof value.pageInfo.endCursor !== "string") {
+        throw new GitHubError("Live PR status contains an incomplete connection.");
+    }
+    return value;
+}
 export const ACTIVE_STATUSES = ["queued", "in_progress", "waiting", "pending", "requested"];
 export const FAILED_COORDINATORS = `repos/${CENTRAL}/actions/workflows/coordinator.yml/runs?event=workflow_dispatch&status=failure&per_page=20`;
 
@@ -112,25 +142,30 @@ export class GitHub {
         this.cacheHits = 0;
         this.readRetries = 0;
         this.rate = null;
+        this.graphqlRate = null;
         this.retryAt = null;
     }
 
     get(path) {
         safePath(path);
-        if (this.inFlightReads.has(path)) return this.inFlightReads.get(path);
+        return this.queueRead(path, () => this.read(path));
+    }
+
+    queueRead(key, read) {
+        if (this.inFlightReads.has(key)) return this.inFlightReads.get(key);
         const task = new Promise((resolve, reject) => {
-            this.readQueue.push({ path, resolve, reject });
-        }).finally(() => this.inFlightReads.delete(path));
-        this.inFlightReads.set(path, task);
+            this.readQueue.push({ read, resolve, reject });
+        }).finally(() => this.inFlightReads.delete(key));
+        this.inFlightReads.set(key, task);
         this.drainReads();
         return task;
     }
 
     drainReads() {
         while (this.activeReads < READ_CONCURRENCY && this.readQueue.length) {
-            const { path, resolve, reject } = this.readQueue.shift();
+            const { read, resolve, reject } = this.readQueue.shift();
             this.activeReads++;
-            this.read(path).then(resolve, reject).finally(() => {
+            read().then(resolve, reject).finally(() => {
                 this.activeReads--;
                 this.drainReads();
             });
@@ -138,23 +173,25 @@ export class GitHub {
     }
 
     recordRate(headers, status) {
+        const field = headers["x-ratelimit-resource"] === "graphql" ? "graphqlRate" : "rate";
         if (headers["x-ratelimit-limit"] && headers["x-ratelimit-remaining"] && headers["x-ratelimit-reset"]) {
             const rate = {
                 limit: Number(headers["x-ratelimit-limit"]),
                 remaining: Number(headers["x-ratelimit-remaining"]),
                 reset: Number(headers["x-ratelimit-reset"]) * 1000,
             };
-            if (!this.rate || rate.reset > this.rate.reset) this.rate = rate;
-            else if (rate.reset === this.rate.reset) {
-                this.rate = { ...rate, remaining: Math.min(this.rate.remaining, rate.remaining) };
+            if (!this[field] || rate.reset > this[field].reset) this[field] = rate;
+            else if (rate.reset === this[field].reset) {
+                this[field] = { ...rate, remaining: Math.min(this[field].remaining, rate.remaining) };
             }
         }
         const limited = status === 429 || status === 403 &&
-            (headers["retry-after"] || this.rate?.remaining === 0);
+            (headers["retry-after"] || this[field]?.remaining === 0) ||
+            field === "graphqlRate" && this[field]?.remaining === 0;
         if (limited) {
             const retryAt = headers["retry-after"]
                 ? this.now() + Number(headers["retry-after"]) * 1000
-                : this.rate?.remaining === 0 ? this.rate.reset : this.now() + 60000;
+                : this[field]?.remaining === 0 ? this[field].reset : this.now() + 60000;
             this.retryAt = Math.max(this.retryAt ?? 0, retryAt);
         }
         return Boolean(limited);
@@ -278,6 +315,118 @@ export class GitHub {
         }
         if (next) throw new GitHubError("GitHub open-PR pagination exceeds the 10,000 PR limit.");
         return [...results.values()];
+    }
+
+    graphql(query, repo) {
+        configuredRepository(repo);
+        return this.queueRead(`graphql:${repo}:${query}`, async () => {
+            if (this.retryAt > this.now()) throw new GitHubError("GitHub reads are paused until the recorded rate-limit reset.", this.retryAt);
+            const [owner, name] = repo.split("/");
+            this.requests++;
+            this.counted++;
+            const result = await this.run(["api", "--hostname", "github.com", "--method", "POST", "--include",
+                "graphql", "-f", `query=${query}`, "-f", `owner=${owner}`, "-f", `name=${name}`]);
+            const response = parseResponse(result.stdout);
+            this.recordRate(response.headers, response.status);
+            if (response.status !== 200) {
+                throw new GitHubError(`Live PR status read failed with HTTP ${response.status}. Check gh authentication and repository access.`);
+            }
+            let payload;
+            try {
+                payload = JSON.parse(response.body);
+            } catch {
+                throw new GitHubError("GitHub returned malformed live PR status JSON.");
+            }
+            if (result.code !== 0 || payload?.errors?.length || !payload?.data?.repository) {
+                throw new GitHubError("GitHub could not return live PR status. Check repository access and GraphQL query support.");
+            }
+            return payload.data.repository;
+        });
+    }
+
+    async pullEvidence(repo, pulls) {
+        configuredRepository(repo);
+        if (pulls.some((pr) => !Number.isSafeInteger(pr.number) || pr.number < 1 || pr.number >= 100000000)) {
+            throw new GitHubError("Invalid PR identity for live status.");
+        }
+        const results = new Map();
+        const batches = [];
+        for (let index = 0; index < pulls.length; index += 10) batches.push(pulls.slice(index, index + 10));
+        await Promise.all(batches.map(async (batch) => {
+            try {
+                const data = await this.graphql(`query($owner: String!, $name: String!) {
+                    repository(owner: $owner, name: $name) {
+                        ${batch.map((pr) => `pr${pr.number}: pullRequest(number: ${pr.number}) { ${EVIDENCE_FIELDS} }`).join("\n")}
+                    }
+                }`, repo);
+                await Promise.all(batch.map(async (pr) => {
+                    try {
+                        const detail = data[`pr${pr.number}`];
+                        if (detail?.number !== pr.number || detail.headRefOid !== pr.sha) {
+                            throw new GitHubError("Live PR status is missing or belongs to a different head. Refresh to try again.");
+                        }
+                        const commit = detail.commits?.nodes?.[0]?.commit;
+                        if (detail.commits?.nodes?.length !== 1 || commit?.oid !== pr.sha ||
+                            !Object.hasOwn(commit, "statusCheckRollup")) {
+                            throw new GitHubError("Live CI status does not match the PR head.");
+                        }
+                        const threads = connection(detail.reviewThreads);
+                        const checks = commit.statusCheckRollup === null ? null : connection(commit.statusCheckRollup?.contexts);
+                        const pages = await Promise.allSettled([
+                            this.completeConnection(repo, pr, threads, "threads"),
+                            checks && this.completeConnection(repo, pr, checks, "checks"),
+                        ]);
+                        const failed = pages.find((page) => page.status === "rejected");
+                        if (failed) throw failed.reason;
+                        results.set(pr.number, { detail });
+                    } catch (error) {
+                        results.set(pr.number, { error: error.message });
+                    }
+                }));
+            } catch (error) {
+                for (const pr of batch) results.set(pr.number, { error: error.message });
+            }
+        }));
+        return results;
+    }
+
+    async completeConnection(repo, pr, value, kind) {
+        const cursors = new Set();
+        let size = Buffer.byteLength(JSON.stringify(value.nodes));
+        while (value.pageInfo.hasNextPage) {
+            const cursor = value.pageInfo.endCursor;
+            if (!cursor || cursors.has(cursor) || size > MAX_RESPONSE) {
+                throw new GitHubError("Live PR status pagination is incomplete or oversized.");
+            }
+            cursors.add(cursor);
+            const fields = kind === "threads"
+                ? `reviewThreads(first: 100, after: ${JSON.stringify(cursor)}) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes { ${THREAD_FIELDS} }
+                }`
+                : `commits(last: 1) { nodes { commit { oid statusCheckRollup {
+                    contexts(first: 100, after: ${JSON.stringify(cursor)}) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes { ${CHECK_FIELDS} }
+                    }
+                } } } }`;
+            const data = await this.graphql(`query($owner: String!, $name: String!) {
+                repository(owner: $owner, name: $name) {
+                    pullRequest(number: ${pr.number}) { number headRefOid ${fields} }
+                }
+            }`, repo);
+            const detail = data.pullRequest;
+            if (detail?.number !== pr.number || detail.headRefOid !== pr.sha) {
+                throw new GitHubError("PR head changed while reading live status. Refresh to try again.");
+            }
+            const commit = detail.commits?.nodes?.[0]?.commit;
+            if (kind === "checks" && commit?.oid !== pr.sha) throw new GitHubError("Live CI pagination belongs to a different commit.");
+            const page = connection(kind === "threads" ? detail.reviewThreads : commit?.statusCheckRollup?.contexts);
+            size += Buffer.byteLength(JSON.stringify(page.nodes));
+            if (size > MAX_RESPONSE) throw new GitHubError("Live PR status exceeds the dashboard size limit.");
+            value.nodes.push(...page.nodes);
+            value.pageInfo = page.pageInfo;
+        }
     }
 
     async dispatch(inputs) {

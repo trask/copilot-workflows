@@ -4,7 +4,7 @@ import { GitHub } from "./github.mjs";
 import { KIND_LABELS } from "./kinds.mjs";
 import { phaseSummary, TERMINAL } from "./model.mjs";
 import { DEFAULT_REPOSITORY, REPOSITORIES, configuredRepository, dashboardPath, targetParts, LAUNCH_OWNER_ID } from "./repositories.mjs";
-import { actionBlock, checkedPull, normalizePull, taskChoices } from "./prs.mjs";
+import { actionBlock, actionEvidence, checkedPull, normalizeEvidence, normalizePull, taskChoices } from "./prs.mjs";
 
 export function decodeDashboard(response) {
     if (response?.type !== "file" || response.encoding !== "base64" || typeof response.content !== "string" ||
@@ -47,6 +47,7 @@ export class PrDashboard extends Dashboard {
         this.prWarnings = [];
         this.dispatches = new Map();
         this.selecting = false;
+        this.evidenceLoading = false;
     }
 
     state() {
@@ -54,7 +55,8 @@ export class PrDashboard extends Dashboard {
         const ready = Boolean(this.prLoadedAt && !this.prError && workflowReady);
         const phases = this.value.phases;
         return {
-            ...super.state(), repository: this.repository, repositories: REPOSITORIES,
+            ...super.state(), loading: this.value.loading || this.evidenceLoading,
+            repository: this.repository, repositories: REPOSITORIES,
             viewer: this.viewer, prLoadedAt: this.prLoadedAt, prError: this.prError,
             prWarnings: this.prWarnings, workflowReady,
             prs: this.prs.map((pr) => {
@@ -118,11 +120,36 @@ export class PrDashboard extends Dashboard {
             this.prWarnings = warnings;
             this.prLoadedAt = this.now();
             this.prError = null;
-            await super.update();
+            this.evidenceLoading = true;
+            const [liveStatus] = await Promise.allSettled([
+                this.github.pullEvidence(this.repository, prs.filter((pr) => pr.mine)),
+                super.update(),
+            ]);
+            this.evidenceLoading = false;
+            for (const pr of prs) {
+                if (!pr.mine) continue;
+                const read = liveStatus.status === "fulfilled" ? liveStatus.value.get(pr.number) : null;
+                try {
+                    if (!read?.detail) throw new Error(read?.error ??
+                        (liveStatus.status === "rejected" ? liveStatus.reason.message : "Live action status is missing."));
+                    pr.evidence = normalizeEvidence(read.detail, pr.sha);
+                } catch (error) {
+                    this.evidenceLoading = false;
+                    pr.evidence = { sha: pr.sha, error: error.message };
+                    warnings.push(`${pr.target}: ${error.message}`);
+                }
+            }
             this.observeDispatches();
             this.value.latency = this.now() - started;
             this.value.cost = this.github.counted - counted;
-            if (!dashboard) {
+            if (prs.some((pr) => pr.evidence?.error)) {
+                this.auto = false;
+                this.pauseReason = "Live action status is unavailable. Refresh manually.";
+            } else if ([this.github.rate, this.github.graphqlRate].some((rate) =>
+                rate && rate.remaining < rate.limit * 0.1)) {
+                this.auto = false;
+                this.pauseReason = "Less than 10 percent of GitHub capacity remains.";
+            } else if (!dashboard) {
                 this.auto = false;
                 this.pauseReason = "Reviewer dashboard is unavailable. Refresh manually.";
             } else if (warm && this.value.cost > 12) {
@@ -177,6 +204,13 @@ export class PrDashboard extends Dashboard {
             const blocked = actionBlock(current.pr, current.viewer, current.phase, true, null);
             if (blocked) throw new Error(blocked);
             if (!taskChoices(current.pr, current.viewer).includes(input.kind)) throw new Error("This task is not eligible for the PR's author.");
+            if (["pr_conflict_resolver", "ci_fix"].includes(input.kind)) {
+                const read = (await this.github.pullEvidence(current.pr.repo, [current.pr])).get(current.pr.number);
+                if (!read?.detail) throw new Error(read?.error ?? "Live action status is unavailable. Refresh before launching.");
+                current.pr.evidence = normalizeEvidence(read.detail, current.pr.sha);
+                const evidence = actionEvidence(current.pr, input.kind);
+                if (evidence.unnecessary) throw new Error(evidence.detail);
+            }
             return {
                 inputs: { operation: "launch", target: input.target, loop_kind: input.kind, publication_auth: "fine_grained_pat" },
                 kind: input.kind, previousLaunch: current.phase?.launchId ?? null,

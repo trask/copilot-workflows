@@ -81,6 +81,84 @@ export function taskChoices(pr, viewer) {
         pr.authorType === "User" && pr.mine && pr.authorId === viewer.id);
 }
 
+export function normalizeEvidence(detail, sha) {
+    if (detail?.headRefOid !== sha || !Object.hasOwn(detail, "mergeRequirements") ||
+        detail.mergeRequirements !== null && !Array.isArray(detail.mergeRequirements?.conditions)) {
+        throw new Error("Live conflict status is incomplete or belongs to a different head.");
+    }
+    const conditions = detail.mergeRequirements?.conditions.filter((item) =>
+        item?.__typename === "PullRequestMergeConflictStateCondition") ?? [];
+    if (conditions.length > 1) throw new Error("Live conflict status contains duplicate file-conflict conditions.");
+    const conflicts = { FAILED: "yes", PASSED: "no" }[conditions[0]?.result] ?? "unknown";
+    const commit = detail.commits?.nodes?.[0]?.commit;
+    if (detail.commits?.nodes?.length !== 1 || commit?.oid !== sha ||
+        !Object.hasOwn(commit, "statusCheckRollup")) throw new Error("Live CI status does not match the PR head.");
+    const rollup = commit.statusCheckRollup;
+    const checks = rollup === null ? [] : rollup?.contexts?.nodes;
+    if (!Array.isArray(checks) || rollup !== null && rollup.contexts?.pageInfo?.hasNextPage !== false) {
+        throw new Error("Live CI status is incomplete.");
+    }
+    let failing = 0;
+    let pending = 0;
+    let total = 0;
+    let unknown = false;
+    for (const check of checks) {
+        const name = check?.__typename === "CheckRun" ? check.name : check?.__typename === "StatusContext" ? check.context : null;
+        if (typeof name !== "string" || !name) throw new Error("Live CI status contains an unsupported check.");
+        if (/copilot/i.test(name) || check.checkSuite?.app?.slug === "copilot-pull-request-reviewer") continue;
+        total++;
+        if (check.__typename === "CheckRun") {
+            if (["QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "PENDING"].includes(check.status)) pending++;
+            else if (check.status !== "COMPLETED") unknown = true;
+            else if (["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"].includes(check.conclusion)) failing++;
+            else if (!["SUCCESS", "NEUTRAL", "SKIPPED"].includes(check.conclusion)) unknown = true;
+        } else if (["ERROR", "FAILURE"].includes(check.state)) failing++;
+        else if (["EXPECTED", "PENDING"].includes(check.state)) pending++;
+        else if (check.state !== "SUCCESS") unknown = true;
+    }
+    const threads = detail.reviewThreads;
+    if (!Array.isArray(threads?.nodes) || threads.pageInfo?.hasNextPage !== false) {
+        throw new Error("Live Copilot thread status is incomplete.");
+    }
+    let copilotThreads = 0;
+    for (const thread of threads.nodes) {
+        if (typeof thread?.isResolved !== "boolean" || typeof thread.isOutdated !== "boolean" ||
+            !Array.isArray(thread.comments?.nodes) || thread.comments.nodes.length !== 1) {
+            throw new Error("Live review thread contains incomplete root-comment data.");
+        }
+        const root = thread.comments.nodes[0];
+        if (!thread.isResolved && !thread.isOutdated && root.author?.__typename === "Bot" &&
+            root.author.login?.toLowerCase().replace(/\[bot\]$/, "") === "copilot-pull-request-reviewer" &&
+            ["COMMENTED", "APPROVED", "CHANGES_REQUESTED"].includes(root.pullRequestReview?.state)) copilotThreads++;
+    }
+    return {
+        sha, conflicts, copilotThreads, failing, pending,
+        ci: failing ? "failing" : pending ? "pending" : total && !unknown ? "passing" : "unknown",
+    };
+}
+
+export function actionEvidence(pr, kind) {
+    if (!["pr_conflict_resolver", "ci_fix", "copilot_review"].includes(kind)) return null;
+    const evidence = pr.evidence?.sha === pr.sha ? pr.evidence : null;
+    const result = (label, detail, tone = "idle", unnecessary = false) => ({ label, detail, tone, unnecessary });
+    if (!evidence || evidence.error) return result("Status unknown",
+        evidence?.error ?? "Live action status is unavailable. Refresh to check whether this task is needed.", "unknown");
+    if (kind === "pr_conflict_resolver") {
+        if (evidence.conflicts === "yes") return result("Conflicts", "GitHub confirms file conflicts with the PR base.", "needed");
+        if (evidence.conflicts === "no") return result("No conflicts", "GitHub confirms no file conflicts. Conflict resolution is unnecessary.", "idle", true);
+        return result("Status unknown", "GitHub has not determined whether this PR has file conflicts.", "unknown");
+    }
+    if (kind === "ci_fix") {
+        if (evidence.ci === "failing") return result("CI failing", `${evidence.failing} current-head CI check(s) failed.`, "needed");
+        if (evidence.ci === "passing") return result("CI passing", "Current-head CI has passed. CI repair is unnecessary.", "idle", true);
+        if (evidence.ci === "pending") return result("CI pending", "Current-head CI is still running. No failed checks are currently detected.");
+        return result("Status unknown", "Current-head CI is absent or has an unknown result.", "unknown");
+    }
+    if (evidence.copilotThreads) return result("Open Copilot threads",
+        `${evidence.copilotThreads} unresolved, non-outdated Copilot review thread(s).`, "needed");
+    return result("Run", "No open Copilot-rooted threads detected. This is not proof of review clearance.");
+}
+
 export function actionBlock(pr, viewer, phase, ready, dispatch) {
     if (!ready) return "Refresh successfully before running a task.";
     if (!viewer || viewer.id !== LAUNCH_OWNER_ID) return "The workflows only accept the configured personal owner's dispatch.";
@@ -118,7 +196,8 @@ export function taskPresentation(pr, kind, workflowReady, actions = []) {
     const phase = pr.phase?.kind === kind ? pr.phase : null;
     const dispatch = pr.dispatch && (pr.dispatch.kind === kind ||
         pr.dispatch.operation === "cancel" && phase) ? pr.dispatch : null;
-    const disabled = Boolean(!workflowReady || pr.actionBlock || pr.dispatch) || !pr.tasks.includes(kind);
+    const evidence = actionEvidence(pr, kind);
+    const disabled = Boolean(!workflowReady || pr.actionBlock || pr.dispatch || evidence?.unnecessary) || !pr.tasks.includes(kind);
     const result = (label, tone = "idle", busy = false) => ({
         label, tone, busy, disabled,
         detail: dispatch?.message ?? (phase ? completionPresentation(phase)?.detail ?? phase.reason?.replaceAll("_", " ") : null) ??
@@ -130,18 +209,30 @@ export function taskPresentation(pr, kind, workflowReady, actions = []) {
         return result(dispatch.status === "accepted" ? "Starting" : "Dispatching", "active", true);
     }
     if (!workflowReady) return result("Status unavailable", "unknown");
-    if (!phase) return result(pr.tasks.includes(kind) ? "Run" : kind === "pr_review" ? "Unavailable" : "Own PRs only");
+    const idle = () => evidence ? {
+        ...result(evidence.label, evidence.tone), detail: pr.actionBlock ?? evidence.detail,
+    } : result("Run");
+    if (!phase) return pr.tasks.includes(kind) ? idle() : result(kind === "pr_review" ? "Unavailable" : "Own PRs only");
     if (phase.historical) return result("Historical", "unknown");
     if (phase.unknownStage) return result("Unknown state", "attention");
-    if (phase.sha && phase.sha !== pr.sha) return result("Previous head", "unknown");
+    if (phase.sha && phase.sha !== pr.sha &&
+        ["clean", "complete", "blocked", "failed", "exhausted", "cancelled"].includes(phase.stage)) {
+        return evidence ? idle() : result("Previous head", "unknown");
+    }
     const completion = completionPresentation(phase);
-    if (completion) return result(completion.label, "complete");
+    if (completion) {
+        return evidence && (kind !== "copilot_review" || evidence.tone === "needed" || evidence.tone === "unknown")
+            ? idle() : result(completion.label, "complete");
+    }
     const terminal = {
         clean: ["Clean", "complete"], complete: ["Completed", "complete"],
         blocked: ["Blocked", "attention"], failed: ["Failed", "attention"],
         exhausted: ["Budget exhausted", "attention"], cancelled: ["Cancelled", "idle"],
     };
-    if (terminal[phase.stage]) return result(...terminal[phase.stage]);
+    if (terminal[phase.stage]) {
+        const presentation = result(...terminal[phase.stage]);
+        return evidence ? { ...presentation, detail: `${presentation.detail} ${evidence.detail}` } : presentation;
+    }
     const waiting = {
         waiting_ci: "Waiting for CI", waiting_review: "Waiting for review",
         review_request_intent: "Requesting review", task_effect_intent: "Updating PR",

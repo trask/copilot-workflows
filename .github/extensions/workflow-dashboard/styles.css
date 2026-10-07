@@ -1,4 +1,5 @@
-:root { color-scheme: light dark; }
+:root { color-scheme: light dark; --workflow-needed-color: #9a6700; }
+[data-color-mode="dark"] { --workflow-needed-color: #d29922; }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--background-color-default, #fff); color: var(--text-color-default, #1f2328); font: var(--text-body-medium, 14px)/var(--leading-body-medium, 20px) var(--font-sans, system-ui, sans-serif); }
 header, main { padding: 20px; max-width: 1440px; margin: auto; }
@@ -51,6 +52,9 @@ code { font: 12px var(--font-mono, Consolas, monospace); overflow-wrap: anywhere
 .task-button[data-tone="complete"] .task-marker { background: currentColor; }
 .task-button[data-tone="attention"] { border-color: var(--true-color-red, #cf222e); opacity: 1; }
 .task-button[data-tone="attention"] .task-status { color: var(--true-color-red, #cf222e); }
+.task-button[data-tone="needed"] { border-color: var(--workflow-needed-color); background: color-mix(in srgb, var(--workflow-needed-color) 12%, var(--background-color-default, #fff)); opacity: 1; }
+.task-button[data-tone="needed"] .task-status, .task-button[data-tone="needed"] .task-icon { color: var(--workflow-needed-color); }
+.task-button[data-tone="needed"] .task-marker { background: currentColor; }
 .task-marker.spinner { width: 11px; height: 11px; border-width: 2px; border-right-color: transparent; animation: task-spin 1s linear infinite; }
 @keyframes task-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {

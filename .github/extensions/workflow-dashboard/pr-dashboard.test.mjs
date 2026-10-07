@@ -7,7 +7,7 @@ import { GitHub, CENTRAL, MAX_RESPONSE, FAILED_COORDINATORS } from "./github.mjs
 import { PrDashboard, decodeDashboard } from "./pr-dashboard.mjs";
 import { Checkpoints } from "./state.mjs";
 import { REPOSITORIES, DEFAULT_REPOSITORY, LAUNCH_OWNER_ID, dashboardPath, targetParts } from "./repositories.mjs";
-import { actionBlock, filterPulls, normalizePull, taskChoices, taskPresentation, TASK_EFFECTS } from "./prs.mjs";
+import { actionBlock, actionEvidence, filterPulls, normalizeEvidence, normalizePull, taskChoices, taskPresentation, TASK_EFFECTS } from "./prs.mjs";
 import { startServer } from "./server.mjs";
 import { KIND_LABELS } from "./kinds.mjs";
 
@@ -32,6 +32,23 @@ const cached = (changes = {}) => ({
 const state = (record = cached()) => ({
     version: 18, prs: record ? { "12": record } : {}, draft_pr_numbers: [],
 });
+const connection = (nodes = [], more = false) => ({ nodes, pageInfo: { hasNextPage: more, endCursor: more ? "next" : null } });
+const check = (conclusion = "SUCCESS", changes = {}) => ({
+    __typename: "CheckRun", name: "Tests", status: "COMPLETED", conclusion, ...changes,
+});
+const thread = (changes = {}) => ({
+    isResolved: false, isOutdated: false,
+    comments: { nodes: [{ author: { login: "copilot-pull-request-reviewer", __typename: "Bot" },
+        pullRequestReview: { state: "COMMENTED" } }] }, ...changes,
+});
+function detail({ number = 12, head = sha, conflicts = "FAILED", checks = [], threads = [] } = {}) {
+    return {
+        number, headRefOid: head,
+        mergeRequirements: { conditions: [{ __typename: "PullRequestMergeConflictStateCondition", result: conflicts }] },
+        commits: { nodes: [{ commit: { oid: head, statusCheckRollup: { contexts: connection(checks) } } }] },
+        reviewThreads: connection(threads),
+    };
+}
 function file(value) {
     const data = Buffer.from(JSON.stringify(value));
     return { type: "file", encoding: "base64", content: data.toString("base64"), size: data.length,
@@ -67,6 +84,9 @@ function controller({ records = [], pulls = [pull()], dashboardState = state() }
             return { data: structuredClone(pr) };
         },
         pulls: async (selected) => { calls.push(`list:${selected}`); github.requests++; github.counted++; return structuredClone(listing); },
+        pullEvidence: async (_selected, prs) => new Map(prs.map((pr) => [pr.number, {
+            detail: detail({ number: pr.number, head: pr.sha }),
+        }])),
         pages: async () => [],
         failedCoordinators: async () => [],
         dispatch: async (inputs) => { calls.push(inputs); return { status: "accepted" }; },
@@ -103,6 +123,189 @@ test("dashboard decoding validates shape, version, Git identity, UTF-8 and size"
         file({ ...state(), version: 19 }), file({ ...state(), prs: [] }), file({ ...state(), draft_pr_numbers: null }),
         file({ ...state(), prs: { "../12": cached() } }),
     ]) assert.throws(() => decodeDashboard(invalid), /Dashboard/);
+});
+
+test("file-conflict evidence ignores aggregate mergeability and other failed merge conditions", () => {
+    const raw = detail({ conflicts: "PASSED" });
+    raw.mergeable = "UNKNOWN";
+    raw.mergeRequirements.conditions.push({ __typename: "PullRequestRulesCondition", result: "FAILED" });
+    assert.equal(normalizeEvidence(raw, sha).conflicts, "no");
+    raw.mergeRequirements.conditions[0].result = "FAILED";
+    assert.equal(normalizeEvidence(raw, sha).conflicts, "yes");
+    raw.mergeRequirements.conditions[0].result = "PENDING";
+    assert.equal(normalizeEvidence(raw, sha).conflicts, "unknown");
+    raw.mergeRequirements = null;
+    assert.equal(normalizeEvidence(raw, sha).conflicts, "unknown");
+    assert.throws(() => normalizeEvidence(raw, "f".repeat(40)), /different head/);
+});
+
+test("CI evidence distinguishes failures, pending and absent checks without counting Copilot checks", () => {
+    const evidence = (checks) => normalizeEvidence(detail({ checks }), sha);
+    assert.equal(evidence([check()]).ci, "passing");
+    assert.equal(evidence([]).ci, "unknown");
+    assert.equal(evidence([check(null, { status: "IN_PROGRESS" })]).ci, "pending");
+    assert.equal(evidence([check("FAILURE"), check(null, { name: "Build", status: "IN_PROGRESS" })]).ci, "failing");
+    assert.equal(evidence([check(), check("FAILURE", { name: "Copilot code review" })]).ci, "passing");
+    assert.equal(evidence([{ __typename: "StatusContext", context: "Build", state: "ERROR" }]).ci, "failing");
+    assert.equal(evidence([check(null)]).ci, "unknown");
+    const incomplete = detail({ checks: [check()] });
+    incomplete.commits.nodes[0].commit.statusCheckRollup.contexts.pageInfo.hasNextPage = true;
+    assert.throws(() => normalizeEvidence(incomplete, sha), /incomplete/);
+    incomplete.commits.nodes[0].commit.oid = "f".repeat(40);
+    assert.throws(() => normalizeEvidence(incomplete, sha), /PR head/);
+});
+
+test("Copilot hints count only submitted, unresolved, non-outdated bot-rooted threads", () => {
+    const human = thread({ comments: { nodes: [{
+        author: { login: "reviewer", __typename: "User" }, pullRequestReview: { state: "COMMENTED" },
+    }] } });
+    const pending = thread({ comments: { nodes: [{
+        author: { login: "copilot-pull-request-reviewer", __typename: "Bot" }, pullRequestReview: { state: "PENDING" },
+    }] } });
+    assert.equal(normalizeEvidence(detail({
+        threads: [thread(), thread({ isResolved: true }), thread({ isOutdated: true }), human, pending],
+    }), sha).copilotThreads, 1);
+});
+
+test("live action evidence overrides completed results without replacing active workflow state", () => {
+    const pr = {
+        ...normalizePull(pull(), repo, state(), account), tasks: Object.keys(KIND_LABELS), actionBlock: null,
+        evidence: normalizeEvidence(detail({ checks: [check("FAILURE")], threads: [thread()] }), sha),
+        phase: { kind: "pr_conflict_resolver", stage: "complete", sha },
+    };
+    assert.equal(taskPresentation(pr, "pr_conflict_resolver", true).tone, "needed");
+    assert.equal(taskPresentation(pr, "ci_fix", true).label, "CI failing");
+    assert.equal(taskPresentation(pr, "copilot_review", true).tone, "needed");
+    pr.phase.stage = "running";
+    assert.equal(taskPresentation(pr, "pr_conflict_resolver", true).label, "Running");
+    assert.equal(taskPresentation(pr, "pr_conflict_resolver", true).tone, "active");
+    pr.evidence = normalizeEvidence(detail({ conflicts: "PASSED", checks: [check()] }), sha);
+    assert.equal(actionEvidence(pr, "pr_conflict_resolver").unnecessary, true);
+    assert.equal(taskPresentation(pr, "ci_fix", true).disabled, true);
+    assert.equal(taskPresentation(pr, "copilot_review", true).disabled, false);
+    pr.evidence.sha = "f".repeat(40);
+    assert.equal(taskPresentation(pr, "ci_fix", true).disabled, false);
+    assert.equal(taskPresentation(pr, "ci_fix", true).label, "Status unknown");
+});
+
+test("failed live evidence remains unknown rather than falling back to saved no-conflict facts", async () => {
+    const c = controller();
+    c.github.pullEvidence = async () => { throw new Error("Live status unavailable"); };
+    const result = await c.canvas.refresh();
+    assert.equal(result.workflowReady, true);
+    assert.equal(result.prs[0].actionBlock, null);
+    assert.equal(result.prs[0].conflicts, "no");
+    assert.equal(taskPresentation(result.prs[0], "pr_conflict_resolver", true).label, "Status unknown");
+    assert.equal(taskPresentation(result.prs[0], "pr_conflict_resolver", true).disabled, false);
+    assert.equal(result.auto, false);
+    assert.match(result.prWarnings.join(" "), /Live status unavailable/);
+});
+
+test("fresh conflict and CI preflight rejects unnecessary tasks after an enabled snapshot", async () => {
+    for (const kind of ["pr_conflict_resolver", "ci_fix"]) {
+        const c = controller();
+        await c.canvas.refresh();
+        c.github.pullEvidence = async () => new Map([[12, { detail: detail({ conflicts: "PASSED", checks: [check()] }) }]]);
+        await assert.rejects(c.canvas.launch({ target, kind, confirmed: true }), /unnecessary/);
+        assert.equal(c.calls.filter((call) => typeof call === "object").length, 0);
+        assert.equal(c.canvas.state().prs[0].dispatch, null);
+    }
+    const c = controller();
+    c.github.pullEvidence = async () => new Map([[12, { detail: detail({ conflicts: "PENDING" }) }]]);
+    await c.canvas.refresh();
+    await c.canvas.launch({ target, kind: "pr_conflict_resolver", confirmed: true });
+    assert.equal(c.calls.find((call) => typeof call === "object").loop_kind, "pr_conflict_resolver");
+});
+
+test("live evidence batches PRs and paginates checks and threads before claiming clear", async () => {
+    const queries = [];
+    const first = detail({ checks: [check()] });
+    first.commits.nodes[0].commit.statusCheckRollup.contexts.pageInfo = connection([], true).pageInfo;
+    first.reviewThreads.pageInfo = connection([], true).pageInfo;
+    first.reviewThreads.nodes = [thread({ isResolved: true })];
+    const github = new GitHub(async (args) => {
+        const query = args.find((arg) => arg.startsWith("query="));
+        queries.push(query);
+        if (!query.includes("after:")) return response({ data: { repository: { pr12: first, pr13: detail({ number: 13 }) } } });
+        const more = query.includes("reviewThreads")
+            ? { number: 12, headRefOid: sha, reviewThreads: connection([thread()]) }
+            : detail({ checks: [check("FAILURE", { name: "Build" })] });
+        return response({ data: { repository: { pullRequest: more } } });
+    });
+    const result = await github.pullEvidence(repo, [{ number: 12, sha }, { number: 13, sha }]);
+    assert.equal(queries.length, 3);
+    assert.ok(queries[0].includes("pr12:") && queries[0].includes("pr13:"));
+    assert.equal(normalizeEvidence(result.get(12).detail, sha).ci, "failing");
+    assert.equal(normalizeEvidence(result.get(12).detail, sha).copilotThreads, 1);
+    assert.equal(result.get(13).error, undefined);
+});
+
+test("head drift or GraphQL errors do not produce false passing status", async () => {
+    const drift = new GitHub(async () => response({ data: { repository: { pr12: detail({ head: "f".repeat(40) }) } } }));
+    const result = await drift.pullEvidence(repo, [{ number: 12, sha }]);
+    assert.match(result.get(12).error, /different head/);
+    let reads = 0;
+    const failed = new GitHub(async () => {
+        reads++;
+        return response({ errors: [{ message: "Access denied" }], data: { repository: { pr12: detail() } } });
+    });
+    assert.match((await failed.pullEvidence(repo, [{ number: 12, sha }])).get(12).error, /could not return/);
+    assert.equal(reads, 1);
+});
+
+test("failed CI pagination waits for already-started thread pagination before completing", async () => {
+    const first = detail({ threads: [thread()], checks: [check()] });
+    first.reviewThreads.pageInfo = connection([], true).pageInfo;
+    first.commits.nodes[0].commit.statusCheckRollup.contexts.pageInfo = connection([], true).pageInfo;
+    let release;
+    const github = new GitHub(async (args) => {
+        const query = args.find((arg) => arg.startsWith("query="));
+        if (!query.includes("after:")) return response({ data: { repository: { pr12: first } } });
+        if (query.includes("reviewThreads")) {
+            await new Promise((resolve) => release = resolve);
+            return response({ data: { repository: { pullRequest: { number: 12, headRefOid: sha, reviewThreads: connection() } } } });
+        }
+        return response({ errors: [{ message: "Unavailable" }] });
+    });
+    let done = false;
+    const pending = github.pullEvidence(repo, [{ number: 12, sha }]).then((result) => { done = true; return result; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(done, false);
+    release();
+    assert.match((await pending).get(12).error, /could not return/);
+});
+
+test("the canvas remains loading until live evidence has settled", async () => {
+    const c = controller();
+    let release;
+    c.github.pullEvidence = () => new Promise((resolve) => release = resolve);
+    const pending = c.canvas.refresh();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(c.canvas.value.loading, false);
+    assert.equal(c.canvas.state().loading, true);
+    assert.equal(c.canvas.refresh(), pending);
+    release(new Map([[12, { detail: detail() }]]));
+    assert.equal((await pending).loading, false);
+});
+
+test("GraphQL capacity is separate from REST and pauses automatic refresh when low", async () => {
+    const c = controller();
+    c.github.rate = { limit: 5000, remaining: 4500, reset: 3000000 };
+    c.github.pullEvidence = async (_repo, prs) => {
+        c.github.graphqlRate = { limit: 5000, remaining: 5, reset: 3000000 };
+        return new Map(prs.map((pr) => [pr.number, { detail: detail() }]));
+    };
+    const result = await c.canvas.refresh();
+    assert.equal(result.auto, false);
+    assert.match(result.pauseReason, /capacity/);
+    assert.throws(() => c.canvas.setAuto(true), /capacity/);
+    const github = new GitHub();
+    github.recordRate({ "x-ratelimit-resource": "core", "x-ratelimit-limit": "5000",
+        "x-ratelimit-remaining": "4500", "x-ratelimit-reset": "3000" }, 200);
+    github.recordRate({ "x-ratelimit-resource": "graphql", "x-ratelimit-limit": "5000",
+        "x-ratelimit-remaining": "5", "x-ratelimit-reset": "3000" }, 200);
+    assert.equal(github.rate.remaining, 4500);
+    assert.equal(github.graphqlRate.remaining, 5);
 });
 
 test("all open rows include drafts, bots and missing dashboard data; routing uses dashboard classifications", () => {
@@ -219,7 +422,7 @@ test("viewer, PR and reviewer-dashboard reads start together and settle on a fai
     assert.deepEqual(result.prs, []);
 });
 
-test("a complete PR refresh uses three concurrent reads without adding GitHub requests", async () => {
+test("a complete PR refresh shares three read slots and adds one batched live-status query", async () => {
     let active = 0;
     let maximum = 0;
     const github = new GitHub(async (args) => {
@@ -228,7 +431,8 @@ test("a complete PR refresh uses three concurrent reads without adding GitHub re
         active--;
         const path = args.at(-1);
         let data;
-        if (path === "user") data = account;
+        if (args.includes("graphql")) data = { data: { repository: { pr12: detail() } } };
+        else if (path === "user") data = account;
         else if (path === `repos/${repo}/pulls?state=open&per_page=100`) data = [pull()];
         else if (path === dashboardPath(repo)) data = file(state());
         else if (path === `repos/${CENTRAL}/git/matching-refs/heads/review-loop-state`) data = [];
@@ -240,8 +444,8 @@ test("a complete PR refresh uses three concurrent reads without adding GitHub re
     const canvas = new PrDashboard(github, () => 2000000);
     const result = await canvas.refresh();
     assert.equal(maximum, 3);
-    assert.equal(github.requests, 10);
-    assert.equal(result.cost, 10);
+    assert.equal(github.requests, 11);
+    assert.equal(result.cost, 11);
     assert.equal(result.error, null);
     assert.equal(result.prError, null);
     assert.equal(result.workflowReady, true);
@@ -427,7 +631,8 @@ test("task button states distinguish dispatch acceptance, queued workers, execut
         }
     }
     assert.equal(taskPresentation({ ...pr, phase: { ...pr.phase, historical: true } }, "self_review", true).label, "Historical");
-    assert.equal(taskPresentation({ ...pr, phase: { ...pr.phase, sha: "f".repeat(40) } }, "self_review", true).label, "Previous head");
+    assert.equal(taskPresentation({ ...pr, phase: { ...pr.phase, sha: "f".repeat(40) } }, "self_review", true).label, "Running");
+    assert.equal(taskPresentation({ ...pr, phase: { ...pr.phase, stage: "complete", sha: "f".repeat(40) } }, "self_review", true).label, "Previous head");
     assert.equal(taskPresentation(pr, "self_review", false).label, "Status unavailable");
     assert.equal(taskPresentation(pr, "self_review", false).busy, false);
     for (const [status, label] of Object.entries({ pending: "Dispatching", accepted: "Starting", uncertain: "Dispatch uncertain" })) {
