@@ -131,9 +131,10 @@ def fresh_collection(api, request, baseline, requested_at, expected_sha, now):
             "inline_ids": [c["id"] for c in relevant]}
 
 
-def ci_items(api, repo, sha):
+def ci_items(api, repo, sha, *, latest_statuses=False):
     checks = api.pages(f"repos/{repo}/commits/{sha}/check-runs?filter=all", "check_runs")
-    statuses = api.pages(f"repos/{repo}/commits/{sha}/statuses")
+    statuses = (api.pages(f"repos/{repo}/commits/{sha}/status", "statuses") if latest_statuses
+                else api.pages(f"repos/{repo}/commits/{sha}/statuses"))
     require(len(checks) + len(statuses) <= 1000, "CI collection exceeds limits")
     return checks, statuses
 

@@ -16,7 +16,7 @@ def excerpt(text, limit):
 def collect(api, request, required):
     sha, repo = request["frozen_sha"], request["repo"]
     check_target(api, request)
-    checks, statuses = ci_items(api, repo, sha)
+    checks, statuses = ci_items(api, repo, sha, latest_statuses=True)
     executions, selected, failures, bound_jobs = {}, [], [], {}
     for check in checks:
         if check["name"] not in required or copilot_check(check):

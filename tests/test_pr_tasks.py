@@ -99,6 +99,8 @@ class TaskRead(SelfRead):
         return super().call(path, *args)
 
     def pages(self, path, key=None):
+        if path.endswith("/status"):
+            return copy.deepcopy(list({s["context"]: s for s in reversed(self.statuses)}.values()))
         if path.endswith("/files"):
             return [{"filename": "Foo.java", "additions": 1, "deletions": 1}]
         if path.endswith("/reviews"):
@@ -1000,6 +1002,25 @@ class CIRepairTests(unittest.TestCase):
                 self.assertEqual("complete", complete["stage"])
                 self.assertEqual("passed", complete["ci"]["decision"])
                 self.assertEqual("CI_passed", complete["task_completion"]["outcome"])
+
+    def test_repeated_status_contexts_use_github_combined_status(self):
+        req, read = self.context()
+        read.checks = []
+        latest = {"id": 334, "context": CI_CHECK, "state": "success"}
+        read.statuses = [latest, dict(latest, id=333, state="failure")]
+        read.pages = Mock(wraps=read.pages)
+        read.signed_download = Mock(wraps=read.signed_download)
+        evidence = collect(read, req, [CI_CHECK])
+        self.assertEqual("passed", evidence["decision"])
+        self.assertEqual([334], [c["id"] for c in evidence["checks"]])
+        read.signed_download.assert_not_called()
+        read.pages.assert_any_call(f"repos/{FIXTURE}/commits/{req['frozen_sha']}/status", "statuses")
+        latest["state"] = "pending"
+        self.assertEqual("pending", collect(read, req, [CI_CHECK])["decision"])
+        latest["state"] = "failure"
+        evidence = collect(read, req, [CI_CHECK])
+        self.assertEqual("failed", evidence["decision"])
+        self.assertEqual([334], [f["id"] for f in evidence["failures"]])
 
     def test_evidence_attribution_unknown_and_run_drift_fail_closed(self):
         req, read = self.context()
