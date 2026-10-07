@@ -15,7 +15,7 @@ from loop.api import API
 from loop.policy import (BOT_IDENTITY_PATH, CENTRAL, PROFILE, SHA, digest,
                          candidate_outcome, check_target, commit_author, loop_kind, pipeline_limit, require, source_effect, staged_source,
                          timestamp, unchanged)
-from loop.verify import (artifact_metadata, git as object_git, object_bounds, parse_json, safe_path, verify)
+from loop.verify import (artifact_metadata, git as object_git, parse_json, safe_path, verify)
 from loop.candidates import current_request
 
 SECRET = "TEST_PUBLISH_TOKEN"
@@ -276,7 +276,6 @@ def evidence(api, state, destination):
         else:
             git(["fetch", "--quiet", "--no-auto-maintenance", "--depth=1", "--no-tags",
                  "https://github.com/" + request["head_repo"] + ".git", request["frozen_sha"]], directory)
-        object_bounds(directory)
     reconstructed = verify(payload, request, run, artifact, fetch_source)
     require(all(reconstructed[key] == state["report"][key]
                 for key in reconstructed if key != "candidate"),
@@ -318,7 +317,6 @@ def import_candidate(directory, bundle, request, candidate, fetch_source=None):
                 and git(["rev-parse", request["frozen_sha"] + "^{tree}"], directory).decode().strip()
                 == candidate["tree"], "Invalid no-change package")
         git(["update-ref", "refs/heads/candidate", candidate["commit"]], directory)
-        object_bounds(directory)
         git(["fsck", "--strict", "--no-reflogs"], directory)
         return
     if loop_kind(request) == "pr_conflict_resolver":
@@ -335,7 +333,6 @@ def import_candidate(directory, bundle, request, candidate, fetch_source=None):
         from loop.conflicts import resolved_tree
         require(resolved_tree(directory, request, candidate["tree"]) == candidate["changed_paths"],
                 "Merge incoming changes or resolutions differ")
-        object_bounds(directory)
         git(["fsck", "--strict", "--no-reflogs"], directory)
         return
     header = Path(bundle).read_bytes().split(b"\n\n", 1)[0].decode("utf-8")
@@ -347,7 +344,6 @@ def import_candidate(directory, bundle, request, candidate, fetch_source=None):
     git(["-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-auto-maintenance",
          str(Path(bundle).resolve()),
          "refs/heads/candidate:refs/heads/candidate"], directory)
-    object_bounds(directory)
     require(git(["rev-list", "--reverse", candidate["commit"], "^" + request["frozen_sha"]],
                 directory).decode().splitlines() == [entry["commit"] for entry in candidate["commits"]],
             "Candidate contains unaccounted history")

@@ -17,12 +17,7 @@ from loop.api import API
 from loop.policy import (AUTHOR_ID, BOT_IDENTITY_PATH, CENTRAL, DEFAULTS, REPO, Rejected, canonical,
                          check_target, diff_scope, digest, exact, iso, loop_kind, public_request,
                          require, staged_source)
-from loop.verify import git as object_git, object_bounds, parse_json, tree_entries
-
-MAX_SOURCE = 64 * 1024 * 1024
-MAX_OBJECT_BYTES = 128 * 1024 * 1024
-MAX_OBJECTS = 100000
-MAX_OBJECT = 4 * 1024 * 1024
+from loop.verify import git as object_git, parse_json, tree_entries
 
 
 def git(args, directory):
@@ -107,7 +102,6 @@ def public_fetch(directory, request, repo=None, sha=None, depth=1):
 
 def source_limits():
     import resource
-    resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_SOURCE, MAX_SOURCE))
     resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
     resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
 
@@ -132,17 +126,8 @@ def snapshot_identity(directory, sha, request=None):
     count = int(git(["rev-list", "--count", *refs], directory))
     if not conflict:
         require(count == len(commits), "Source snapshot contains unexpected history")
-    object_sizes = object_bounds(directory)
     for ref in refs:
-        total = 0
-        entries = tree_entries(directory, ref)
-        require(len(entries) <= 100000, "Source exceeds file limit")
-        for _, kind, oid in entries.values():
-            if kind == "commit":
-                continue
-            require(oid in object_sizes, "Source snapshot is missing a blob")
-            total += object_sizes[oid]
-        require(total <= MAX_SOURCE, "Source snapshot tree exceeds expanded limit")
+        tree_entries(directory, ref)
     git(["fsck", "--strict", "--no-reflogs"], directory)
     return git(["rev-parse", "snapshot^{tree}"], directory).decode().strip(), count
 
@@ -202,7 +187,6 @@ def package_source(request, generation, api, destination, fetch=None):
         if loop_kind(request) == "pr_conflict_resolver":
             refs.append("refs/heads/incoming")
         git(["bundle", "create", str(bundle), *refs], directory)
-        require(bundle.stat().st_size <= MAX_SOURCE, "Source bundle exceeds limit")
         manifest = {
             "schema": 2, "repo": request["repo"], "repo_id": request["head_repo_id"], "pr": request["pr"],
             "request_id": request["request_id"], "request_digest": digest(request),
@@ -295,34 +279,32 @@ def source_metadata(api, source, request):
             and artifact["workflow_run"]["head_sha"] == request["workflow_revision"]
             and artifact["digest"] == source["artifact_digest"]
             and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"])
-            and not artifact["expired"] and 0 < artifact["size_in_bytes"] <= MAX_SOURCE + 65536,
+            and not artifact["expired"] and artifact["size_in_bytes"] > 0,
             "Source artifact provenance mismatch")
+    return artifact
 
 
 def download_source(api, state, destination):
     request, source = state["request"], state["source"]
     bind_manifest(source["manifest"], request, state["generation"])
-    source_metadata(api, source, request)
-    payload = api.artifact_zip(source["artifact_id"], MAX_SOURCE + 65536)
+    artifact = source_metadata(api, source, request)
+    payload = api.artifact_zip(source["artifact_id"], artifact["size_in_bytes"])
     require("sha256:" + hashlib.sha256(payload).hexdigest() == source["artifact_digest"],
             "Source server artifact digest mismatch")
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         entries = archive.infolist()
         require(len(entries) == 2 and {e.filename for e in entries}
                 == {"source.bundle", "manifest.json"}, "Unexpected source artifact members")
-        require(sum(e.file_size for e in entries) <= MAX_SOURCE + 16384,
-                "Expanded source artifact exceeds limit")
         for entry in entries:
             require(not entry.is_dir() and not stat.S_ISLNK(entry.external_attr >> 16)
                     and stat.S_IFMT(entry.external_attr >> 16) in {0, stat.S_IFREG}
-                    and not entry.flag_bits & 1
-                    and entry.file_size <= max(1, entry.compress_size) * 200,
+                    and not entry.flag_bits & 1,
                     "Unsafe source archive entry")
             require(entry.filename != "manifest.json" or entry.file_size <= 16384,
                     "Source manifest exceeds limit")
         manifest = parse_json(archive.read("manifest.json"))
         bundle = archive.read("source.bundle")
-    require(manifest == source["manifest"] and len(bundle) <= MAX_SOURCE
+    require(manifest == source["manifest"]
             and hashlib.sha256(bundle).hexdigest() == manifest["bundle_sha256"],
             "Source package content mismatch")
     destination = Path(destination)
@@ -334,7 +316,7 @@ def download_source(api, state, destination):
 
 def import_source(directory, bundle, manifest, request):
     bind_manifest(manifest, request, manifest["generation"])
-    require(not Path(bundle).is_symlink() and Path(bundle).stat().st_size <= MAX_SOURCE
+    require(not Path(bundle).is_symlink()
             and hashlib.sha256(Path(bundle).read_bytes()).hexdigest() == manifest["bundle_sha256"],
             "Source bundle changed")
     heads = git(["bundle", "list-heads", str(Path(bundle).resolve())], directory).decode().splitlines()

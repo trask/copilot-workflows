@@ -56,7 +56,7 @@ class API:
                 timeout = min(timeout, remaining)
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as response:
-                    payload = response.read(limit + 1)
+                    payload = response.read() if limit is None else response.read(limit + 1)
             except urllib.error.HTTPError as error:
                 error.close()
                 if method != "GET" or attempt == 2 or error.code not in {500, 502, 503, 504}:
@@ -77,7 +77,7 @@ class API:
             print(f"READ RETRY: GitHub API GET {failure}; attempt {attempt + 2}/3",
                   file=sys.stderr)
             time.sleep(delay)
-        require(len(payload) <= limit, "API response exceeds limit")
+        require(limit is None or len(payload) <= limit, "API response exceeds limit")
         return payload if raw else (json.loads(payload) if payload else None)
 
     def pages(self, path, key=None):
@@ -102,7 +102,7 @@ class API:
     def artifact_zip(self, artifact_id, limit):
         return self.signed_download(f"repos/{CENTRAL}/actions/artifacts/{artifact_id}/zip", limit)
 
-    def signed_download(self, path, limit, *, tail=False, log_windows=()):
+    def signed_download(self, path, limit=None, *, log_windows=()):
         self.authorize(path, "GET", None)
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *_args, **_kwargs):
@@ -129,8 +129,8 @@ class API:
         # Signed destination came from the authenticated API. Never forward its bearer token.
         try:
             with urllib.request.urlopen(destination, timeout=60) as response:
-                if tail:
-                    payload, total, annotated = b"", 0, b""
+                if log_windows or limit is None:
+                    payload = bytearray()
                     deadline = time.monotonic() + 60
                     windows = [(start[:19].encode("ascii"), end[:19].encode("ascii"))
                                for start, end in log_windows]
@@ -140,20 +140,15 @@ class API:
                         if windows and line_start:
                             selected = any(start <= chunk[:19] <= end for start, end in windows)
                         if selected:
-                            total += len(chunk)
-                            payload = (payload + chunk)[-limit:]
-                            if windows and b"##[error]" in chunk:
-                                annotated = payload
+                            payload.extend(chunk)
                         line_start = chunk.endswith(b"\n")
                         if time.monotonic() >= deadline:
                             raise DeadlineReached("Log download deadline reached")
-                    if total > limit:
-                        print(f"READ EXCERPT: retained last {len(payload)} of {total} log bytes",
-                              file=sys.stderr)
-                    return annotated or payload
-                payload = response.read(limit + 1)
+                    payload = bytes(payload)
+                else:
+                    payload = response.read(limit + 1)
         except urllib.error.HTTPError as error:
             error.close()
             raise APIError(error.code, f"Signed download failed with HTTP {error.code}") from error
-        require(len(payload) <= limit, "Artifact download exceeds limit")
+        require(limit is None or len(payload) <= limit, "Artifact download exceeds limit")
         return payload

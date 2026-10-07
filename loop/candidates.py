@@ -7,26 +7,24 @@ from loop.policy import bot, digest, exact, loop_kind, require
 PROTOCOL = "reviewable-v1"
 TRAILER = "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"
 MESSAGE_FIELDS = {"summary", "analysis", "upsides", "downsides"}
-MAX_MESSAGE = 1024 * 1024
 
 
 def current_request(request):
     require(request.get("protocol") == PROTOCOL, "Historical requests are read-only")
 
 
-def prose(value, limit, *, summary=False):
+def prose(value, *, summary=False):
     require(isinstance(value, str) and value.strip() == value and value,
-            "Nonempty bounded prose is required")
-    require(len(value.encode("utf-8")) <= limit
-            and not any(ord(c) < 32 and c not in "\n\t" or ord(c) == 127 for c in value),
-            "Invalid or oversized message text")
+            "Nonempty prose is required")
+    require(not any(ord(c) < 32 and c not in "\n\t" or ord(c) == 127 for c in value),
+            "Invalid message text")
     if summary:
         require("\n" not in value and "\t" not in value, "Summary must be one line")
 
 
 def reasoning(value):
     for key in ("analysis", "upsides", "downsides"):
-        prose(value[key], 2000)
+        prose(value[key])
 
 
 def semantic(value, request):
@@ -73,7 +71,7 @@ def semantic(value, request):
     if kind == "pr_conflict_resolver":
         require(not value["batches"], "Merge is not a linear code batch")
         exact(value["merge"], MESSAGE_FIELDS)
-        prose(value["merge"]["summary"], 120, summary=True)
+        prose(value["merge"]["summary"], summary=True)
         reasoning(value["merge"])
     batches = value["batches"]
     require(isinstance(batches, list) and len(batches) <= 100, "Invalid batch count")
@@ -82,7 +80,7 @@ def semantic(value, request):
     for batch in batches:
         exact(batch, MESSAGE_FIELDS | {"offset", "length", "sha256"}
               | ({"findings"} if external else set()))
-        prose(batch["summary"], 120, summary=True)
+        prose(batch["summary"], summary=True)
         reasoning(batch)
         require(type(batch["offset"]) is int and batch["offset"] == offset
                 and type(batch["length"]) is int and batch["length"] > 0,
@@ -162,5 +160,4 @@ def message(batch, request):
         subject = batch["summary"]
         text = subject + "\n\n" + tradeoffs(batch)
     text += "\n\n" + TRAILER + "\n"
-    require(len(text.encode("utf-8")) <= MAX_MESSAGE, "Commit message exceeds byte limit")
     return subject, text.encode("utf-8")

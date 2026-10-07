@@ -71,12 +71,19 @@ class BatchTests(unittest.TestCase):
 
     def test_plural_template_preserves_every_original_comment_and_trailers(self):
         req = self.request()
+        req["findings"][0]["body"] = "\u00e9" * 600000
         fields = batch(GOOD_PATCH, [finding["key"] for finding in req["findings"]])
+        fields.update(summary=("Preserve the complete review evidence " * 4).strip(),
+                      analysis=("The complete original comment belongs in the commit.\n" * 100).strip())
+        value = result(req, "fixes", GOOD_PATCH)
+        value["batches"] = [fields]
+        semantic(value, req)
         subject, body = message(fields, req)
-        self.assertEqual("Address Copilot review comments: Validate input", subject)
+        self.assertEqual("Address Copilot review comments: " + fields["summary"], subject)
         self.assertEqual(2, body.count(b"Copilot comment:"))
         for finding in req["findings"]:
             self.assertIn(finding["body"].encode(), body)
+        self.assertIn(fields["analysis"].encode(), body)
         self.assertIn(b"\nAnalysis: ", body)
         self.assertIn(b"\nUpsides: ", body)
         self.assertIn(b"\nDownsides: ", body)
@@ -86,7 +93,7 @@ class BatchTests(unittest.TestCase):
         req = self.request()
         files, valid = self.files(req)
         for change in ("gap", "overlap", "reorder", "hash", "duplicate", "foreign",
-                       "unmapped", "overflow", "control", "summary"):
+                       "unmapped", "control", "summary"):
             value = copy.deepcopy(valid)
             if change in {"gap", "overlap"}:
                 value["batches"][1]["offset"] += 1 if change == "gap" else -1
@@ -100,8 +107,6 @@ class BatchTests(unittest.TestCase):
                 value["findings"][0]["key"] = "inline:999"
             elif change == "unmapped":
                 value["batches"].pop()
-            elif change == "overflow":
-                value["batches"][0]["analysis"] = "\u00e9" * 1001
             elif change == "control":
                 value["batches"][0]["summary"] = "title\x00evil"
             else:

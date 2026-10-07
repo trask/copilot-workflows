@@ -3,14 +3,8 @@
 import re
 
 from loop.api import APIError
-from loop.policy import canonical, check_target, exact, iso, require, timestamp
+from loop.policy import check_target, exact, iso, require, timestamp
 from loop.reviews import check_decision, ci_items, copilot_check
-
-
-def excerpt(text, limit):
-    while len(canonical(text)) > limit:
-        text = text[len(text) // 4 + 1:]
-    return text
 
 
 def collect(api, request, required):
@@ -108,7 +102,6 @@ def collect(api, request, required):
         return not identity or latest[identity["workflow_id"]]["id"] == identity["run_id"]
     selected = [item for item in selected if current(item)]
     failures = [item for item in failures if current(item)]
-    evidence_limit = max(2, 60000 // max(1, len(failures)))
     for failure in failures:
         text = failure["evidence"]
         identity = failure["actions"]
@@ -120,21 +113,18 @@ def collect(api, request, required):
             require(all(start <= end for start, end in windows), "CI failed-step timestamps differ")
             try:
                 log = api.signed_download(
-                    f"repos/{repo}/actions/jobs/{identity['job_id']}/logs", evidence_limit,
-                    tail=True, **({"log_windows": windows} if windows else {}))
+                    f"repos/{repo}/actions/jobs/{identity['job_id']}/logs",
+                    **({"log_windows": windows} if windows else {}))
             except APIError as error:
                 require(error.status in {403, 404, 410}, "Failed to collect CI logs")
                 failure["availability"] = "logs_unavailable_" + str(error.status)
             else:
                 if log:
                     text = log.decode("utf-8", errors="replace")
-                    failure["availability"] = "failed_step_log_excerpt" if windows else "job_log_tail"
+                    failure["availability"] = "failed_step_log_excerpt" if windows else "job_log"
                 else:
                     failure["availability"] = "failed_step_logs_unavailable" if windows else "logs_unavailable_empty"
-        bounded = excerpt(text, evidence_limit)
-        if bounded != text and not failure["availability"].endswith("_tail"):
-            failure["availability"] += "_tail"
-        failure["evidence"] = bounded
+        failure["evidence"] = text
     names = [s["name"] for s in selected]
     decisions = [s["decision"] for s in selected]
     active = any(r["status"] in {"queued", "in_progress", "waiting", "pending", "requested"}
@@ -151,18 +141,6 @@ def collect(api, request, required):
                         "conclusion": r["conclusion"]} for r, _ in executions.values()
                        if latest[r["workflow_id"]]["id"] == r["id"]],
               "decision": decision}
-    metadata = len(canonical(dict(result, failures=[dict(f, evidence="") for f in failures])))
-    require(metadata <= 120000, "CI diagnosis metadata exceeds limit")
-    labels = sum(5 for f in failures if f["evidence"]
-                 and not f["availability"].endswith("_tail"))
-    remaining = min(60000, 120000 - metadata - labels)
-    evidence_limit = max(2, remaining // max(1, len(failures)))
-    for failure in failures:
-        bounded = excerpt(failure["evidence"], evidence_limit)
-        if bounded != failure["evidence"] and not failure["availability"].endswith("_tail"):
-            failure["availability"] += "_tail"
-        failure["evidence"] = bounded
-    require(len(canonical(result)) <= 120000, "Combined CI diagnosis evidence exceeds limit")
     check_target(api, request)
     return result
 
@@ -182,13 +160,13 @@ def diagnoses(value, request):
                 and item["decision"] in {"fix", "rerun", "unrelated", "unknown"}, "Invalid CI diagnosis")
         seen.add(item["key"])
         decisions.add(item["decision"])
-        prose(item["analysis"], 2000)
+        prose(item["analysis"])
         failure = by_key[item["key"]]
         require(isinstance(item["evidence"], list) and
                 (0 if item["decision"] == "unknown" else 1) <= len(item["evidence"]) <= 5,
                 "CI diagnosis requires frozen evidence quotations")
         for quote in item["evidence"]:
-            prose(quote, 1000)
+            prose(quote)
             require(quote in failure["evidence"], "CI evidence citation is not in the frozen logs")
         require(item["decision"] == "unknown" or failure["availability"] != "unavailable",
                 "Missing failure evidence cannot clear CI")

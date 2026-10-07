@@ -1,12 +1,9 @@
-"""Complete PR diff evidence and bounded non-code proposals."""
+"""Complete PR diff evidence and non-code proposals."""
 
 import hashlib
 import re
 
 from loop.policy import check_target, exact, require
-
-MAX_DIFF = 512 * 1024
-
 
 def description_diff(text):
     require(isinstance(text, str), "Invalid description diff evidence")
@@ -14,8 +11,8 @@ def description_diff(text):
 
 
 def diff_anchors(text):
-    require(isinstance(text, str) and len(text.encode("utf-8")) <= MAX_DIFF
-            and "\x00" not in text, "Unavailable or unsupported complete PR diff")
+    require(isinstance(text, str) and "\x00" not in text,
+            "Unavailable or unsupported complete PR diff")
     from loop.verify import patch_sections
     anchors, counts = {}, {}
     for section, _, path, added, deleted in patch_sections(text.encode("utf-8")):
@@ -45,7 +42,6 @@ def diff_anchors(text):
                 require(old_left >= 0 and new_left >= 0, "Malformed PR diff lengths")
         require(old_left == new_left == 0 and counts[path] == [added or 0, deleted or 0],
                 "Truncated or inconsistent PR diff")
-    require(sum(len(a) for a in anchors.values()) <= 10000, "Oversized PR diff")
     return anchors, counts
 
 
@@ -54,14 +50,14 @@ def collect_diff(api, request):
     pr = check_target(api, request)
     from loop.policy import loop_kind
     if loop_kind(request) == "pr_description":
-        text = api.call(path, raw=True, accept="application/vnd.github.diff").decode("utf-8")
+        text = api.call(path, raw=True, limit=None, accept="application/vnd.github.diff").decode("utf-8")
         result = description_diff(text)
         check_target(api, request)
         return result
     files = api.pages(path + "/files")
-    require(len(files) == pr["changed_files"] and len(files) <= 1000,
+    require(len(files) == pr["changed_files"],
             "Incomplete GitHub PR file collection")
-    raw = api.call(path, raw=True, limit=MAX_DIFF, accept="application/vnd.github.diff")
+    raw = api.call(path, raw=True, limit=None, accept="application/vnd.github.diff")
     text = raw.decode("utf-8")
     anchors, counts = diff_anchors(text)
     require(set(counts) == {f["filename"] for f in files}
@@ -80,8 +76,8 @@ def proposal(value):
             "Description proposal must contain title and body, including for no_change")
     exact(value, {"title", "body"})
     from loop.candidates import prose
-    prose(value["title"], 256, summary=True)
-    require(isinstance(value["body"], str) and len(value["body"].encode("utf-8")) <= 60000
+    prose(value["title"], summary=True)
+    require(isinstance(value["body"], str)
             and not any(ord(c) < 32 and c not in "\n\r\t" or ord(c) == 127
                         for c in value["body"]), "Invalid proposed PR body")
 
@@ -96,7 +92,7 @@ def comments(value, request):
                 and item["side"] == "RIGHT"
                 and item["line"] in request["pr_diff"]["anchors"].get(item["path"], []),
                 "Review comment is not anchored on an authoritative changed line")
-        prose(item["body"], 4000)
+        prose(item["body"])
         identity = item["path"], item["line"], item["body"]
         require(identity not in seen, "Duplicate review comment")
         seen.add(identity)
@@ -111,8 +107,8 @@ def consistency(value):
                 "Unknown consistency classification")
         from loop.verify import safe_source_path
         safe_source_path(item["path"])
-        prose(item["explanation"], 2000)
+        prose(item["explanation"])
         require(isinstance(item["citations"], list) and 1 <= len(item["citations"]) <= 10,
                 "Consistency decisions require instructions or compliant example citations")
         for citation in item["citations"]:
-            prose(citation, 500, summary=True)
+            prose(citation, summary=True)

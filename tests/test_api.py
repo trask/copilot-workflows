@@ -166,7 +166,7 @@ class APITests(unittest.TestCase):
                 patch("loop.api.sys.stderr", new_callable=io.StringIO):
             self.assertEqual(b"raw response", API().call(f"repos/{CENTRAL}/actions/runs", raw=True))
 
-    def test_signed_log_tails_stream_without_forwarding_credentials(self):
+    def test_complete_signed_logs_stream_without_forwarding_credentials(self):
         for size in (10, 3 * 65536):
             payload = b"x" * size + b"\nFAILURE: root cause\n"
             downloaded = response()
@@ -178,11 +178,10 @@ class APITests(unittest.TestCase):
                     patch("loop.api.urllib.request.urlopen", return_value=downloaded) as download, \
                     patch("loop.api.sys.stderr", new_callable=io.StringIO) as stderr:
                 opener.return_value.open.side_effect = redirect
-                self.assertEqual(payload[-100:], API("secret").signed_download(
-                    "repos/target/repo/actions/jobs/1/logs", 100, tail=True))
+                self.assertEqual(payload, API("secret").signed_download(
+                    "repos/target/repo/actions/jobs/1/logs"))
             download.assert_called_once_with("https://example.com/signed-log", timeout=60)
             self.assertTrue(all(c.args == (65536,) for c in downloaded.read.call_args_list))
-            self.assertEqual(size > 100, "READ EXCERPT" in stderr.getvalue())
             self.assertNotIn("secret", stderr.getvalue())
             self.assertNotIn("signed-log", stderr.getvalue())
 
@@ -195,10 +194,10 @@ class APITests(unittest.TestCase):
             opener.return_value.open.side_effect = redirect
             API().artifact_zip(1, 2)
 
-    def test_failed_step_log_window_excludes_later_cleanup_and_bounds_long_lines(self):
+    def test_failed_step_log_window_preserves_long_lines_and_excludes_later_cleanup(self):
         payload = (b"2026-10-07T01:01:00.123Z " + b"x" * 200000 + b"\n"
                    b"2026-10-07T01:01:01.456Z ##[error]FAILURE: expected remote parent\n"
-                   + b"2026-10-07T01:01:01.789Z Post job cleanup: cache saved\n" * 1000)
+                   + b"2026-10-07T01:01:02.789Z Post job cleanup: cache saved\n" * 1000)
         downloaded = response()
         downloaded.readline.side_effect = io.BytesIO(payload).readline
         redirect = http_error(302)
@@ -206,12 +205,9 @@ class APITests(unittest.TestCase):
         with patch("loop.api.urllib.request.build_opener") as opener, \
                 patch("loop.api.urllib.request.urlopen", return_value=downloaded):
             opener.return_value.open.side_effect = redirect
-            excerpt = API().signed_download("repos/target/repo/actions/jobs/1/logs", 100,
-                                           tail=True, log_windows=[
+            excerpt = API().signed_download("repos/target/repo/actions/jobs/1/logs", log_windows=[
                                                ("2026-10-07T01:01:00Z", "2026-10-07T01:01:01Z")])
-        self.assertTrue(excerpt.endswith(b"FAILURE: expected remote parent\n"))
-        self.assertNotIn(b"Post job cleanup", excerpt)
-        self.assertLessEqual(len(excerpt), 100)
+        self.assertEqual(payload.split(b"2026-10-07T01:01:02.789Z", 1)[0], excerpt)
         self.assertTrue(all(c.args == (65536,) for c in downloaded.readline.call_args_list))
         downloaded.read.assert_not_called()
 
@@ -220,7 +216,7 @@ class APITests(unittest.TestCase):
                 patch("loop.api.urllib.request.urlopen") as download, \
                 self.assertRaises(APIError) as error:
             opener.return_value.open.side_effect = http_error(403)
-            API().signed_download("repos/target/repo/actions/jobs/1/logs", 100, tail=True)
+            API().signed_download("repos/target/repo/actions/jobs/1/logs")
         self.assertEqual(403, error.exception.status)
         download.assert_not_called()
 
@@ -232,8 +228,7 @@ class APITests(unittest.TestCase):
                 patch("loop.api.urllib.request.urlopen", side_effect=missing) as download, \
                 self.assertRaises(APIError) as error:
             opener.return_value.open.side_effect = redirect
-            API("read-token").signed_download("repos/target/repo/actions/jobs/1/logs",
-                                             100, tail=True)
+            API("read-token").signed_download("repos/target/repo/actions/jobs/1/logs")
         self.assertEqual(404, error.exception.status)
         self.assertEqual("Signed download failed with HTTP 404", str(error.exception))
         self.assertTrue(missing.fp.closed)
@@ -247,4 +242,4 @@ class APITests(unittest.TestCase):
                 patch("loop.api.time.monotonic", side_effect=[100, 160]), \
                 self.assertRaisesRegex(DeadlineReached, "Log download deadline"):
             opener.return_value.open.side_effect = redirect
-            API().signed_download("repos/target/repo/actions/jobs/1/logs", 100, tail=True)
+            API().signed_download("repos/target/repo/actions/jobs/1/logs")

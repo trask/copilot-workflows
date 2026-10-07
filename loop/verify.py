@@ -105,17 +105,6 @@ def safe_source_path(path):
     return PurePosixPath(path).parts
 
 
-def object_bounds(directory):
-    from loop.source import MAX_OBJECT, MAX_OBJECT_BYTES, MAX_OBJECTS
-    objects = git(["cat-file", "--batch-all-objects",
-                   "--batch-check=%(objectname) %(objectsize)"], directory).splitlines()
-    require(len(objects) <= MAX_OBJECTS, "Git object count exceeds limit")
-    sizes = {oid.decode(): int(size) for oid, size in (line.split() for line in objects)}
-    require(max(sizes.values(), default=0) <= MAX_OBJECT and sum(sizes.values()) <= MAX_OBJECT_BYTES,
-            "Git object expansion exceeds limits")
-    return sizes
-
-
 def safe_path(path, request=None):
     parts = safe_source_path(path)
     require(request is None or request["head_repo"] != CENTRAL
@@ -248,7 +237,6 @@ def reconstruct(files, request, fetch_source=None, package_dir=None):
         cumulative = git(["--attr-source=" + tree, "diff", "--cached", "--no-ext-diff",
                           "--no-textconv", "--no-renames", "--binary",
                           request["frozen_sha"]], directory)
-        object_bounds(directory)
         commit = parent
         git(["update-ref", "refs/heads/candidate", commit], directory)
         git(["fsck", "--strict", "--no-reflogs"], directory)

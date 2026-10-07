@@ -20,7 +20,6 @@ RESOLVE = """mutation($thread:ID!, $claim:String!) {
 def conversation(comments, root):
     selected = [comment for comment in comments
                 if comment["id"] == root or comment.get("in_reply_to_id") == root]
-    require(len(selected) <= 100, "Thread conversation exceeds limit")
     return [{"id": comment["id"], "body_hash": hashlib.sha256(
         comment["body"].encode("utf-8")).hexdigest(),
         "author": {key: comment["user"][key] for key in ("id", "node_id", "type")},

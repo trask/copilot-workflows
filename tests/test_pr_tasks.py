@@ -113,8 +113,8 @@ class TaskRead(SelfRead):
             return copy.deepcopy(self.jobs)
         return super().pages(path, key)
 
-    def signed_download(self, path, limit, *, tail=False):
-        return self.log[-limit:] if tail else self.log
+    def signed_download(self, path, limit=None, *, log_windows=()):
+        return self.log
 
 
 class TaskPublisher:
@@ -909,8 +909,6 @@ class MergeGitTests(unittest.TestCase):
 
             with patch.dict(os.environ, {"GITHUB_RUN_ID": "88", "GITHUB_RUN_ATTEMPT": "1"}), \
                     patch("loop.source.time.time", return_value=100), \
-                    patch("loop.source.MAX_SOURCE", 8192), \
-                    patch("loop.source.MAX_OBJECT_BYTES", 8192), \
                     patch("loop.source.public_fetch", side_effect=fetch):
                 manifest = package_source(req, 6, read, destination)
             self.assertEqual(5, manifest["history_count"])
@@ -995,18 +993,27 @@ class CIRepairTests(unittest.TestCase):
         req = task_request("ci_fix")
         read = TaskRead(req)
         read.diff = ("diff --git a/Foo.java b/Foo.java\n"
-                     "--- a/Foo.java\n+++ b/Foo.java\n@@ -1 +1,3300 @@\n-old\n"
-                     + ("+" + "x" * 90 + "\n") * 3300)
-        self.assertGreater(len(read.diff.encode()), 300000)
+                     "--- a/Foo.java\n+++ b/Foo.java\n@@ -1 +1,11001 @@\n-old\n"
+                     + ("+" + "x" * 90 + "\n") * 11001)
+        read.diff += "".join(
+            f"diff --git a/New-{index}.txt b/New-{index}.txt\nnew file mode 100644\n"
+            f"--- /dev/null\n+++ b/New-{index}.txt\n@@ -0,0 +1 @@\n+new\n"
+            for index in range(1000))
+        read.pr["changed_files"] = 1001
         read.pages = Mock(side_effect=lambda path, key=None: (
-            [{"filename": "Foo.java", "additions": 3300, "deletions": 1}]
+            [{"filename": "Foo.java", "additions": 11001, "deletions": 1},
+             *[{"filename": f"New-{index}.txt", "additions": 1, "deletions": 0}
+               for index in range(1000)]]
             if path.endswith("/files") else TaskRead.pages(read, path, key)))
         frozen = freeze(read, 1, REVISION, 100, FIXTURE, loop_kind="ci_fix")
         self.assertEqual(read.diff, frozen["pr_diff"]["text"])
-        self.assertEqual(list(range(1, 3301)), frozen["pr_diff"]["anchors"]["Foo.java"])
+        self.assertEqual(list(range(1, 11002)), frozen["pr_diff"]["anchors"]["Foo.java"])
+        self.assertEqual({f"New-{index}.txt": [1] for index in range(1000)},
+                         {path: lines for path, lines in frozen["pr_diff"]["anchors"].items()
+                          if path != "Foo.java"})
         self.assertEqual(5, pipeline_limit(frozen))
 
-    def test_many_large_logs_share_a_json_encoded_evidence_budget(self):
+    def test_many_large_logs_preserve_complete_attempt_bound_evidence(self):
         req, read = self.context()
         read.log = (b"verbose output\n" * 10000
                     + ("unicode \u00e9 and escaped \x1b output\n" * 3000).encode()
@@ -1022,12 +1029,12 @@ class CIRepairTests(unittest.TestCase):
         evidence = collect(read, req, [c["name"] for c in read.checks])
         self.assertEqual("failed", evidence["decision"])
         self.assertEqual(60, len(evidence["failures"]))
-        self.assertLessEqual(len(canonical(evidence)), 120000)
-        self.assertTrue(all(f["availability"] == "job_log_tail"
-                            and f["evidence"].endswith("FAILURE: exact root cause\n")
+        self.assertTrue(all(f["availability"] == "job_log"
+                            and f["evidence"] == read.log.decode()
                             for f in evidence["failures"]))
-        self.assertTrue(all(c.args[1] == 1000 and c.kwargs["tail"]
-                            for c in read.signed_download.call_args_list))
+        self.assertTrue(all(c.args == (f"repos/{FIXTURE}/actions/jobs/{333 + index}/logs",)
+                            and not c.kwargs
+                            for index, c in enumerate(read.signed_download.call_args_list)))
         req["ci_evidence"] = evidence
         self.assertEqual(evidence, same_attempts(read, req))
 

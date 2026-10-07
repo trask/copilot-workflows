@@ -88,8 +88,7 @@ def select_findings(reviews, comments, unresolved, sha):
                              "line": comment["line"],
                              "original_line": comment["original_line"],
                              "body": comment["body"]})
-    require(findings and len(findings) <= 100, "Empty or oversized finding set")
-    require(sum(len(f["body"]) for f in findings) <= 250000, "Finding bodies exceed limit")
+    require(findings, "Empty finding set")
     require(len({f["key"] for f in findings}) == len(findings), "Duplicate API findings")
     return findings
 

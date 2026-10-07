@@ -91,8 +91,6 @@ def reconstruct_merge(files, request, fetch_source, package_dir):
                         "patch_sha256": hashlib.sha256(patch).hexdigest()}]
         cumulative = git(["--attr-source=" + tree, "diff", "--cached", "--no-ext-diff",
                           "--no-textconv", "--no-renames", "--binary", request["frozen_sha"]], directory)
-        from loop.publication import object_bounds
-        object_bounds(directory)
         git(["update-ref", "refs/heads/candidate", commit], directory)
         git(["fsck", "--strict", "--no-reflogs"], directory)
         candidate = {"commit": commit, "tree": tree, "parent": request["frozen_sha"],

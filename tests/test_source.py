@@ -18,10 +18,10 @@ from loop.coordinator import (cancel, dispatch, reconcile)
 from loop.freeze import freeze
 from loop.policy import (Rejected, checkpoint_name, digest, eligible, parse_target, unchanged)
 from loop.publication import import_candidate
-from loop.source import (MAX_OBJECT, MAX_SOURCE, SourceAPI, bind_manifest, download_source,
+from loop.source import (SourceAPI, bind_manifest, download_source,
                          gated_request, import_source, package_source, public_fetch,
-                         snapshot_identity, source_api, source_metadata, target_api)
-from loop.verify import git, object_bounds
+                         source_api, source_metadata, target_api)
+from loop.verify import git
 from tests.test_loop import (FakeAPI, MemoryState, REVISION, SHA, baseline, pr, request, review)
 
 
@@ -257,12 +257,17 @@ class SourceTests(unittest.TestCase):
             git(["init", "--bare", "--quiet"], source)
             stream = bytearray(b"blob\nmark :1\ndata 4\nold\n\n")
             for index in range(11000):
-                content = str(index).encode().ljust(3072, b"x")
+                content = str(index).encode().ljust(12288, b"x")
                 stream.extend(f"blob\nmark :{index + 2}\ndata {len(content)}\n".encode())
                 stream.extend(content + b"\n")
+            content = hashlib.shake_256(b"source-roundtrip").digest(65 * 1024 * 1024)
+            blob = git(["hash-object", "--stdin"], source, content).decode().strip()
+            stream.extend(f"blob\nmark :11003\ndata {len(content)}\n".encode())
+            stream.extend(content + b"\n")
+            del content
             stream.extend(b"commit refs/heads/review-base\nmark :11002\n"
                           b"committer T <t@invalid> 0 +0000\ndata 5\nbase\n"
-                          b"M 100644 :1 Foo.java\n")
+                          b"M 100644 :1 Foo.java\nM 100644 :11003 Large.bin\n")
             for index in range(11000):
                 stream.extend(f"M 100644 :{index + 2} file-{index}.txt\n".encode())
             stream.extend(b"\ncommit refs/heads/snapshot\ncommitter T <t@invalid> 0 +0000\n"
@@ -273,9 +278,10 @@ class SourceTests(unittest.TestCase):
             req["frozen_sha"] = git(["rev-parse", "snapshot"], source).decode().strip()
             req["base_sha"] = req["merge_base_sha"] = git(
                 ["rev-parse", "review-base"], source).decode().strip()
-            sizes = object_bounds(source)
+            sizes = git(["cat-file", "--batch-all-objects",
+                         "--batch-check=%(objectsize)"], source).splitlines()
             self.assertGreater(len(sizes), 10000)
-            self.assertGreater(sum(sizes.values()), MAX_SOURCE // 2)
+            self.assertGreater(sum(map(int, sizes)), 128 * 1024 * 1024)
 
             def fetch(destination):
                 git(["-c", "protocol.file.allow=always", "fetch", "--quiet",
@@ -288,6 +294,8 @@ class SourceTests(unittest.TestCase):
                     patch("loop.source.time.time", return_value=100):
                 manifest = package_source(req, 6, SelfRead(req), Path(directory, "source"), fetch)
             self.assertEqual(2, manifest["history_count"])
+            self.assertGreater(Path(directory, "source", "source.bundle").stat().st_size,
+                               64 * 1024 * 1024)
 
             def snapshot(destination):
                 import_source(destination, Path(directory, "source", "source.bundle"), manifest, req)
@@ -298,33 +306,8 @@ class SourceTests(unittest.TestCase):
             imported.mkdir()
             import_candidate(imported, package / "candidate.bundle", req, candidate, snapshot)
             self.assertEqual(b"new\n", git(["show", candidate["commit"] + ":Foo.java"], imported))
-            self.assertGreater(len(object_bounds(imported)), 10000)
-
-    def test_aggregate_object_budget_is_separate_from_expanded_tree_budget(self):
-        from loop.source import MAX_OBJECT_BYTES
-        records = "".join(f"{index:040x} {MAX_OBJECT}\n"
-                          for index in range(MAX_OBJECT_BYTES // MAX_OBJECT)).encode()
-        with patch("loop.verify.git", return_value=records):
-            self.assertEqual(MAX_OBJECT_BYTES, sum(object_bounds("unused").values()))
-        self.assertGreater(MAX_OBJECT_BYTES, MAX_SOURCE)
-        with patch("loop.verify.git", return_value=records + b"ffffffffffffffffffffffffffffffffffffffff 1\n"), \
-                self.assertRaisesRegex(Rejected, "object expansion"):
-            object_bounds("unused")
-
-    def test_expanded_tree_limit_counts_repeated_blob_paths(self):
-        with tempfile.TemporaryDirectory() as directory:
-            git(["init", "--bare", "--quiet"], directory)
-            blob = git(["hash-object", "-w", "--stdin"], directory,
-                       b"x" * MAX_OBJECT).decode().strip()
-            tree = git(["mktree"], directory, "".join(
-                f"100644 blob {blob}\tfile-{index}.txt\n"
-                for index in range(MAX_SOURCE // MAX_OBJECT + 1)).encode()).decode().strip()
-            sha = git(["hash-object", "-t", "commit", "-w", "--stdin"], directory,
-                      (f"tree {tree}\nauthor T <t@invalid> 0 +0000\n"
-                       "committer T <t@invalid> 0 +0000\n\nsnapshot\n").encode()).decode().strip()
-            git(["update-ref", "refs/heads/snapshot", sha], directory)
-            with self.assertRaisesRegex(Rejected, "tree exceeds expanded limit"):
-                snapshot_identity(directory, sha)
+            self.assertEqual(blob, git(["rev-parse", candidate["commit"] + ":Large.bin"],
+                                      imported).decode().strip())
 
     def test_snapshot_reconstruction_uses_only_credential_free_git_without_checkout_or_tests(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -197,6 +197,30 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(["review:12", "inline:20"], [f["key"] for f in
                          select_findings([review()], [comment], {20}, SHA)])
 
+    def test_complete_feedback_and_conversations_keep_every_verified_root(self):
+        from loop.effects import conversation
+        from loop.policy import supported_checkpoint
+        comments = [{"id": 20 + index, "user": BOT, "pull_request_review_id": 12,
+                     "commit_id": SHA, "original_commit_id": SHA, "path": "Foo.java",
+                     "line": 1, "original_line": 1, "body": "\u00e9" * 3000}
+                    for index in range(101)]
+        selected = select_findings([review("")], comments, {c["id"] for c in comments}, SHA)
+        self.assertEqual([c["body"] for c in comments], [f["body"] for f in selected])
+        replies = [dict(comments[0], id=1000 + index, in_reply_to_id=20) for index in range(101)]
+        context = conversation(comments + replies, 20)
+        self.assertEqual([20, *range(1000, 1101)], [c["id"] for c in context])
+        self.assertEqual(hashlib.sha256(comments[0]["body"].encode()).hexdigest(),
+                         context[0]["body_hash"])
+        req = dict(request(), findings=selected)
+        dispositions(result(req), req)
+        state = dict(checkpoint(req), effects=[
+            {"key": f["key"], "root": f["comment_id"], "thread": str(f["comment_id"]),
+             "status": "pending"} for f in selected])
+        supported_checkpoint(state)
+        state["effects"].append(state["effects"][0])
+        with self.assertRaisesRegex(Rejected, "Duplicate current thread effects"):
+            supported_checkpoint(state)
+
     def test_thread_pagination_and_root_only(self):
         class Threads:
             def graphql(self, _query, variables):

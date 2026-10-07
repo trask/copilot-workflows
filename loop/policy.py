@@ -169,7 +169,7 @@ def supported_checkpoint(state):
                  and "reviewable_retry" not in publication),
             "Retired publication checkpoints are read-only")
     effects = state.get("effects", [])
-    require(isinstance(effects, list) and len(effects) <= 100
+    require(isinstance(effects, list)
             and all(isinstance(effect, dict) and effect.get("status") in {
                 "pending", "confirmed", "skipped", "failed", "uncertain"}
                 and isinstance(effect.get("key"), str) and type(effect.get("root")) is int

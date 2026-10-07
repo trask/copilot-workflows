@@ -257,7 +257,8 @@ The trusted verifier constructs one real commit with frozen head first and base
 second. Never change central trusted runtime files.
 
 `ci_fix` diagnoses every failure in frozen `ci_evidence`. Read its exact run/attempt
-and bounded logs or non-Actions output. Fix only PR-attributable failures. Existing
+and collected logs or non-Actions output. Select relevant evidence when diagnosing.
+Fix only PR-attributable failures. Existing
 checks, formatting and focused tests must remain intact. Output ordinary code
 batches plus `diagnoses`, one per failed key, each containing `key`, `decision`,
 `analysis`, and `evidence`, an array of exact quotations from that failure's evidence.
@@ -277,8 +278,8 @@ checks gate, comments or draft-state changes. Output empty batches/patch and
 For `no_change`, copy `frozen-request.json`'s complete `metadata` object into `proposal`
 without changing its title or body. For `blocked`, retain that same object and explain
 the blocker in `diagnostics.txt`. Only outcome `proposal` may change the title/body.
-Title is nonempty, one line, at most 256 UTF-8 bytes; body may be empty
-and is at most 60,000 UTF-8 bytes. Write a short description of user-visible changes
+Title is nonempty and one line; body may be empty.
+Write a short description of user-visible changes
 and useful examples, without Summary/Testing boilerplate or validation lists.
 
 `pr_simplify` identifies major behavior-preserving simplifications in changed or
@@ -290,8 +291,8 @@ change and its tradeoffs. This is one pass, not another self-review or evaluator
 `pr_review` reviews the selected PR's actual complete GitHub diff for concrete
 correctness problems. Investigate before reporting. Never edit source or fabricate
 findings. Output empty patch/batches and `comments`, at most 100 objects containing
-`path`, positive integer `line`, `side: "RIGHT"` and a concrete `body` of at most
-4,000 UTF-8 bytes. Every anchor must appear in `pr_diff.anchors`. Outcome is
+`path`, positive integer `line`, `side: "RIGHT"` and a concrete `body`.
+Every anchor must appear in `pr_diff.anchors`. Outcome is
 `comments`, `no_change`, or `blocked`. No findings means no review mutation.
 The trusted publisher preserves any existing viewer-owned pending review, creates
 at most one new pending review with commit_id/comments and no event, and never
@@ -300,8 +301,8 @@ submits or approves it.
 `pr_consistency` compares changed code with applicable instructions and compliant
 nearby examples, not generic correctness. Output ordinary batches plus `consistency`,
 at most 100 objects with `path`, `classification` of `needed`, `avoidable`, or `unclear`,
-`explanation` of at most 2,000 UTF-8 bytes, and `citations`, 1 to 10 instruction/example
-path-and-line citations of at most 500 bytes each. Explain necessary deviations
+`explanation`, and `citations`, 1 to 10 instruction/example
+path-and-line citations. Explain necessary deviations
 and uncertainty. Fix only avoidable differences. Preserve the report even when no
 fix qualifies. Outcome is `fixes`, `no_change`, or `blocked`.
 
@@ -394,7 +395,7 @@ For `copilot_review`, every frozen finding key appears exactly once:
 No-code decisions retain equally concrete analysis, upsides, and downsides, without
 belonging to a code batch. A no-change report contains only not_warranted dispositions
 and an empty batches array. A blocked finding requires a blocked outcome; partial work
-cannot publish. All three reasoning fields are required, at most 2,000 UTF-8 bytes each.
+cannot publish. All three reasoning fields are required. Keep explanations concise.
 Do not merely agree with a review; explain why a proposed change is or is not warranted.
 The trusted publisher uses accepted reasoning to reply and resolve original Copilot threads.
 Body-only findings are investigated but receive no invented thread or top-level comment.
@@ -413,7 +414,7 @@ No external finding IDs or fabricated Copilot comments are allowed.
 Every self-review pass, including clean with no changes, must choose and run appropriate
 real existing repository checks. Successful Actions or passing tests alone are not review clearance.
 
-At most 100 batches are permitted. Summaries are single-line text at most 120 UTF-8 bytes.
+At most 100 batches are permitted. Summaries are single-line text.
 Patch spans must be contiguous, nonempty, and cover candidate.patch completely in order.
 Every intermediate change must obey path-safety and trusted-runtime boundaries.
 Do not create an empty code batch or undo all changes in later batches. Never truncate

@@ -12,7 +12,7 @@ def body_classification(body):
 
 
 def _body_classification(body):
-    if not isinstance(body, str) or len(body) > 250000:
+    if not isinstance(body, str):
         return "unknown", []
     if body.count("<!-- ccr-overview-v2 -->") != 1:
         return "unknown", []
