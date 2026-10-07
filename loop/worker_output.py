@@ -5,9 +5,9 @@ from pathlib import Path
 
 from loop.candidates import patches
 from loop.policy import loop_kind, require, worker_result
-from loop.verify import FILES, MAX_PATCH, parse_json
+from loop.verify import FILES, parse_json
 
-LIMITS = {"result.json": 256000, "candidate.patch": MAX_PATCH, "diagnostics.txt": 4194304}
+LIMITS = {"result.json": 256000, "candidate.patch": None, "diagnostics.txt": 4194304}
 
 
 def check_output(request, directory=Path("loop-output")):
@@ -19,8 +19,8 @@ def check_output(request, directory=Path("loop-output")):
         path = directory / name
         require(not path.is_symlink() and path.is_file(), "Non-regular worker output")
         with path.open("rb") as stream:
-            data = stream.read(limit + 1)
-        require(len(data) <= limit, "Worker output exceeds limit: " + name)
+            data = stream.read() if limit is None else stream.read(limit + 1)
+        require(limit is None or len(data) <= limit, "Worker output exceeds limit: " + name)
         files[name] = data
     value = parse_json(files["result.json"])
     worker_result(value, request)

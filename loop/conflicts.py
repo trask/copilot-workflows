@@ -7,7 +7,7 @@ from pathlib import Path
 
 from loop.candidates import message
 from loop.policy import canonical, commit_author, digest, require
-from loop.verify import MAX_PATCH, git, patch_stats, safe_path, tree_entries as entries
+from loop.verify import git, safe_path, tree_entries as entries
 
 
 def history(directory, request):
@@ -35,7 +35,6 @@ def resolved_tree(directory, request, tree):
     original_blobs = {oid for side in (before, incoming) for _, kind, oid in side.values()
                       if kind == "blob"}
     paths = sorted(p for p in before.keys() | proposed.keys() if before.get(p) != proposed.get(p))
-    require(len(paths) <= 100, "Merge changed path count exceeds limit")
     for path in paths:
         safe_path(path, request)
     for path in conflicts:
@@ -60,8 +59,8 @@ def reconstruct_merge(files, request, fetch_source, package_dir):
     from loop.verify import parse_json
     result = parse_json(files["result.json"])
     patch = files["candidate.patch"]
-    require(fetch_source is not None and len(patch) <= MAX_PATCH
-            and b"\x00" not in patch, "Merge requires supported bound source/patch")
+    require(fetch_source is not None and b"\x00" not in patch,
+            "Merge requires supported bound source/patch")
     with tempfile.TemporaryDirectory(prefix="verify-merge-") as directory:
         git(["init", "--bare", "--quiet"], directory)
         fetch_source(directory)
@@ -76,9 +75,6 @@ def reconstruct_merge(files, request, fetch_source, package_dir):
         git(["read-tree", request["frozen_sha"]], directory)
         if patch:
             require(result["outcome"] == "merge", "No-change merge contains a patch")
-            lines = sum((added or 0) + (removed or 0)
-                        for added, removed, _ in patch_stats(patch, directory))
-            require(lines <= 10000, "Merge patch line limit exceeded")
             git(["apply", "--cached", "--whitespace=error-all", "-"], directory, patch)
         tree = git(["write-tree"], directory).decode().strip()
         paths, commits = [], []
@@ -97,7 +93,6 @@ def reconstruct_merge(files, request, fetch_source, package_dir):
                         "patch_sha256": hashlib.sha256(patch).hexdigest()}]
         cumulative = git(["--attr-source=" + tree, "diff", "--cached", "--no-ext-diff",
                           "--no-textconv", "--no-renames", "--binary", request["frozen_sha"]], directory)
-        require(len(cumulative) <= MAX_PATCH, "Merge cumulative patch exceeds limit")
         from loop.publication import object_bounds
         object_bounds(directory)
         git(["update-ref", "refs/heads/candidate", commit], directory)

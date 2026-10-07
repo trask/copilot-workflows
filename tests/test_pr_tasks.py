@@ -4,6 +4,7 @@ import io
 import json
 import os
 import tempfile
+import textwrap
 import unittest
 import urllib.error
 from pathlib import Path
@@ -24,6 +25,7 @@ from loop.source import SourceAPI, import_source, package_source
 from loop.task_effects import confirm_task, publish_task
 from loop.revisions import revision_ref
 from loop.verify import git, reconstruct, verify
+from loop.worker_output import check_output
 from tests.fixtures import CI_CHECK, FIXTURE
 from tests.support import REASONING, batch
 from tests.test_live import personal_pr, personal_request, stored, zipped, TEST_TOKEN
@@ -731,6 +733,54 @@ class MergeGitTests(unittest.TestCase):
             candidate = reconstruct({"result.json": canonical(result(req, "merge")),
                                      "candidate.patch": patch_bytes}, req, self.copy_source(directory))
             self.assertEqual(2, len(candidate["commits"][0]["parents"]))
+
+    def test_large_incoming_merge_survives_worker_staging_verification_and_import(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as root, \
+                tempfile.TemporaryDirectory() as package, tempfile.TemporaryDirectory() as imported:
+            req = self.context(directory, conflicting=True)
+            incoming = {
+                f"Incoming-{file:03}.txt": "".join(
+                    f"{file:03}:{line:04}:{hashlib.sha256(f'{file}:{line}'.encode()).hexdigest()}\n"
+                    for line in range(1300))
+                for file in range(101)}
+            incoming["Foo.java"] = "base\n"
+            req["base_sha"] = objects(directory, incoming, [req["merge_base_sha"]])
+            git(["update-ref", "refs/heads/incoming", req["base_sha"]], directory)
+            resolved = dict(incoming, **{"Foo.java": "head\nbase\n"})
+            proposed = objects(directory, resolved)
+            git(["read-tree", proposed], directory)
+            patch_bytes = git(["diff", "--cached", req["frozen_sha"]], directory)
+            self.assertGreater(len(patch_bytes), 8 * 1024 * 1024)
+
+            workspace = Path(root, "worker")
+            output = workspace / "loop-output"
+            output.mkdir(parents=True)
+            (output / "result.json").write_bytes(canonical(result(req, "merge")))
+            (output / "candidate.patch").write_bytes(patch_bytes)
+            (output / "diagnostics.txt").write_bytes(b"Preserved incoming files and both conflict intents.")
+            check_output(req, output)
+            prompt = (Path(__file__).resolve().parents[1] / ".github" /
+                      "workflows" / "copilot-worker.md").read_text(encoding="utf-8")
+            staging = prompt.split("/usr/bin/python3 -I - <<'PY'\n", 1)[1].split("\n      PY", 1)[0]
+            with patch.dict(os.environ, {"GITHUB_WORKSPACE": str(workspace),
+                                        "RUNNER_TEMP": root, "GITHUB_RUN_ID": "24"}):
+                exec(textwrap.dedent(staging), {})
+            files = {path.name: path.read_bytes() for path in Path(root, "candidate-staged-24").iterdir()}
+            self.assertEqual(patch_bytes, files["candidate.patch"])
+            payload = zipped(files)
+            report = verify(payload, req, run(),
+                            {"id": 33, "digest": "sha256:" + hashlib.sha256(payload).hexdigest()},
+                            self.copy_source(directory), package)
+            candidate = report["candidate"]
+            self.assertEqual(sorted(resolved), candidate["changed_paths"])
+            self.assertEqual([req["frozen_sha"], req["base_sha"]], candidate["commits"][0]["parents"])
+            self.assertEqual(git(["rev-parse", proposed + "^{tree}"], directory).decode().strip(),
+                             candidate["tree"])
+            import_candidate(imported, Path(package, "candidate.bundle"), req, candidate,
+                             self.copy_source(directory))
+            self.assertEqual(candidate["commit"] + " " + req["frozen_sha"] + " " + req["base_sha"],
+                             git(["rev-list", "--parents", "-1", candidate["commit"]], imported).decode().strip())
+            self.assertEqual(b"head\nbase\n", git(["show", candidate["commit"] + ":Foo.java"], imported))
 
     def test_bound_history_source_package_roundtrip(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as root, \

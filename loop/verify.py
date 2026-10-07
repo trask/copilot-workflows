@@ -17,9 +17,6 @@ from loop.policy import (CENTRAL, REPO, Rejected, candidate_outcome, commit_auth
                          private_source, require, staged_source, worker_result)
 
 FILES = {"result.json", "candidate.patch", "diagnostics.txt"}
-MAX_ZIP = 6 * 1024 * 1024
-MAX_TOTAL = 8 * 1024 * 1024
-MAX_PATCH = 2 * 1024 * 1024
 
 
 def unique_json(pairs):
@@ -36,22 +33,20 @@ def parse_json(data):
 
 
 def read_zip(payload):
-    require(len(payload) <= MAX_ZIP, "Artifact archive exceeds limit")
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         entries = archive.infolist()
         require(len(entries) == len(FILES) and {i.filename for i in entries} == FILES,
                 "Missing, extra, nested, or duplicate artifact files")
-        require(sum(i.file_size for i in entries) <= MAX_TOTAL, "Expanded artifact too large")
         result = {}
         for entry in entries:
             mode = entry.external_attr >> 16
             require(not entry.is_dir() and not stat.S_ISLNK(mode)
                     and (stat.S_IFMT(mode) in {0, stat.S_IFREG})
                     and not (entry.flag_bits & 1), "Non-regular or encrypted artifact entry")
-            require(entry.file_size <= max(1, entry.compress_size) * 200, "Compression bomb")
+            if entry.filename != "candidate.patch":
+                limit = 256000 if entry.filename == "result.json" else 4194304
+                require(entry.file_size <= limit, "Artifact member exceeds limit")
             result[entry.filename] = archive.read(entry)
-    require(len(result["candidate.patch"]) <= MAX_PATCH
-            and len(result["result.json"]) <= 256000, "Artifact member exceeds limit")
     return result
 
 
@@ -67,8 +62,8 @@ def artifact_metadata(api, run, request):
     selected = [a for a in all_artifacts if a["name"] == name]
     require(len(selected) == 1, "Missing or duplicate candidate artifact")
     artifact = selected[0]
-    require(not artifact["expired"] and 0 < artifact["size_in_bytes"] <= MAX_ZIP,
-            "Expired or oversized artifact")
+    require(not artifact["expired"] and artifact["size_in_bytes"] > 0,
+            "Expired or empty artifact")
     provenance = artifact["workflow_run"]
     require(provenance["id"] == run["id"]
             and provenance["head_sha"] == request["workflow_revision"], "Cross-run artifact")
@@ -94,7 +89,6 @@ def git(args, cwd, input_data=None, limits=None, allowed=(0,)):
         timeout=180, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         **({"preexec_fn": limits} if limits is not None and os.name == "posix" else {}),
     )
-    require(len(proc.stdout) <= 8 * 1024 * 1024, "Git output exceeds limit")
     if proc.returncode not in allowed:
         raise Rejected("Git validation failed: " + " ".join(args[:2]) + f" (exit {proc.returncode}): "
                        + proc.stderr.decode("utf-8", errors="replace")[:2000])
@@ -221,17 +215,12 @@ def reconstruct(files, request, fetch_source=None, package_dir=None):
                             "Consistency citation is outside the frozen source")
         git(["read-tree", request["frozen_sha"]], directory)
         parent = request["frozen_sha"]
-        commits, mapping, all_paths = [], {}, set()
-        changed_lines = 0
+        commits, mapping = [], {}
         for batch, part in zip(result["batches"], parts):
             records = patch_stats(part, directory)
-            require(0 < len(records) <= 100, "Patch file count exceeds limit")
-            for added, deleted, path in records:
-                changed_lines += (added or 0) + (deleted or 0)
+            require(records, "Empty code batch")
+            for _, _, path in records:
                 safe_path(path, request)
-                all_paths.add(path)
-            require(changed_lines <= 10000, "Patch line count exceeds limit")
-            require(len(all_paths) <= 100, "Combined batch file count exceeds limit")
             git(["apply", "--cached", "--check", "--whitespace=error-all", "-"], directory, part)
             git(["apply", "--cached", "--whitespace=error-all", "-"], directory, part)
             paths = changed_paths(directory, parent, request)
@@ -259,7 +248,6 @@ def reconstruct(files, request, fetch_source=None, package_dir=None):
         cumulative = git(["--attr-source=" + tree, "diff", "--cached", "--no-ext-diff",
                           "--no-textconv", "--no-renames", "--binary",
                           request["frozen_sha"]], directory)
-        require(len(cumulative) <= MAX_PATCH, "Cumulative patch exceeds byte limit")
         object_bounds(directory)
         commit = parent
         git(["update-ref", "refs/heads/candidate", commit], directory)
@@ -283,7 +271,6 @@ def package_candidate(candidate, request, package_dir, directory=None):
                  "^" + request["frozen_sha"]], directory)
         else:
             bundle.write_bytes(b"")
-        require(bundle.stat().st_size <= 16 * 1024 * 1024, "Candidate bundle exceeds limit")
         candidate["bundle_sha256"] = hashlib.sha256(bundle.read_bytes()).hexdigest()
         manifest = dict(candidate, schema=2, request_digest=digest(request),
                         prerequisite=request["frozen_sha"], repo=request["repo"],
@@ -331,7 +318,6 @@ def changed_paths(directory, parent, request):
                 directory).decode("utf-8").split("\0")[:-1]
     for path in paths:
         safe_path(path, request)
-    require(len(paths) <= 100, "Cumulative path count exceeds limit")
     return paths
 
 

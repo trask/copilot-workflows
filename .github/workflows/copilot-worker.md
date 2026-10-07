@@ -94,7 +94,6 @@ safe-outputs:
     allowed-paths: ["loop-output/**"]
     max-uploads: 1
     retention-days: 14
-    max-size-bytes: 8388608
 checkout: false
 steps:
   - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -114,7 +113,7 @@ pre-agent-steps:
   - name: Remove compiler-added central Git credential before sandbox execution
     run: git remote set-url origin https://github.com/trask/copilot-workflows.git
 post-steps:
-  - name: Stage bounded regular output files without running candidate scripts
+  - name: Stage regular output files without running candidate scripts
     if: always()
     shell: /usr/bin/bash --noprofile --norc -e {0}
     run: |
@@ -126,20 +125,16 @@ post-steps:
       source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
       destination = Path(os.environ["RUNNER_TEMP"]) / ("candidate-staged-" + os.environ["GITHUB_RUN_ID"])
       destination.mkdir(mode=0o700, exist_ok=False)
-      total = 0
       for name, limit in [("result.json", 256000),
-                          ("candidate.patch", 2097152), ("diagnostics.txt", 4194304)]:
+                          ("candidate.patch", None), ("diagnostics.txt", 4194304)]:
           fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source_fd)
           with os.fdopen(fd, "rb") as f:
               info = os.fstat(f.fileno())
-              if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+              if not stat.S_ISREG(info.st_mode) or limit is not None and info.st_size > limit:
                   raise SystemExit("Output type or size rejected")
-              data = f.read(limit + 1)
-              if len(data) > limit:
+              data = f.read() if limit is None else f.read(limit + 1)
+              if limit is not None and len(data) > limit:
                   raise SystemExit("Output grew past limit")
-          total += len(data)
-          if total > 8388608:
-              raise SystemExit("Output total rejected")
           (destination / name).write_bytes(data)
       os.close(source_fd)
       PY
@@ -417,8 +412,6 @@ real existing repository checks. Successful Actions or passing tests alone are n
 
 At most 100 batches are permitted. Summaries are single-line text at most 120 UTF-8 bytes.
 Patch spans must be contiguous, nonempty, and cover candidate.patch completely in order.
-The total patch limit is 2 MiB, with at most 100 changed files and 10,000 added/deleted lines
-across batches. Binary bytes count against patch/object size limits, not text-line counts.
 Every intermediate change must obey path-safety and trusted-runtime boundaries.
 Do not create an empty code batch or undo all changes in later batches. Never truncate
 original review evidence to fit output limits.

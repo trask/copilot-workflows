@@ -67,7 +67,7 @@ class WorkerOutputTests(unittest.TestCase):
             self.files(directory, result(req, "merge"), GOOD_PATCH)
             worker_output.check_output(req, Path(directory))
 
-    def test_missing_extra_oversized_and_duplicate_key_outputs_are_rejected(self):
+    def test_missing_extra_and_duplicate_key_outputs_are_rejected(self):
         req = task_request("pr_description")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -82,10 +82,6 @@ class WorkerOutputTests(unittest.TestCase):
             self.files(directory, result(req))
             Path(directory, "result.json").write_bytes(b'{"schema":2,"schema":2}')
             with self.assertRaisesRegex(Rejected, "Duplicate JSON key"):
-                worker_output.check_output(req, root)
-            self.files(directory, result(req))
-            Path(directory, "candidate.patch").write_bytes(b"x" * (worker_output.MAX_PATCH + 1))
-            with self.assertRaisesRegex(Rejected, "exceeds limit"):
                 worker_output.check_output(req, root)
             self.files(directory, result(req))
             Path(directory, "diagnostics.txt").unlink()

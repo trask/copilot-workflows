@@ -22,7 +22,7 @@ from loop.policy import (AUTHOR_ID, CENTRAL, LOOP_KINDS, REQUEST, TERMINAL, Reje
                          staged_source, publication_gate,
                          pipeline_budget, require, supported_checkpoint)
 from loop.state import State
-from loop.verify import MAX_ZIP, artifact_metadata, git, parse_json, verify
+from loop.verify import artifact_metadata, git, parse_json, verify
 from loop.source import (bind_manifest, download_source, gated_request, import_source,
                          package_source, source_metadata, target_api)
 from loop.reviews import select_checks
@@ -212,7 +212,7 @@ def verify_pending(api, store, args):
             {k: a[k] for k in ("id", "name", "size_in_bytes", "expired", "digest")}
             for a in artifacts
         ]
-        payload = api.artifact_zip(artifact["id"], MAX_ZIP)
+        payload = api.artifact_zip(artifact["id"], artifact["size_in_bytes"])
         require("sha256:" + hashlib.sha256(payload).hexdigest() == artifact["digest"],
                 "Downloaded artifact differs from trusted server digest")
         report.update(verification="verified",

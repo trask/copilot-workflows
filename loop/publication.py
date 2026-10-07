@@ -17,10 +17,8 @@ from loop.policy import (BOT_IDENTITY_PATH, CENTRAL, PROFILE, SHA, digest,
                          timestamp, unchanged)
 from loop.verify import (artifact_metadata, git as object_git, object_bounds, parse_json, safe_path, verify)
 from loop.candidates import current_request
-from loop.source import MAX_SOURCE
 
 SECRET = "TEST_PUBLISH_TOKEN"
-MAX_PACKAGE = MAX_SOURCE + 20 * 1024 * 1024
 
 
 def git(args, directory):
@@ -148,17 +146,15 @@ def personal(request):
 
 
 def read_package(payload, names):
-    require(0 < len(payload) <= MAX_PACKAGE, "Trusted artifact archive exceeds limit")
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         entries = archive.infolist()
-        require(len(entries) == len(names) and {e.filename for e in entries} == set(names)
-                and sum(e.file_size for e in entries) <= MAX_PACKAGE, "Wrong artifact members")
+        require(len(entries) == len(names) and {e.filename for e in entries} == set(names),
+                "Wrong artifact members")
         result = {}
         for entry in entries:
             mode = entry.external_attr >> 16
             require(not entry.is_dir() and stat.S_IFMT(mode) in {0, stat.S_IFREG}
-                    and not entry.flag_bits & 1 and entry.file_size <= MAX_PACKAGE
-                    and entry.file_size <= max(entry.compress_size, 1) * 200,
+                    and not entry.flag_bits & 1,
                     "Unsafe artifact member")
             result[entry.filename] = archive.read(entry)
         return result
@@ -169,7 +165,7 @@ def bound_artifact(api, run, name, names, recorded):
     selected = [a for a in artifacts if a["name"] == name]
     require(len(selected) == 1, "Missing/duplicate trusted pipeline artifact")
     artifact = selected[0]
-    require(not artifact["expired"] and 0 < artifact["size_in_bytes"] <= MAX_PACKAGE
+    require(not artifact["expired"] and artifact["size_in_bytes"] > 0
             and artifact["workflow_run"]["id"] == run["id"]
             and artifact["workflow_run"]["head_sha"] == run["head_sha"]
             and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"])
@@ -180,7 +176,7 @@ def bound_artifact(api, run, name, names, recorded):
             and timestamp(artifact["expires_at"]) > int(time.time())
             and 0 < timestamp(artifact["expires_at"]) - timestamp(artifact["created_at"])
             <= 15 * 86400, "Artifact creation/retention is stale or outside the pinned policy")
-    payload = api.artifact_zip(artifact["id"], MAX_PACKAGE)
+    payload = api.artifact_zip(artifact["id"], artifact["size_in_bytes"])
     require("sha256:" + hashlib.sha256(payload).hexdigest() == artifact["digest"],
             "Artifact download hash differs")
     return read_package(payload, names), {key: artifact[key] for key in ("id", "name", "digest")}
@@ -268,7 +264,7 @@ def evidence(api, state, destination):
     run = api.call(f"repos/{CENTRAL}/actions/runs/{state['run']['id']}")
     require(run["id"] == state["run"]["id"], "Wrong worker run identity")
     artifact, _ = artifact_metadata(api, run, request)
-    payload = api.artifact_zip(artifact["id"], 6 * 1024 * 1024)
+    payload = api.artifact_zip(artifact["id"], artifact["size_in_bytes"])
     require("sha256:" + hashlib.sha256(payload).hexdigest() == artifact["digest"],
             "Worker artifact server hash differs")
     def fetch_source(directory):

@@ -85,13 +85,13 @@ def semantic(value, request):
         prose(batch["summary"], 120, summary=True)
         reasoning(batch)
         require(type(batch["offset"]) is int and batch["offset"] == offset
-                and type(batch["length"]) is int and 0 < batch["length"] <= 2 * 1024 * 1024,
+                and type(batch["length"]) is int and batch["length"] > 0,
                 "Patch spans must be contiguous, ordered and nonempty")
         offset += batch["length"]
-        require(offset <= 2 * 1024 * 1024 and isinstance(batch["sha256"], str)
+        require(isinstance(batch["sha256"], str)
                 and len(batch["sha256"]) == 64
                 and all(c in "0123456789abcdef" for c in batch["sha256"]),
-                "Invalid patch span hash or total size")
+                "Invalid patch span hash")
         if external:
             keys = batch["findings"]
             require(isinstance(keys, list) and keys and all(isinstance(k, str) for k in keys)
