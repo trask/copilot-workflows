@@ -43,14 +43,14 @@ def collect(api, request, required):
             run, jobs = executions[run_id]
             matched = [j for j in jobs if j["id"] == job_id]
             if not matched:
-                if (check_decision(check, sha) != "passed" or run["run_attempt"] == 1
+                if (check_decision(check, sha, accept_nonblocking=True) != "passed" or run["run_attempt"] == 1
                         or any(j["name"] == check["name"] for j in jobs)):
                     continue
                 previous = api.call(f"repos/{repo}/actions/jobs/{job_id}")
                 require(type(previous["run_attempt"]) is int
                         and 1 <= previous["run_attempt"] < run["run_attempt"]
-                        and previous["conclusion"] == "success",
-                        "Unbound reused successful job")
+                        and previous["conclusion"] in {"success", "skipped", "neutral"},
+                        "Unbound reused nonblocking job")
                 matched = [previous]
             job = matched[0]
             require(len(matched) == 1 and job["run_id"] == run_id
@@ -64,7 +64,7 @@ def collect(api, request, required):
                         "job_attempt": job["run_attempt"],
                         "workflow_id": run["workflow_id"], "path": run["path"]}
             bound_jobs[job_id] = job
-        decision = check_decision(check, sha)
+        decision = check_decision(check, sha, accept_nonblocking=True)
         item = {"name": check["name"], "id": check["id"], "decision": decision, "actions": identity}
         selected.append(item)
         if decision == "failed":

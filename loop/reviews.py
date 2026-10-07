@@ -153,14 +153,15 @@ def copilot_check(check):
             or check.get("app", {}).get("id") == BOT_ID)
 
 
-def check_decision(check, sha):
+def check_decision(check, sha, *, accept_nonblocking=False):
     if check["head_sha"] != sha or not check.get("app", {}).get("id"):
         return "unknown"
     if check["status"] in {"queued", "in_progress", "waiting", "pending", "requested"}:
         return "pending"
     if check["status"] != "completed":
         return "unknown"
-    if check["conclusion"] == "success":
+    if (check["conclusion"] == "success"
+            or accept_nonblocking and check["conclusion"] in {"skipped", "neutral"}):
         return "passed"
     if check["conclusion"] in {"failure", "cancelled", "timed_out", "action_required", "startup_failure"}:
         return "failed"

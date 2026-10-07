@@ -972,7 +972,7 @@ class CIRepairTests(unittest.TestCase):
         self.assertEqual("failed", evidence["decision"])
         self.assertEqual([333], [f["id"] for f in evidence["failures"]])
 
-    def test_failed_checks_allow_diagnosis_but_skipped_checks_do_not_clear_ci(self):
+    def test_failed_checks_allow_diagnosis_and_nonblocking_checks_allow_clearance(self):
         req, read = self.context()
         read.checks.append(dict(
             read.checks[0], id=334, name="optional job", conclusion="skipped",
@@ -992,7 +992,14 @@ class CIRepairTests(unittest.TestCase):
         self.assertEqual("source_pending", ready["stage"])
         self.assertEqual(0, ready["iteration"])
         read.checks[0]["conclusion"] = "success"
-        self.assertEqual("unknown", collect(read, req, required)["decision"])
+        for conclusion in ("skipped", "neutral"):
+            with self.subTest(conclusion=conclusion):
+                read.checks[1]["conclusion"] = conclusion
+                store, name = stored(ready)
+                complete = watch_ci_fix(store, name, ready, read, 101)
+                self.assertEqual("complete", complete["stage"])
+                self.assertEqual("passed", complete["ci"]["decision"])
+                self.assertEqual("CI_passed", complete["task_completion"]["outcome"])
 
     def test_evidence_attribution_unknown_and_run_drift_fail_closed(self):
         req, read = self.context()
@@ -1062,24 +1069,27 @@ class CIRepairTests(unittest.TestCase):
         self.assertEqual(state["phase"], next_pass["phase"])
         self.assertEqual(1, next_pass["iteration"])
 
-    def test_failed_jobs_rerun_preserves_proven_previous_successful_jobs(self):
+    def test_failed_jobs_rerun_preserves_proven_previous_nonblocking_jobs(self):
         req, read = self.context(attempt=2)
         read.checks[0]["conclusion"] = "success"
         reused = dict(read.checks[0], id=334, name="other check",
                       details_url=f"https://github.com/{FIXTURE}/actions/runs/200/job/334")
         read.checks.append(reused)
         original = read.call
-        def response(path, *args, **kwargs):
-            if path == f"repos/{FIXTURE}/actions/jobs/334":
-                return {"id": 334, "run_id": 200, "run_attempt": 1, "conclusion": "success",
-                        "name": "other check",
-                        "check_run_url": f"https://api.github.com/repos/{FIXTURE}/check-runs/334"}
-            return original(path, *args, **kwargs)
-        read.call = response
-        ci = collect(read, req, [CI_CHECK, "other check"])
-        self.assertEqual("passed", ci["decision"])
-        self.assertEqual(1, ci["checks"][1]["actions"]["job_attempt"])
-        self.assertEqual(2, ci["checks"][1]["actions"]["attempt"])
+        for conclusion in ("success", "skipped", "neutral"):
+            with self.subTest(conclusion=conclusion):
+                read.checks[1]["conclusion"] = conclusion
+                def response(path, *args, **kwargs):
+                    if path == f"repos/{FIXTURE}/actions/jobs/334":
+                        return {"id": 334, "run_id": 200, "run_attempt": 1,
+                                "conclusion": conclusion, "name": "other check",
+                                "check_run_url": f"https://api.github.com/repos/{FIXTURE}/check-runs/334"}
+                    return original(path, *args, **kwargs)
+                read.call = response
+                ci = collect(read, req, [CI_CHECK, "other check"])
+                self.assertEqual("passed", ci["decision"])
+                self.assertEqual(1, ci["checks"][1]["actions"]["job_attempt"])
+                self.assertEqual(2, ci["checks"][1]["actions"]["attempt"])
 
     def test_non_actions_missing_evidence_and_rerun_unknown_never_clear(self):
         req, read = self.context()
