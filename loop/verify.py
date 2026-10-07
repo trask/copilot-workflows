@@ -106,12 +106,12 @@ def safe_source_path(path):
 
 
 def object_bounds(directory):
-    from loop.source import MAX_OBJECT, MAX_OBJECTS, MAX_SOURCE
+    from loop.source import MAX_OBJECT, MAX_OBJECT_BYTES, MAX_OBJECTS
     objects = git(["cat-file", "--batch-all-objects",
                    "--batch-check=%(objectname) %(objectsize)"], directory).splitlines()
     require(len(objects) <= MAX_OBJECTS, "Git object count exceeds limit")
     sizes = {oid.decode(): int(size) for oid, size in (line.split() for line in objects)}
-    require(max(sizes.values(), default=0) <= MAX_OBJECT and sum(sizes.values()) <= MAX_SOURCE,
+    require(max(sizes.values(), default=0) <= MAX_OBJECT and sum(sizes.values()) <= MAX_OBJECT_BYTES,
             "Git object expansion exceeds limits")
     return sizes
 

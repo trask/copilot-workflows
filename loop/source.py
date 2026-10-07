@@ -21,6 +21,7 @@ from loop.policy import (AUTHOR_ID, BOT_IDENTITY_PATH, CENTRAL, DEFAULTS, REPO, 
 from loop.verify import git as object_git, object_bounds, parse_json, tree_entries
 
 MAX_SOURCE = 64 * 1024 * 1024
+MAX_OBJECT_BYTES = 128 * 1024 * 1024
 MAX_OBJECTS = 100000
 MAX_OBJECT = 4 * 1024 * 1024
 

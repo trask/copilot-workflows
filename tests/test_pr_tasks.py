@@ -903,6 +903,7 @@ class MergeGitTests(unittest.TestCase):
             with patch.dict(os.environ, {"GITHUB_RUN_ID": "88", "GITHUB_RUN_ATTEMPT": "1"}), \
                     patch("loop.source.time.time", return_value=100), \
                     patch("loop.source.MAX_SOURCE", 8192), \
+                    patch("loop.source.MAX_OBJECT_BYTES", 8192), \
                     patch("loop.source.public_fetch", side_effect=fetch):
                 manifest = package_source(req, 6, read, destination)
             self.assertEqual(5, manifest["history_count"])

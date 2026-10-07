@@ -300,6 +300,17 @@ class SourceTests(unittest.TestCase):
             self.assertEqual(b"new\n", git(["show", candidate["commit"] + ":Foo.java"], imported))
             self.assertGreater(len(object_bounds(imported)), 10000)
 
+    def test_aggregate_object_budget_is_separate_from_expanded_tree_budget(self):
+        from loop.source import MAX_OBJECT_BYTES
+        records = "".join(f"{index:040x} {MAX_OBJECT}\n"
+                          for index in range(MAX_OBJECT_BYTES // MAX_OBJECT)).encode()
+        with patch("loop.verify.git", return_value=records):
+            self.assertEqual(MAX_OBJECT_BYTES, sum(object_bounds("unused").values()))
+        self.assertGreater(MAX_OBJECT_BYTES, MAX_SOURCE)
+        with patch("loop.verify.git", return_value=records + b"ffffffffffffffffffffffffffffffffffffffff 1\n"), \
+                self.assertRaisesRegex(Rejected, "object expansion"):
+            object_bounds("unused")
+
     def test_expanded_tree_limit_counts_repeated_blob_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             git(["init", "--bare", "--quiet"], directory)
