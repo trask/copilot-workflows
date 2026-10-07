@@ -1022,7 +1022,6 @@ async function rendererFixture(fetch) {
     }
     const document = {
         hidden: false, getElementById: (id) => nodes.get(id), createElement: (tag) => new Node(tag),
-        createElementNS: (_namespace, tag) => new Node(tag),
         createTextNode: (text) => Object.assign(new Node("#text"), { textContent: text }), addEventListener() {},
     };
     const script = await readFile(new URL("app.mjs", import.meta.url), "utf8");
@@ -1174,12 +1173,12 @@ test("renderer preserves safe history and shows per-task buttons with direct dis
     assert.ok(all.some((node) => node.href === `https://github.com/example/fork/commit/${sha("b")}` && node.rel === "noopener noreferrer"));
     const buttons = () => nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid").children;
     assert.equal(buttons().length, Object.keys(KIND_LABELS).length);
-    assert.ok(buttons().every((button) => button.disabled && button.children[0].firstChild.tag === "svg"));
-    assert.deepEqual(buttons().map((button) => button.children[1].textContent), [
+    assert.ok(buttons().every((button) => button.disabled && button.firstChild.className === "task-name"));
+    assert.deepEqual(buttons().map((button) => button.firstChild.textContent), [
         "Address Copilot feedback", "Review and fix", "Resolve conflicts", "Fix CI",
         "Update title & description", "Simplify code", "Draft review", "Align with existing code",
     ]);
-    assert.ok(buttons().every((button) => button.children.length === 2 && button.children[1].children.length === 0));
+    assert.ok(buttons().every((button) => button.children.length === 1 && button.firstChild.children.length === 0));
     assert.equal(row.children.filter((node) => node.tag === "select").length, 0);
 
     Object.assign(state.prs[0], {
@@ -1195,9 +1194,12 @@ test("renderer preserves safe history and shows per-task buttons with direct dis
     assert.equal(icon.firstChild.className, "spinner");
     assert.equal(icon["aria-hidden"], "true");
     assert.equal(active[0].children[1].textContent, "Review and fix");
+    assert.ok(buttons().filter((button) => button["aria-busy"] === "false")
+        .every((button) => button.children.length === 1 && button.firstChild.className === "task-name"));
 
     Object.assign(state.prs[0], { tasks: ["pr_description"], actionBlock: null, phase: null });
     renderer.render();
+    assert.ok(buttons().every((button) => button.children.length === 1 && button.firstChild.className === "task-name"));
     const description = buttons().find((button) => button["aria-label"] === "Update title & description: Run");
     assert.equal(description.title, TASK_EFFECTS.pr_description);
     const accept = description.events.click();

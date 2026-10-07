@@ -41,15 +41,12 @@ code { font: 12px var(--font-mono, Consolas, monospace); overflow-wrap: anywhere
 .task-button { display: flex; align-items: center; gap: 4px; min-height: 40px; padding: 6px; text-align: left; }
 .task-button:disabled { cursor: default; opacity: .6; }
 .task-icon { display: flex; align-items: center; justify-content: center; width: 16px; height: 16px; flex: none; color: var(--text-color-muted, #59636e); }
-.task-icon svg { width: 100%; height: 100%; }
 .task-name { min-width: 0; font-size: 12px; line-height: 16px; font-weight: var(--font-weight-semibold, 600); }
 .task-button[data-tone="active"], .task-button[data-tone="waiting"] { border-color: var(--true-color-blue, #0969da); background: var(--true-color-blue-muted, #ddf4ff); opacity: 1; }
 .task-button[data-tone="active"] .task-icon, .task-button[data-tone="waiting"] .task-icon { color: var(--true-color-blue, #0969da); }
 .task-button[data-tone="complete"] { opacity: 1; }
 .task-button[data-tone="attention"] { border-color: var(--true-color-red, #cf222e); opacity: 1; }
-.task-button[data-tone="attention"] .task-icon { color: var(--true-color-red, #cf222e); }
 .task-button[data-tone="needed"] { border-color: var(--workflow-needed-color); background: color-mix(in srgb, var(--workflow-needed-color) 12%, var(--background-color-default, #fff)); opacity: 1; }
-.task-button[data-tone="needed"] .task-icon { color: var(--workflow-needed-color); }
 .task-icon .spinner { width: 14px; height: 14px; border: 2px solid currentColor; border-radius: 50%; border-right-color: transparent; animation: task-spin 1s linear infinite; }
 @keyframes task-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {

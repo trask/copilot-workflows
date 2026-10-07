@@ -181,29 +181,6 @@ async function taskAction(pr, kind, cancel = false) {
     }
 }
 
-const TASK_ICONS = {
-    copilot_review: "M4 4h16v12H9l-5 4V4m4 4h8m-8 4h5",
-    self_review: "M12 3 4 6v6c0 4 4 7 8 9 4-2 8-5 8-9V6l-8-3m-4 9 3 3 5-6",
-    pr_conflict_resolver: "M6 7v10m12-10c0 5-12 2-12 10M6 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4m12 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4M6 17a2 2 0 1 0 0 4 2 2 0 0 0 0-4",
-    ci_fix: "m14 6 4 4 3-3c1 5-3 8-7 6l-7 7a2 2 0 0 1-3-3l7-7c-2-4 1-8 6-7l-3 3",
-    pr_description: "M14 3H5v18h14V8l-5-5v5h5M8 12h8m-8 4h6",
-    pr_simplify: "M4 6h16M7 12h10m-7 6h4",
-    pr_review: "M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7m10-3a3 3 0 1 0 0 6 3 3 0 0 0 0-6",
-    pr_consistency: "M4 4h6v6H4V4m10 0h6v6h-6V4M4 14h6v6H4v-6m10 0h6v6h-6v-6",
-};
-
-function taskIcon(kind) {
-    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    for (const [key, value] of Object.entries({
-        viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.5",
-        "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", focusable: "false",
-    })) icon.setAttribute(key, value);
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", TASK_ICONS[kind]);
-    icon.append(path);
-    return icon;
-}
-
 function prCard(pr) {
     const card = element("article", null, "pr-card");
     const heading = element("div", null, "row pr-heading");
@@ -227,10 +204,13 @@ function prCard(pr) {
         button.setAttribute("aria-label", `${label}: ${presentation.label}`);
         button.setAttribute("aria-description", presentation.detail);
         button.setAttribute("aria-busy", String(presentation.busy));
-        const icon = element("span", null, "task-icon");
-        icon.setAttribute("aria-hidden", "true");
-        icon.append(presentation.busy ? element("span", null, "spinner") : taskIcon(kind));
-        button.append(icon, element("span", label, "task-name"));
+        if (presentation.busy) {
+            const icon = element("span", null, "task-icon");
+            icon.setAttribute("aria-hidden", "true");
+            icon.append(element("span", null, "spinner"));
+            button.append(icon);
+        }
+        button.append(element("span", label, "task-name"));
         button.addEventListener("click", () => taskAction(pr, kind));
         tasks.append(button);
     }
