@@ -800,6 +800,29 @@ test("a failed launch stops spinning but retains its unconfirmed-task lock and r
     await assert.rejects(c.canvas.launch({ target, kind: "self_review", confirmed: true }), /finished/);
 });
 
+test("a newer owner-authorized task supersedes a failed launch without adopting an older task", async () => {
+    const c = controller();
+    await c.canvas.refresh();
+    await c.canvas.launch({ target, kind: "self_review", confirmed: true });
+    c.setRun(launchRun({ status: "completed", conclusion: "failure", updated_at: "1970-01-01T00:33:20Z" }));
+    await c.canvas.refresh();
+    c.setRecords([checkpoint({ stage: "waiting_ci" }, { launch_run: { id: 21 } })]);
+    assert.equal((await c.canvas.refresh()).prs[0].dispatch.runId, 20);
+    c.setRecords([checkpoint({ stage: "waiting_ci" }, { launch_run: { id: 21 }, frozen_at: 2100 })]);
+    const pr = (await c.canvas.refresh()).prs[0];
+    assert.equal(pr.dispatch, null);
+    assert.equal(taskPresentation(pr, "self_review", true).tone, "waiting");
+    assert.equal(pr.canCancel, true);
+    assert.equal(c.calls.filter((call) => typeof call === "object").length, 1);
+
+    const first = controller();
+    await first.canvas.refresh();
+    await first.canvas.launch({ target, kind: "self_review", confirmed: true });
+    first.setRun(launchRun({ status: "completed", conclusion: "failure", updated_at: "1970-01-01T00:33:20Z" }));
+    first.setRecords([checkpoint({ stage: "waiting_ci" }, { launch_run: { id: 21 }, frozen_at: 2100 })]);
+    assert.equal((await first.canvas.refresh()).prs[0].dispatch, null);
+});
+
 test("refresh retains previous PR and workflow evidence while exact launch status is being read", async () => {
     const c = controller();
     await c.canvas.refresh();

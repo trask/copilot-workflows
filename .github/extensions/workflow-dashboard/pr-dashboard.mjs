@@ -213,6 +213,14 @@ export class PrDashboard extends Dashboard {
                 this.dispatches.delete(target);
                 return;
             }
+            const superseded = (finishedAt) => entry.operation === "launch" &&
+                phase && !phase.historical && !phase.unknownStage &&
+                phase.authorizedActorId === account?.id && phase.launchId && phase.launchId !== entry.runId &&
+                Number.isFinite(phase.started) && phase.started > Date.parse(finishedAt);
+            if (entry.status === "finished" && entry.conclusion === "failure" && superseded(entry.finishedAt)) {
+                this.dispatches.delete(target);
+                return;
+            }
             if (!entry.runId || entry.status !== "accepted" ||
                 !["launch", "cancel_dispatch"].includes(entry.operation)) return;
             try {
@@ -234,7 +242,9 @@ export class PrDashboard extends Dashboard {
                 } else {
                     entry.status = "finished";
                     entry.conclusion = run.conclusion;
+                    entry.finishedAt = run.updated_at;
                     entry.message = `Launch finished with ${run.conclusion ?? "unknown conclusion"}, without a confirmed task. Inspect its Actions run; do not blindly relaunch.`;
+                    if (run.conclusion === "failure" && superseded(run.updated_at)) this.dispatches.delete(target);
                 }
             } catch (error) {
                 if (entry.operation === "cancel" || error.uncertain) entry.status = error.uncertain ? "uncertain" : "failed";

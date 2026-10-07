@@ -102,7 +102,7 @@ class API:
     def artifact_zip(self, artifact_id, limit):
         return self.signed_download(f"repos/{CENTRAL}/actions/artifacts/{artifact_id}/zip", limit)
 
-    def signed_download(self, path, limit, *, tail=False):
+    def signed_download(self, path, limit, *, tail=False, log_windows=()):
         self.authorize(path, "GET", None)
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *_args, **_kwargs):
@@ -130,17 +130,27 @@ class API:
         try:
             with urllib.request.urlopen(destination, timeout=60) as response:
                 if tail:
-                    payload, total = b"", 0
+                    payload, total, annotated = b"", 0, b""
                     deadline = time.monotonic() + 60
-                    while chunk := response.read(65536):
-                        total += len(chunk)
-                        payload = (payload + chunk)[-limit:]
+                    windows = [(start[:19].encode("ascii"), end[:19].encode("ascii"))
+                               for start, end in log_windows]
+                    read = response.readline if windows else response.read
+                    line_start, selected = True, True
+                    while chunk := read(65536):
+                        if windows and line_start:
+                            selected = any(start <= chunk[:19] <= end for start, end in windows)
+                        if selected:
+                            total += len(chunk)
+                            payload = (payload + chunk)[-limit:]
+                            if windows and b"##[error]" in chunk:
+                                annotated = payload
+                        line_start = chunk.endswith(b"\n")
                         if time.monotonic() >= deadline:
                             raise DeadlineReached("Log download deadline reached")
                     if total > limit:
                         print(f"READ EXCERPT: retained last {len(payload)} of {total} log bytes",
                               file=sys.stderr)
-                    return payload
+                    return annotated or payload
                 payload = response.read(limit + 1)
         except urllib.error.HTTPError as error:
             error.close()

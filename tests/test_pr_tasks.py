@@ -82,7 +82,7 @@ class TaskRead(SelfRead):
         self.reviews = []
         self.comments = []
         self.log = b"temporary runner network outage"
-        self.runs[0].update(check_suite_id=500)
+        self.runs[0].update(check_suite_id=500, run_number=1)
         self.checks[0].update(check_suite={"id": 500},
                               details_url=f"https://github.com/{FIXTURE}/actions/runs/200/job/333")
         self.jobs = [{"id": 333, "name": CI_CHECK, "run_id": 200, "run_attempt": 1,
@@ -917,6 +917,60 @@ class CIRepairTests(unittest.TestCase):
         self.assertEqual("failed", evidence["decision"])
         self.assertEqual("logs_unavailable_404", evidence["failures"][0]["availability"])
         self.assertEqual("runner failure", evidence["failures"][0]["evidence"].strip())
+
+    def test_failed_step_evidence_keeps_the_failure_instead_of_post_job_cleanup(self):
+        req, read = self.context()
+        read.jobs[0]["steps"] = [{
+            "name": "Test", "conclusion": "failure",
+            "started_at": "2026-10-07T01:00:00Z", "completed_at": "2026-10-07T01:01:00Z"}]
+        read.signed_download = API("read-token").signed_download
+        payload = (b"2026-10-07T01:00:59.123Z ##[error]FAILURE: expected remote parent\n"
+                   + b"2026-10-07T01:01:01.456Z Post job cleanup: cache saved\n" * 2000)
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.readline.side_effect = io.BytesIO(payload).readline
+        redirect = urllib.error.HTTPError("https://api.github.com/logs", 302, "redirect",
+                                          {"Location": "https://example.com/signed-log"}, io.BytesIO())
+        with patch("loop.api.urllib.request.build_opener") as opener, \
+                patch("loop.api.urllib.request.urlopen", return_value=response):
+            opener.return_value.open.side_effect = redirect
+            evidence = collect(read, req, [CI_CHECK])
+        self.assertEqual("failed_step_log_excerpt", evidence["failures"][0]["availability"])
+        self.assertIn("FAILURE: expected remote parent", evidence["failures"][0]["evidence"])
+        self.assertNotIn("Post job cleanup", evidence["failures"][0]["evidence"])
+
+    def test_newer_same_head_runs_supersede_failures_but_independent_workflows_do_not(self):
+        req, read = self.context()
+        newer = dict(read.runs[0], id=201, run_number=2, check_suite_id=501, conclusion="success")
+        read.runs.append(newer)
+        read.checks.append(dict(
+            read.checks[0], id=334, conclusion="success", check_suite={"id": 501},
+            details_url=f"https://github.com/{FIXTURE}/actions/runs/201/job/334"))
+        read.jobs.append(dict(
+            read.jobs[0], id=334, run_id=201,
+            check_run_url=f"https://api.github.com/repos/{FIXTURE}/check-runs/334"))
+        original = read.call
+        read.call = lambda path, *args, **kwargs: (
+            copy.deepcopy(newer) if path == f"repos/{FIXTURE}/actions/runs/201"
+            else original(path, *args, **kwargs))
+        read.signed_download = Mock(wraps=read.signed_download)
+        state = checkpoint(req)
+        state.update(stage="waiting_ci", publications=[], effects=[])
+        store, name = stored(state)
+        complete = watch_ci_fix(store, name, state, read, 100)
+        self.assertEqual("complete", complete["stage"])
+        self.assertEqual("CI_passed", complete["task_completion"]["outcome"])
+        self.assertEqual([334], [c["id"] for c in complete["ci"]["checks"]])
+        read.signed_download.assert_not_called()
+        read.checks.pop()
+        newer.update(status="queued", conclusion=None)
+        self.assertEqual("pending", collect(read, req, [CI_CHECK])["decision"])
+        read.signed_download.assert_not_called()
+        newer.update(status="completed", conclusion="success", workflow_id=999)
+        evidence = collect(read, req, [CI_CHECK])
+        self.assertEqual("failed", evidence["decision"])
+        self.assertEqual([333], [f["id"] for f in evidence["failures"]])
 
     def test_failed_checks_allow_diagnosis_but_skipped_checks_do_not_clear_ci(self):
         req, read = self.context()

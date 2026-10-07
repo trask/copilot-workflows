@@ -3,7 +3,7 @@
 import re
 
 from loop.api import APIError
-from loop.policy import canonical, check_target, exact, require
+from loop.policy import canonical, check_target, exact, iso, require, timestamp
 from loop.reviews import check_decision, ci_items, copilot_check
 
 
@@ -17,12 +17,7 @@ def collect(api, request, required):
     sha, repo = request["frozen_sha"], request["repo"]
     check_target(api, request)
     checks, statuses = ci_items(api, repo, sha)
-    failure_count = sum(c["name"] in required and not copilot_check(c)
-                        and check_decision(c, sha) == "failed" for c in checks)
-    failure_count += sum(s["context"] in required and s["state"] in {"failure", "error"}
-                         for s in statuses)
-    evidence_limit = 60000 // max(1, failure_count)
-    executions, selected, failures = {}, [], []
+    executions, selected, failures, bound_jobs = {}, [], [], {}
     for check in checks:
         if check["name"] not in required or copilot_check(check):
             continue
@@ -68,6 +63,7 @@ def collect(api, request, required):
             identity = {"run_id": run_id, "attempt": run["run_attempt"], "job_id": job_id,
                         "job_attempt": job["run_attempt"],
                         "workflow_id": run["workflow_id"], "path": run["path"]}
+            bound_jobs[job_id] = job
         decision = check_decision(check, sha)
         item = {"name": check["name"], "id": check["id"], "decision": decision, "actions": identity}
         selected.append(item)
@@ -75,21 +71,8 @@ def collect(api, request, required):
             output = check.get("output") or {}
             text = "\n".join(output.get(k) or "" for k in ("title", "summary", "text"))
             availability = "check_output" if text.strip() else "unavailable"
-            if identity:
-                try:
-                    log = api.signed_download(f"repos/{repo}/actions/jobs/{identity['job_id']}/logs",
-                                              evidence_limit, tail=True)
-                except APIError as error:
-                    require(error.status in {403, 404, 410}, "Failed to collect CI logs")
-                    availability = "logs_unavailable_" + str(error.status)
-                else:
-                    text = log.decode("utf-8", errors="replace")
-                    availability = "job_log_tail"
-            bounded = excerpt(text, evidence_limit)
-            if bounded != text and availability != "job_log_tail":
-                availability += "_tail"
             failures.append({"key": "check:" + str(check["id"]), **item,
-                             "availability": availability, "evidence": bounded})
+                             "availability": availability, "evidence": text})
     for status in statuses:
         if status["context"] not in required:
             continue
@@ -99,23 +82,63 @@ def collect(api, request, required):
                          "decision": decision, "actions": None})
         if decision == "failed":
             text = status.get("description") or ""
-            bounded = excerpt(text, evidence_limit)
             failures.append({"key": "status:" + str(status["id"]),
                              "name": status["context"], "id": status["id"],
                              "decision": decision, "actions": None,
-                             "availability": ("status_description_tail" if bounded != text else
-                                              "status_description" if text else "unavailable"),
-                             "evidence": bounded})
-    names = [s["name"] for s in selected]
-    decisions = [s["decision"] for s in selected]
+                             "availability": "status_description" if text else "unavailable",
+                             "evidence": text})
     active_runs = api.pages(f"repos/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
     require(len(active_runs) <= 100, "CI run collection exceeds limit")
-    active = any(r["head_sha"] == sha
-                 and r["repository"]["full_name"] == repo
-                 and re.fullmatch(r"\.github/workflows/[^/\\@?#]+\.ya?ml",
-                                  r["path"].split("@")[0]) is not None
-                 and r["status"] in {"queued", "in_progress", "waiting", "pending", "requested"}
-                 for r in active_runs)
+    latest = {}
+    for run in [*active_runs, *(r for r, _ in executions.values())]:
+        if (run["head_sha"] != sha or run["repository"]["full_name"] != repo
+                or re.fullmatch(r"\.github/workflows/[^/\\@?#]+\.ya?ml",
+                                run["path"].split("@")[0]) is None):
+            continue
+        require(type(run["workflow_id"]) is int and run["workflow_id"] > 0
+                and type(run["run_number"]) is int and run["run_number"] > 0,
+                "CI workflow execution sequence is invalid")
+        prior = latest.get(run["workflow_id"])
+        require(prior is None or prior["run_number"] != run["run_number"]
+                or prior["id"] == run["id"], "CI workflow execution sequence is ambiguous")
+        if prior is None or run["run_number"] > prior["run_number"]:
+            latest[run["workflow_id"]] = run
+    def current(item):
+        identity = item["actions"]
+        return not identity or latest[identity["workflow_id"]]["id"] == identity["run_id"]
+    selected = [item for item in selected if current(item)]
+    failures = [item for item in failures if current(item)]
+    evidence_limit = max(2, 60000 // max(1, len(failures)))
+    for failure in failures:
+        text = failure["evidence"]
+        identity = failure["actions"]
+        if identity:
+            steps = [step for step in bound_jobs[identity["job_id"]].get("steps", [])
+                     if step["conclusion"] == "failure"]
+            windows = [(iso(timestamp(step["started_at"])), iso(timestamp(step["completed_at"])))
+                       for step in steps]
+            require(all(start <= end for start, end in windows), "CI failed-step timestamps differ")
+            try:
+                log = api.signed_download(
+                    f"repos/{repo}/actions/jobs/{identity['job_id']}/logs", evidence_limit,
+                    tail=True, **({"log_windows": windows} if windows else {}))
+            except APIError as error:
+                require(error.status in {403, 404, 410}, "Failed to collect CI logs")
+                failure["availability"] = "logs_unavailable_" + str(error.status)
+            else:
+                if log:
+                    text = log.decode("utf-8", errors="replace")
+                    failure["availability"] = "failed_step_log_excerpt" if windows else "job_log_tail"
+                else:
+                    failure["availability"] = "failed_step_logs_unavailable" if windows else "logs_unavailable_empty"
+        bounded = excerpt(text, evidence_limit)
+        if bounded != text and not failure["availability"].endswith("_tail"):
+            failure["availability"] += "_tail"
+        failure["evidence"] = bounded
+    names = [s["name"] for s in selected]
+    decisions = [s["decision"] for s in selected]
+    active = any(r["status"] in {"queued", "in_progress", "waiting", "pending", "requested"}
+                 for r in latest.values())
     duplicate = any(names.count(n) > 1 and (
         any(not s["actions"] for s in selected if s["name"] == n)
         or len({s["actions"]["workflow_id"] for s in selected if s["name"] == n}) != names.count(n))
@@ -125,7 +148,8 @@ def collect(api, request, required):
                 else "unknown" if "unknown" in decisions else "passed" if required else "none")
     result = {"sha": sha, "required": required, "checks": selected, "failures": failures,
               "runs": [{"id": r["id"], "attempt": r["run_attempt"], "status": r["status"],
-                        "conclusion": r["conclusion"]} for r, _ in executions.values()],
+                        "conclusion": r["conclusion"]} for r, _ in executions.values()
+                       if latest[r["workflow_id"]]["id"] == r["id"]],
               "decision": decision}
     metadata = len(canonical(dict(result, failures=[dict(f, evidence="") for f in failures])))
     require(metadata <= 120000, "CI diagnosis metadata exceeds limit")

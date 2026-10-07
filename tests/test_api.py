@@ -195,6 +195,26 @@ class APITests(unittest.TestCase):
             opener.return_value.open.side_effect = redirect
             API().artifact_zip(1, 2)
 
+    def test_failed_step_log_window_excludes_later_cleanup_and_bounds_long_lines(self):
+        payload = (b"2026-10-07T01:01:00.123Z " + b"x" * 200000 + b"\n"
+                   b"2026-10-07T01:01:01.456Z ##[error]FAILURE: expected remote parent\n"
+                   + b"2026-10-07T01:01:01.789Z Post job cleanup: cache saved\n" * 1000)
+        downloaded = response()
+        downloaded.readline.side_effect = io.BytesIO(payload).readline
+        redirect = http_error(302)
+        redirect.headers["Location"] = "https://example.com/signed-log"
+        with patch("loop.api.urllib.request.build_opener") as opener, \
+                patch("loop.api.urllib.request.urlopen", return_value=downloaded):
+            opener.return_value.open.side_effect = redirect
+            excerpt = API().signed_download("repos/target/repo/actions/jobs/1/logs", 100,
+                                           tail=True, log_windows=[
+                                               ("2026-10-07T01:01:00Z", "2026-10-07T01:01:01Z")])
+        self.assertTrue(excerpt.endswith(b"FAILURE: expected remote parent\n"))
+        self.assertNotIn(b"Post job cleanup", excerpt)
+        self.assertLessEqual(len(excerpt), 100)
+        self.assertTrue(all(c.args == (65536,) for c in downloaded.readline.call_args_list))
+        downloaded.read.assert_not_called()
+
     def test_signed_download_permission_errors_reach_the_caller(self):
         with patch("loop.api.urllib.request.build_opener") as opener, \
                 patch("loop.api.urllib.request.urlopen") as download, \
