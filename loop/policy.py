@@ -257,7 +257,41 @@ def safe_ref(ref):
             and not ref.endswith(("/", ".", ".lock")))
 
 
-def eligible(pr, repo=None, actor_id=AUTHOR_ID, kind="copilot_review"):
+def attributed_owner(api, pr, repo, actor_id, owner=None):
+    if pr["user"]["type"] != "Bot":
+        return None
+    owner = api.call(f"user/{actor_id}") if owner is None else owner
+    require(type(owner.get("id")) is int and owner["id"] == actor_id
+            and isinstance(owner.get("login"), str) and ACCOUNT.fullmatch(owner["login"]),
+            "Invalid GitHub PR owner identity")
+    result = api.graphql("""
+query($owner:String!, $name:String!, $searchQuery:String!) {
+  repository(owner:$owner, name:$name) { nameWithOwner }
+  search(query:$searchQuery, type:ISSUE, first:100) {
+    pageInfo { hasNextPage }
+    nodes { ... on PullRequest { number repository { nameWithOwner } } }
+  }
+}
+""", {"owner": repo.split("/")[0], "name": repo.split("/")[1],
+      "searchQuery": f"repo:{repo} is:pr is:open author:{owner['login']} {pr['number']}"})
+    search = result.get("search", {})
+    require(isinstance(result.get("repository"), dict)
+            and result["repository"].get("nameWithOwner", "").casefold() == repo.casefold()
+            and isinstance(search, dict)
+            and isinstance(search.get("nodes"), list)
+            and search.get("pageInfo", {}).get("hasNextPage") is False
+            and all(isinstance(item, dict) and type(item.get("number")) is int
+                    and isinstance(item.get("repository"), dict)
+                    for item in search["nodes"]),
+            "GitHub PR ownership search is incomplete")
+    if any(item.get("number") == pr["number"]
+           and item.get("repository", {}).get("nameWithOwner", "").casefold() == repo.casefold()
+           for item in search["nodes"]):
+        return {"id": owner["id"], "login": owner["login"]}
+    return None
+
+
+def eligible(pr, repo=None, actor_id=AUTHOR_ID, kind="copilot_review", owner=None):
     repo = pr["base"]["repo"]["full_name"] if repo is None else repo
     require(REPO.fullmatch(repo), "Invalid target repository")
     require(pr["state"] == "open" and not pr.get("merged", False), "PR is not open")
@@ -265,7 +299,10 @@ def eligible(pr, repo=None, actor_id=AUTHOR_ID, kind="copilot_review"):
             and pr["user"]["type"] in {"User", "Bot"}
             and type(pr["user"]["id"]) is int and pr["user"]["id"] > 0
             and (kind == "pr_review" or pr["user"]["type"] == "User"
-                 and pr["user"]["id"] == actor_id), "Wrong author")
+                 and pr["user"]["id"] == actor_id
+                 or pr["user"]["type"] == "Bot" and isinstance(owner, dict)
+                 and type(owner.get("id")) is int and owner["id"] == actor_id),
+            "Wrong author")
     head, base = pr["head"], pr["base"]
     require(
         head["repo"] is not None
@@ -297,7 +334,7 @@ def eligible(pr, repo=None, actor_id=AUTHOR_ID, kind="copilot_review"):
             "head_repo": head["repo"]["full_name"], "head_repo_id": head["repo"]["id"],
             "head_ref": ref, "frozen_sha": head["sha"], "source_private": head["repo"]["private"],
             "target_private": base["repo"]["private"], "authorized_actor_id": actor_id}
-    if kind == "pr_review":
+    if kind == "pr_review" or owner is not None:
         result["pr_author_id"] = pr["user"]["id"]
     public_request(result)
     return result
@@ -305,7 +342,9 @@ def eligible(pr, repo=None, actor_id=AUTHOR_ID, kind="copilot_review"):
 
 def unchanged(request, pr):
     public_request(request)
-    live = eligible(pr, request["repo"], request["authorized_actor_id"], loop_kind(request))
+    kind = loop_kind(request)
+    owner = request.get("commit_author") if kind != "pr_review" and "pr_author_id" in request else None
+    live = eligible(pr, request["repo"], request["authorized_actor_id"], kind, owner)
     require(all(request.get(k) == live[k]
                 for k in live), "Target changed after freeze")
     if diff_scope(request):
@@ -317,6 +356,10 @@ def check_target(api, request):
     public_request(request)
     pr = api.call(f"repos/{request['repo']}/pulls/{request['pr']}")
     unchanged(request, pr)
+    if loop_kind(request) != "pr_review" and "pr_author_id" in request:
+        require(attributed_owner(api, pr, request["repo"], request["authorized_actor_id"],
+                                 request["commit_author"]) == request["commit_author"],
+                "GitHub PR ownership changed after freeze")
     if diff_scope(request):
         ref = api.call(f"repos/{request['repo']}/git/ref/heads/{request['base_ref']}")
         require(ref["object"]["sha"] == request["base_sha"],

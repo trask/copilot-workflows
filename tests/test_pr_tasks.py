@@ -235,6 +235,38 @@ class TaskContractsTests(unittest.TestCase):
         with self.assertRaisesRegex(Rejected, "Target changed after freeze"):
             check_target(read, frozen)
 
+    def test_copilot_pr_attributed_to_owner_freezes_owner_identity_and_rechecks_ownership(self):
+        for kind in ("self_review", "pr_description"):
+            req = task_request(kind)
+            read = TaskRead(req)
+            read.pr["user"].update(id=999, type="Bot", login="Copilot")
+            ownership = {
+                "repository": {"nameWithOwner": FIXTURE},
+                "search": {"pageInfo": {"hasNextPage": False},
+                           "nodes": [{"number": 1, "repository": {"nameWithOwner": FIXTURE}}]},
+            }
+            read.graphql = Mock(return_value=ownership)
+            with self.subTest(kind=kind):
+                frozen = freeze(read, 1, REVISION, 100, FIXTURE, loop_kind=kind)
+                self.assertEqual(999, frozen["pr_author_id"])
+                self.assertEqual(req["commit_author"], frozen["commit_author"])
+                self.assertEqual(req["commit_author"]["id"], frozen["authorized_actor_id"])
+                self.assertIn("author:launch-owner 1",
+                              read.graphql.call_args.args[1]["searchQuery"])
+                check_target(read, frozen)
+                read.pr["user"]["id"] = 1000
+                with self.assertRaisesRegex(Rejected, "Target changed after freeze"):
+                    check_target(read, frozen)
+                read.pr["user"]["id"] = 999
+                ownership["search"]["nodes"] = []
+                with self.assertRaisesRegex(Rejected, "ownership changed"):
+                    check_target(read, frozen)
+                with self.assertRaisesRegex(Rejected, "Wrong author"):
+                    freeze(read, 1, REVISION, 100, FIXTURE, loop_kind=kind)
+                ownership["search"]["pageInfo"]["hasNextPage"] = True
+                with self.assertRaisesRegex(Rejected, "ownership search is incomplete"):
+                    freeze(read, 1, REVISION, 100, FIXTURE, loop_kind=kind)
+
     def test_new_freezes_include_live_base_and_complete_actual_diff(self):
         for kind in ("pr_review", "pr_description", "pr_simplify", "pr_consistency", "pr_conflict_resolver"):
             req = task_request(kind)
@@ -442,6 +474,23 @@ class NonCodeEffectsTests(unittest.TestCase):
             self.publish(state, read, store, name, publisher)
         self.assertEqual([], publisher.posts)
         self.assertEqual([{"id": 7, "state": "PENDING", "user": {"id": AUTHOR_ID}}], read.reviews)
+
+    def test_owner_attributed_copilot_pr_can_publish_metadata(self):
+        state, read, _, _, publisher = self.context("pr_description")
+        state["request"]["pr_author_id"] = 999
+        read.pr["user"].update(id=999, type="Bot", login="Copilot")
+        read.graphql = Mock(return_value={
+            "repository": {"nameWithOwner": FIXTURE},
+            "search": {"pageInfo": {"hasNextPage": False},
+                       "nodes": [{"number": 1, "repository": {"nameWithOwner": FIXTURE}}]},
+        })
+        store, name = stored(state)
+        complete = self.publish(state, read, store, name, publisher)
+        self.assertEqual("complete", complete["stage"])
+        self.assertEqual([(f"repos/{FIXTURE}/pulls/1", "PATCH",
+                           {"title": "New title", "body": "New body"})], publisher.posts)
+        self.assertEqual(AUTHOR_ID, complete["request"]["commit_author"]["id"])
+        self.assertEqual(999, complete["request"]["pr_author_id"])
 
     def test_bot_authored_pr_gets_only_an_owner_owned_pending_review(self):
         state, read, store, name, publisher = self.context("pr_review")

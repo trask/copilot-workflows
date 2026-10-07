@@ -17,7 +17,7 @@ from loop.coordinator import (cancel, checkpoint, dispatch, due, matching_runs, 
 from loop.control import busy as coordinator_busy, claim as claim_coordinator, owned
 from loop.publisher_auth import publisher_secret
 from loop.freeze import freeze
-from loop.policy import (AUTHOR_ID, CENTRAL, LOOP_KINDS, REQUEST, TERMINAL, Rejected, canonical,
+from loop.policy import (AUTHOR_ID, CENTRAL, LOOP_KINDS, REQUEST, TERMINAL, Rejected, attributed_owner, canonical,
                          check_target, checkpoint_name, digest, effect_repository, eligible, loop_kind, parse_target,
                          staged_source, publication_gate,
                          pipeline_budget, require, supported_checkpoint)
@@ -61,13 +61,15 @@ def select_publisher(api, target, kind="copilot_review"):
     publication_invocation()
     repo, number = parse_target(target)
     try:
-        live = target_api(api, repo).call(f"repos/{repo}/pulls/{number}")
+        read = target_api(api, repo)
+        live = read.call(f"repos/{repo}/pulls/{number}")
+        owner = attributed_owner(read, live, repo, int(os.environ["GITHUB_ACTOR_ID"])) if kind != "pr_review" else None
     except APIError as error:
         if error.status not in {401, 403, 404}:
             raise
         print("Publisher selection deferred to the target repository read-access gate.")
         return
-    request = eligible(live, repo, int(os.environ["GITHUB_ACTOR_ID"]), kind)
+    request = eligible(live, repo, int(os.environ["GITHUB_ACTOR_ID"]), kind, owner)
     require(request["pr"] == number, "Publisher selection returned another PR")
     output("publisher_head_repo", effect_repository(dict(request, loop_kind=kind)))
     output("publisher_secret", publisher_secret(effect_repository(dict(request, loop_kind=kind))))

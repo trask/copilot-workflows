@@ -289,6 +289,28 @@ export class GitHub {
         return [...results.values()];
     }
 
+    ownPullNumbers(repo) {
+        configuredRepository(repo);
+        return this.queueRead(`mine:${repo}`, async () => {
+            if (this.retryAt > this.now()) throw new GitHubError("GitHub reads are paused until the recorded rate-limit reset.", this.retryAt);
+            this.requests++;
+            this.counted++;
+            const result = await this.run(["pr", "list", "--repo", `github.com/${repo}`,
+                "--state", "open", "--author", "@me", "--limit", "10000", "--json", "number"]);
+            let pulls;
+            try {
+                pulls = JSON.parse(result.stdout);
+            } catch {
+                throw new GitHubError("GitHub returned malformed PR ownership JSON.");
+            }
+            if (result.code !== 0 || !Array.isArray(pulls) || pulls.length >= 10000 ||
+                pulls.some((pr) => !Number.isSafeInteger(pr?.number) || pr.number < 1)) {
+                throw new GitHubError("GitHub PR ownership listing is malformed or incomplete.");
+            }
+            return new Set(pulls.map((pr) => pr.number));
+        });
+    }
+
     graphql(query, repo) {
         configuredRepository(repo);
         return this.queueRead(`graphql:${repo}:${query}`, async () => {

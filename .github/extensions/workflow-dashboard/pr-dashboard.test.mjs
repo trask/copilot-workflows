@@ -72,7 +72,7 @@ const checkpoint = (changes = {}, request = {}) => ({
     }, ...changes,
 });
 
-function controller({ records = [], pulls = [pull()], dashboardState = state() } = {}) {
+function controller({ records = [], pulls = [pull()], dashboardState = state(), ownNumbers = [] } = {}) {
     const calls = [];
     let viewerAccount = account;
     let listing = pulls;
@@ -94,6 +94,10 @@ function controller({ records = [], pulls = [pull()], dashboardState = state() }
             return { data: structuredClone(pr) };
         },
         pulls: async (selected) => { calls.push(`list:${selected}`); github.requests++; github.counted++; return structuredClone(listing); },
+        ownPullNumbers: async (selected) => {
+            calls.push(`mine:${selected}`); github.requests++; github.counted++;
+            return new Set(ownNumbers);
+        },
         pullEvidence: async (_selected, prs) => new Map(prs.map((pr) => [pr.number, {
             detail: detail({ number: pr.number, head: pr.sha }),
         }])),
@@ -424,6 +428,66 @@ test("ownership views are disjoint and compose with reviewer and case-insensitiv
     assert.equal(Object.keys(TASK_EFFECTS).length, 8);
 });
 
+test("My PRs includes GitHub-attributed Copilot PRs with all owner task buttons", async () => {
+    const c = controller({
+        pulls: [
+            pull(),
+            pull({ number: 13, user: { login: "Copilot", id: 21, type: "Bot" } }),
+            pull({ number: 14, user: { login: "Copilot", id: 21, type: "Bot" } }),
+        ],
+        ownNumbers: [12, 13],
+    });
+    let evidenceNumbers;
+    const evidence = c.github.pullEvidence;
+    c.github.pullEvidence = async (selected, prs) => {
+        evidenceNumbers = prs.map((pr) => pr.number);
+        return evidence(selected, prs);
+    };
+    const result = await c.canvas.refresh();
+    assert.deepEqual(filterPulls(result.prs).map((pr) => pr.number), [12, 13]);
+    assert.deepEqual(filterPulls(result.prs, { mine: false }).map((pr) => pr.number), [14]);
+    assert.deepEqual(evidenceNumbers, [12, 13]);
+    assert.deepEqual(result.prs[0].tasks, Object.keys(KIND_LABELS));
+    assert.deepEqual(result.prs[1].tasks, Object.keys(KIND_LABELS));
+    assert.deepEqual(result.prs[2].tasks, ["pr_review"]);
+    c.github.ownPullNumbers = async () => new Set();
+    await assert.rejects(c.canvas.launch({ target: `${repo}#13`, kind: "pr_description", confirmed: true }), /not eligible/);
+    c.github.ownPullNumbers = async () => new Set([12, 13]);
+    await c.canvas.launch({ target: `${repo}#13`, kind: "self_review", confirmed: true });
+    assert.equal(c.calls.find((call) => typeof call === "object").loop_kind, "self_review");
+    assert.equal(c.calls.find((call) => typeof call === "object").target, `${repo}#13`);
+    await assert.rejects(c.canvas.launch({ target: `${repo}#14`, kind: "self_review", confirmed: true }), /not eligible/);
+});
+
+test("failed ownership reads keep an explicitly stale snapshot instead of hiding attributed PRs", async () => {
+    const c = controller({
+        pulls: [pull({ user: { login: "Copilot", id: 21, type: "Bot" } })],
+        ownNumbers: [12],
+    });
+    await c.canvas.refresh();
+    c.github.ownPullNumbers = async () => { throw new Error("PR ownership unavailable"); };
+    const result = await c.canvas.refresh();
+    assert.match(result.prError, /PR ownership unavailable/);
+    assert.equal(filterPulls(result.prs).length, 1);
+    assert.match(result.prs[0].actionBlock, /Refresh/);
+    assert.equal(result.auto, false);
+});
+
+test("native ownership listing uses GitHub's authenticated author query and rejects incomplete data", async () => {
+    const calls = [];
+    const github = new GitHub(async (args) => {
+        calls.push(args);
+        return { code: 0, stdout: JSON.stringify([{ number: 12 }, { number: 13 }]) };
+    });
+    assert.deepEqual(await github.ownPullNumbers(repo), new Set([12, 13]));
+    assert.deepEqual(calls, [["pr", "list", "--repo", `github.com/${repo}`,
+        "--state", "open", "--author", "@me", "--limit", "10000", "--json", "number"]]);
+    for (const stdout of ["{}", "not JSON", '[{"number":null}]']) {
+        const invalid = new GitHub(async () => ({ code: 0, stdout }));
+        await assert.rejects(invalid.ownPullNumbers(repo), /ownership/);
+    }
+});
+
 test("partial data keeps the complete live list and disables only unsafe task controls", async () => {
     const c = controller({ dashboardState: new Error("404 missing dashboard") });
     let result = await c.canvas.refresh();
@@ -439,7 +503,7 @@ test("partial data keeps the complete live list and disables only unsafe task co
     assert.match(result.error, /Central/);
 });
 
-test("viewer, PR and reviewer-dashboard reads start together and settle on a failed viewer read", async () => {
+test("viewer, PR, ownership and reviewer-dashboard reads start together and settle on a failed viewer read", async () => {
     const c = controller();
     const get = c.github.get;
     const reads = [];
@@ -453,11 +517,15 @@ test("viewer, PR and reviewer-dashboard reads start together and settle on a fai
         reads.push("pulls");
         return new Promise((resolve) => release = resolve);
     };
+    c.github.ownPullNumbers = async () => {
+        reads.push("ownership");
+        return new Set();
+    };
     const first = c.canvas.refresh();
     let done = false;
     first.then(() => done = true);
     await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(reads, ["user", "pulls", dashboardPath(repo)]);
+    assert.deepEqual(reads, ["user", "pulls", dashboardPath(repo), "ownership"]);
     assert.equal(done, false);
     assert.equal(c.canvas.refresh(), first);
     release([pull()]);
@@ -477,6 +545,7 @@ test("a complete PR refresh shares three read slots and adds one batched live-st
         active--;
         const path = args.at(-1);
         let data;
+        if (args[0] === "pr") return { code: 0, stdout: '[{"number":12}]' };
         if (args.includes("graphql")) data = { data: { repository: { pr12: detail() } } };
         else if (path === "user") data = account;
         else if (path === `repos/${repo}/pulls?state=open&per_page=100`) data = [pull()];
@@ -490,8 +559,8 @@ test("a complete PR refresh shares three read slots and adds one batched live-st
     const canvas = new PrDashboard(github, () => 2000000);
     const result = await canvas.refresh();
     assert.equal(maximum, 3);
-    assert.equal(github.requests, 6);
-    assert.equal(result.cost, 6);
+    assert.equal(github.requests, 7);
+    assert.equal(result.cost, 7);
     assert.equal(result.error, null);
     assert.equal(result.prError, null);
     assert.equal(result.workflowReady, true);
@@ -504,8 +573,8 @@ test("a healthy PR refresh keeps automatic refresh enabled after 20 counted requ
     await c.canvas.refresh();
     const pullEvidence = c.github.pullEvidence;
     c.github.pullEvidence = async (...args) => {
-        c.github.requests += 17;
-        c.github.counted += 17;
+        c.github.requests += 16;
+        c.github.counted += 16;
         return pullEvidence(...args);
     };
     const result = await c.canvas.refresh();
@@ -622,8 +691,6 @@ test("PR Reviewer accepts bot-authored PRs without authorizing owner-only tasks"
     assert.deepEqual(c.calls.filter((call) => typeof call === "object"), [{
         operation: "launch", target, loop_kind: "pr_review", publication_auth: "fine_grained_pat",
     }]);
-    const bot = normalizePull(pull({ user: { ...account, type: "Bot" } }), repo, state(), account);
-    assert.deepEqual(taskChoices(bot, account), ["pr_review"]);
     for (const type of ["Organization", "unknown", null]) {
         assert.throws(() => normalizePull(pull({ user: { ...account, type } }), repo, state(), account), /invalid/);
     }

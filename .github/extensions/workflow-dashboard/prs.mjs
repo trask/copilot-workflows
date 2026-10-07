@@ -77,8 +77,7 @@ export function filterPulls(prs, { mine = true, reviewers = false, search = "" }
 
 export function taskChoices(pr, viewer) {
     if (!viewer || viewer.id !== LAUNCH_OWNER_ID) return [];
-    return Object.keys(KIND_LABELS).filter((kind) => kind === "pr_review" ||
-        pr.authorType === "User" && pr.mine && pr.authorId === viewer.id);
+    return Object.keys(KIND_LABELS).filter((kind) => kind === "pr_review" || pr.mine);
 }
 
 export function normalizeEvidence(detail, sha) {

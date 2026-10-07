@@ -102,6 +102,30 @@ class PublisherCredentialTests(unittest.TestCase):
                     log.assert_called_once()
                 output.assert_not_called()
 
+    def test_selection_accepts_copilot_prs_only_with_live_owner_attribution(self):
+        pr = personal_pr()
+        pr["user"].update(id=999, type="Bot", login="Copilot")
+        api = Mock()
+        api.call.side_effect = lambda path: (
+            {"id": AUTHOR_ID, "login": "launch-owner"} if path == f"user/{AUTHOR_ID}" else pr)
+        ownership = {
+            "repository": {"nameWithOwner": FIXTURE},
+            "search": {"pageInfo": {"hasNextPage": False},
+                       "nodes": [{"number": 1, "repository": {"nameWithOwner": FIXTURE}}]},
+        }
+        api.graphql.return_value = ownership
+        with patch.dict(os.environ, dict(DISPATCH, PUBLISHER_SECRET_MAP=MAPPING), clear=True), \
+                patch("loop.cli.output") as output:
+            select_publisher(api, FIXTURE + "#1", "self_review")
+            self.assertEqual({"publisher_head_repo": FIXTURE,
+                              "publisher_secret": "TEST_PUBLISH_TOKEN"},
+                             dict(call.args for call in output.call_args_list))
+            output.reset_mock()
+            ownership["search"]["nodes"] = []
+            with self.assertRaisesRegex(Rejected, "Wrong author"):
+                select_publisher(api, FIXTURE + "#1", "self_review")
+            output.assert_not_called()
+
     def test_selection_requires_fresh_owner_dispatch_and_eligible_pr(self):
         api = Mock()
         with patch.dict(os.environ, dict(DISPATCH, GITHUB_ACTOR_ID="1"), clear=True), \

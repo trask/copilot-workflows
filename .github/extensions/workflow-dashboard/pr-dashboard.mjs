@@ -115,20 +115,26 @@ export class PrDashboard extends Dashboard {
         this.refreshState = super.state();
         this.value.loading = true;
         try {
-            const [account, livePulls, reviewerDashboard] = await Promise.allSettled([
+            const [account, livePulls, reviewerDashboard, ownPulls] = await Promise.allSettled([
                 this.github.get("user").then((response) => viewer(response.data)),
                 this.github.pulls(this.repository),
                 this.github.get(dashboardPath(this.repository)).then((response) => decodeDashboard(response.data)),
+                this.github.ownPullNumbers(this.repository),
             ]);
             if (account.status === "rejected") throw account.reason;
             if (livePulls.status === "rejected") throw livePulls.reason;
+            if (ownPulls.status === "rejected") throw ownPulls.reason;
             const pulls = livePulls.value;
             const dashboard = reviewerDashboard.status === "fulfilled" ? reviewerDashboard.value : null;
             const warnings = [];
             if (reviewerDashboard.status === "rejected") {
                 warnings.push(`Reviewer dashboard unavailable: ${reviewerDashboard.reason.message}`);
             }
-            const prs = pulls.map((pr) => normalizePull(pr, this.repository, dashboard, account.value));
+            const prs = pulls.map((raw) => {
+                const pr = normalizePull(raw, this.repository, dashboard, account.value);
+                pr.mine ||= ownPulls.value.has(pr.number);
+                return pr;
+            });
             const incomplete = prs.filter((pr) => !["current", "draft"].includes(pr.dashboardStatus)).length;
             if (incomplete) warnings.push(`${incomplete} PR(s) have missing, failed or invalid dashboard classifications. They remain in their ownership view unless Waiting on reviewers is selected.`);
             const [liveStatus] = await Promise.allSettled([
@@ -262,7 +268,9 @@ export class PrDashboard extends Dashboard {
         const snapshot = await this.checkpoints.load();
         const phases = snapshot.current.map(phaseSummary).filter((phase) => phase.target.toLowerCase() === target.toLowerCase());
         if (phases.length > 1) throw new Error("Multiple checkpoints exist for this PR. Inspect central state before dispatching.");
-        return { pr: normalizePull(pr, repo, null, account), viewer: account, phase: phases[0] };
+        const normalized = normalizePull(pr, repo, null, account);
+        if (!normalized.mine) normalized.mine = (await this.github.ownPullNumbers(repo)).has(number);
+        return { pr: normalized, viewer: account, phase: phases[0] };
     }
 
     launch(input) {
