@@ -221,7 +221,10 @@ not a reason to invent passing validation. Do not assume every language is insta
 Require the trusted request's `protocol` to be `reviewable-v1`. There is no alternate
 worker result contract. For `copilot_review`, investigate every frozen finding, including complete review bodies and hidden details.
 Fix only warranted findings. A summary saying "Findings: None" can contain previously missed
-findings elsewhere. Do not equate no inline comments, no edits, or a blocked test with clean.
+findings elsewhere. Unresolved inline findings can come from older reviews and outdated
+diffs. Check them against the frozen code; if already addressed, report `not_warranted`
+with a concrete explanation so the publisher can reply and resolve the original thread.
+Do not equate no inline comments, no edits, or a blocked test with clean.
 
 For `self_review`, this fresh worker both reviews and fixes in one pass. Read the complete
 PR diff with `git diff --no-ext-diff --no-textconv --no-renames <merge_base_sha> <frozen_sha>`,

@@ -111,12 +111,6 @@ def observed_reply(api, state, effect):
             "actor_id": matches[0]["user"]["id"]}
 
 
-def settled(thread, state, effect):
-    # A published fix can make its original thread outdated without resolving it.
-    return thread["resolved"] or (
-        thread["outdated"] and effect["key"] not in state["report"]["candidate"]["finding_commits"])
-
-
 def advance(store, name, state, central, read, publisher, now):
     from loop.control import owned
     from loop.live import cas, guard, owner
@@ -161,7 +155,7 @@ def advance(store, name, state, central, read, publisher, now):
     if changed:
         effect.update(status="skipped", reason=changed)
         return cas(store, name, state, effects=effects, next_check_at=now)
-    if settled(thread, state, effect):
+    if thread["resolved"]:
         effect.update(status="skipped", reason="thread_already_settled")
         return cas(store, name, state, effects=effects, next_check_at=now)
     kind = "resolve" if effect.get("reply", {}).get("status") == "confirmed" else "reply"
@@ -179,7 +173,7 @@ def advance(store, name, state, central, read, publisher, now):
     guard(store, name, state, read, int(time.time()))
     publisher.identity(dict(request, frozen_sha=state["expected_sha"]))
     thread, _, changed = live_context(read, state, effect)
-    require(not changed and not settled(thread, state, effect),
+    require(not changed and not thread["resolved"],
             "Thread changed before mutation; preserve its intent")
     bound = dict(intent)
     if kind == "reply":

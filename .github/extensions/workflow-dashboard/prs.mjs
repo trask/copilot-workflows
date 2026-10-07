@@ -126,8 +126,8 @@ export function normalizeEvidence(detail, sha) {
             throw new Error("Live review thread contains incomplete root-comment data.");
         }
         const root = thread.comments.nodes[0];
-        if (!thread.isResolved && !thread.isOutdated && root.author?.__typename === "Bot" &&
-            root.author.login?.toLowerCase().replace(/\[bot\]$/, "") === "copilot-pull-request-reviewer" &&
+        if (!thread.isResolved && root.author?.__typename === "Bot" &&
+            root.author.id === "BOT_kgDOCnlnWA" &&
             ["COMMENTED", "APPROVED", "CHANGES_REQUESTED"].includes(root.pullRequestReview?.state)) copilotThreads++;
     }
     return {
@@ -154,7 +154,7 @@ export function actionEvidence(pr, kind) {
         return result("Status unknown", "Current-head CI is absent or has an unknown result.", "unknown");
     }
     if (evidence.copilotThreads) return result("Open Copilot threads",
-        `${evidence.copilotThreads} unresolved, non-outdated Copilot review thread(s).`, "needed");
+        `${evidence.copilotThreads} unresolved Copilot review thread(s).`, "needed");
     return result("Run", "No open Copilot-rooted threads detected. This is not proof of review clearance.");
 }
 

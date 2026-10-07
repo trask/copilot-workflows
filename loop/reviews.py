@@ -100,12 +100,12 @@ def fresh_collection(api, request, baseline, requested_at, expected_sha, now):
         return {"decision": "waiting_propagation", "review_id": latest["id"]}
     submitted = {r["id"]: r for r in reviews if bot(r.get("user")) and r.get("submitted_at")
                  and r["state"] in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}}
-    complete_threads(reviews, comments, roots, expected_sha)
+    complete_threads(reviews, comments, roots)
     relevant = [c for c in comments if c["pull_request_review_id"] in submitted
-                and c["commit_id"] == expected_sha and bot(c.get("user"))
+                and bot(c.get("user"))
                 and c["original_commit_id"] == submitted[c["pull_request_review_id"]]["commit_id"]
                 and not c.get("in_reply_to_id") and c["id"] in roots
-                and not roots[c["id"]]["resolved"] and not roots[c["id"]]["outdated"]]
+                and not roots[c["id"]]["resolved"]]
     parsed = {r["id"]: _body_classification(r.get("body")) for r in fresh}
     classifications = {review_id: value[0] for review_id, value in parsed.items()}
     resolved_ids = {root for _, linked in parsed.values() for root in linked}
@@ -117,7 +117,7 @@ def fresh_collection(api, request, baseline, requested_at, expected_sha, now):
     if ("unknown" in classifications.values()
             or not resolved_ids <= roots.keys() & original_bot_roots):
         decision = "unknown"
-    elif (relevant or any(not roots[root]["resolved"] and not roots[root]["outdated"]
+    elif (relevant or any(not roots[root]["resolved"]
                          for root in resolved_ids)
           or "findings" in classifications.values()
           or any(r["state"] == "CHANGES_REQUESTED" for r in fresh)):

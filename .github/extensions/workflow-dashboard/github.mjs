@@ -13,7 +13,7 @@ const CHECK_FIELDS = `
     ... on StatusContext { context state }`;
 const THREAD_FIELDS = `
     isResolved isOutdated comments(first: 1) {
-        nodes { author { login __typename } pullRequestReview { state } }
+        nodes { author { id login __typename } pullRequestReview { state } }
     }`;
 const EVIDENCE_FIELDS = `
     number headRefOid

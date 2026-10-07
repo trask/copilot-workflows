@@ -1179,7 +1179,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual("findings", fresh_collection(
             read, personal_request(), [12], 100, SHA, 400)["decision"])
         for mutation in ({"user": {"id": AUTHOR_ID, "type": "User"}},
-                         {"commit_id": REVISION}, {"original_commit_id": "f" * 40},
+                         {"original_commit_id": "f" * 40},
                          {"in_reply_to_id": 19}):
             changed = Read()
             changed.reviews = read.reviews
@@ -1191,6 +1191,21 @@ class ReviewTests(unittest.TestCase):
                 continue
             result = freeze(changed, 1, REVISION, 400, FIXTURE)
             self.assertNotIn("inline:20", {f["key"] for f in result["findings"]})
+
+    def test_unresolved_older_review_threads_are_frozen_even_when_outdated(self):
+        read = Read()
+        read.reviews[0]["commit_id"] = REVISION
+        read.comments[0].update(commit_id=REVISION, original_commit_id=REVISION, line=None)
+        read.outdated = True
+        req = freeze(read, 1, REVISION, 400, FIXTURE)
+        self.assertEqual(["inline:20"], [f["key"] for f in req["findings"]])
+        self.assertEqual(REVISION, req["findings"][0]["original_commit_id"])
+        self.assertEqual("PRRT_test", req["findings"][0]["thread_id"])
+        self.assertIsNone(req["findings"][0]["line"])
+        self.assertTrue(req["findings"][0]["thread_context"])
+        read.reviews.append(review(id=13, body=CLEAN, submitted_at=iso(200)))
+        self.assertEqual("findings", fresh_collection(
+            read, req, [12], 100, SHA, 400)["decision"])
 
     def test_all_fresh_bodies_survive_a_later_clean_body(self):
         read, req = Read(), personal_request()
@@ -1215,7 +1230,7 @@ class ReviewTests(unittest.TestCase):
             with self.subTest(reviews=reviews), \
                     patch.object(read, "graphql", return_value={"repository": {"pullRequest": {
                         "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []}}}}), \
-                    self.assertRaisesRegex(Rejected, "No submitted verified Copilot review"):
+                    self.assertRaises(Rejected):
                 freeze(read, 1, REVISION, 100, FIXTURE)
         req = personal_request(max_pipelines=5)
         req["findings"] = []
@@ -1302,19 +1317,22 @@ class ReviewTests(unittest.TestCase):
         read.reviews.append(review(id=13, body=CLEAN + RESOLVED, submitted_at=iso(200)))
         read.comments[0]["commit_id"] = REVISION
         self.assertEqual("findings", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
-        for key in ("resolved", "outdated"):
-            setattr(read, key, True)
-            self.assertEqual("clean", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
-            setattr(read, key, False)
+        read.outdated = True
+        self.assertEqual("findings", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
         read.resolved = True
+        self.assertEqual("clean", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
         for mutation in ({"user": {"id": AUTHOR_ID, "type": "User"}},
-                         {"in_reply_to_id": 19}, {"original_commit_id": REVISION},
+                         {"in_reply_to_id": 19},
                          {"pull_request_review_id": 99}):
             changed = copy.deepcopy(read)
             changed.comments[0].update(mutation)
             with self.subTest(mutation=mutation):
                 self.assertEqual("unknown", fresh_collection(
                     changed, req, [12], 100, SHA, 400)["decision"])
+        changed = copy.deepcopy(read)
+        changed.comments[0]["original_commit_id"] = REVISION
+        with self.assertRaisesRegex(Rejected, "Inconsistent|inconsistent"):
+            fresh_collection(changed, req, [12], 100, SHA, 400)
         read.reviews[-1]["body"] = CLEAN + RESOLVED.replace("#discussion_r20", "#discussion_r99")
         self.assertEqual("unknown", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
 

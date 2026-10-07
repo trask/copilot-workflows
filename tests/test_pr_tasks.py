@@ -847,6 +847,34 @@ class MergeGitTests(unittest.TestCase):
             self.assertEqual(3, manifest["history_count"])
             self.assertEqual(req["base_sha"], git(["rev-parse", "incoming"], imported).decode().strip())
 
+    def test_conflict_source_reaches_merge_base_more_than_256_commits_behind(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as root, \
+                tempfile.TemporaryDirectory() as imported:
+            req = self.context(directory)
+            base = req["base_sha"]
+            for index in range(300):
+                base = objects(directory, {"Foo.java": f"base {index}\n"}, [base])
+            req["base_sha"] = base
+            read = TaskRead(req)
+            read.pr["head"]["sha"] = req["frozen_sha"]
+            read.base_tip = base
+            destination = Path(root, "package")
+
+            def fetch(target, request, repo=None, sha=None, depth=1):
+                git(["-c", "protocol.file.allow=always", "fetch", "--quiet",
+                     "--depth=" + str(depth), "--no-auto-maintenance", directory,
+                     sha or request["frozen_sha"]], target)
+
+            with patch.dict(os.environ, {"GITHUB_RUN_ID": "88", "GITHUB_RUN_ATTEMPT": "1"}), \
+                    patch("loop.source.time.time", return_value=100), \
+                    patch("loop.source.public_fetch", side_effect=fetch):
+                manifest = package_source(req, 6, read, destination)
+            self.assertEqual(303, manifest["history_count"])
+            git(["init", "--bare", "--quiet"], imported)
+            import_source(imported, destination / "source.bundle", manifest, req)
+            self.assertEqual(req["merge_base_sha"], git(
+                ["merge-base", req["frozen_sha"], base], imported).decode().strip())
+
     def test_shallow_merge_history_preserves_side_branch_boundaries_on_import(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as root, \
                 tempfile.TemporaryDirectory() as imported:
@@ -868,7 +896,7 @@ class MergeGitTests(unittest.TestCase):
             destination = Path(root, "package")
 
             def fetch(target, request, repo=None, sha=None, depth=1):
-                self.assertEqual(256, depth)
+                self.assertEqual(1024, depth)
                 git(["-c", "protocol.file.allow=always", "fetch", "--quiet", "--depth=4",
                      "--no-auto-maintenance", directory, sha or request["frozen_sha"]], target)
 

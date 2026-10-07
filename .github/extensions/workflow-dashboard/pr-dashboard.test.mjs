@@ -46,7 +46,7 @@ const check = (conclusion = "SUCCESS", changes = {}) => ({
 });
 const thread = (changes = {}) => ({
     isResolved: false, isOutdated: false,
-    comments: { nodes: [{ author: { login: "copilot-pull-request-reviewer", __typename: "Bot" },
+    comments: { nodes: [{ author: { id: "BOT_kgDOCnlnWA", login: "copilot-pull-request-reviewer", __typename: "Bot" },
         pullRequestReview: { state: "COMMENTED" } }] }, ...changes,
 });
 function detail({ number = 12, head = sha, conflicts = "FAILED", checks = [], threads = [] } = {}) {
@@ -176,16 +176,22 @@ test("CI evidence distinguishes failures, pending and absent checks without coun
     assert.throws(() => normalizeEvidence(incomplete, sha), /PR head/);
 });
 
-test("Copilot hints count only submitted, unresolved, non-outdated bot-rooted threads", () => {
+test("Copilot hints count all unresolved submitted roots by stable bot identity", () => {
     const human = thread({ comments: { nodes: [{
         author: { login: "reviewer", __typename: "User" }, pullRequestReview: { state: "COMMENTED" },
     }] } });
     const pending = thread({ comments: { nodes: [{
-        author: { login: "copilot-pull-request-reviewer", __typename: "Bot" }, pullRequestReview: { state: "PENDING" },
+        author: { id: "BOT_kgDOCnlnWA", login: "Copilot", __typename: "Bot" }, pullRequestReview: { state: "PENDING" },
+    }] } });
+    const displayAlias = thread({ comments: { nodes: [{
+        author: { id: "BOT_kgDOCnlnWA", login: "Copilot", __typename: "Bot" }, pullRequestReview: { state: "COMMENTED" },
+    }] } });
+    const unrelatedBot = thread({ comments: { nodes: [{
+        author: { id: "BOT_kgDOC9w8XQ", login: "Copilot", __typename: "Bot" }, pullRequestReview: { state: "COMMENTED" },
     }] } });
     assert.equal(normalizeEvidence(detail({
-        threads: [thread(), thread({ isResolved: true }), thread({ isOutdated: true }), human, pending],
-    }), sha).copilotThreads, 1);
+        threads: [thread(), thread({ isResolved: true }), thread({ isOutdated: true }), human, pending, displayAlias, unrelatedBot],
+    }), sha).copilotThreads, 3);
 });
 
 test("live action evidence overrides completed results without replacing active workflow state", () => {

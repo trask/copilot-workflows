@@ -43,17 +43,17 @@ def threads(api, number, repo):
 
 def unresolved_ids(api, number, repo):
     return {root for root, thread in threads(api, number, repo).items()
-            if not thread["resolved"] and not thread["outdated"]}
+            if not thread["resolved"]}
 
 
-def complete_threads(reviews, comments, roots, sha):
+def complete_threads(reviews, comments, roots):
     submitted = {r["id"]: r for r in reviews if bot(r.get("user")) and r.get("submitted_at")
                  and r["state"] in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}}
     require(set(roots) <= {c["id"] for c in comments}
             and all(c["id"] in roots
                     and c["original_commit_id"] == submitted[c["pull_request_review_id"]]["commit_id"]
                     for c in comments if c["pull_request_review_id"] in submitted
-                    and c["commit_id"] == sha and bot(c.get("user"))
+                    and bot(c.get("user"))
                     and not c.get("in_reply_to_id")),
             "Incomplete or inconsistent inline thread collection")
 
@@ -61,8 +61,8 @@ def complete_threads(reviews, comments, roots, sha):
 def select_findings(reviews, comments, unresolved, sha):
     submitted = {r["id"]: r for r in reviews if bot(r["user"]) and r.get("submitted_at")
                  and r["state"] in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}}
+    require(submitted, "No submitted verified Copilot review")
     current = {key: review for key, review in submitted.items() if review["commit_id"] == sha}
-    require(current, "No submitted verified Copilot review at frozen head")
     findings = []
     # Review bodies cannot be resolved like inline threads. Preserve every nonempty body,
     # including ambiguous 'Findings: None' summaries containing hidden details.
@@ -74,7 +74,6 @@ def select_findings(reviews, comments, unresolved, sha):
     for comment in comments:
         if (comment["id"] in unresolved and not comment.get("in_reply_to_id") and bot(comment["user"])
                 and comment["pull_request_review_id"] in submitted
-                and comment["commit_id"] == sha
                 and comment["original_commit_id"]
                 == submitted[comment["pull_request_review_id"]]["commit_id"]):
             findings.append({"key": f"inline:{comment['id']}", "kind": "inline",
@@ -150,9 +149,9 @@ def freeze(api, number, revision, now=None, repo=None, actor_id=AUTHOR_ID,
     reviews = api.pages(path + "/reviews")
     comments = api.pages(path + "/comments")
     roots = threads(api, number, repo)
-    complete_threads(reviews, comments, roots, request["frozen_sha"])
+    complete_threads(reviews, comments, roots)
     findings = select_findings(reviews, comments, {
-        root for root, thread in roots.items() if not thread["resolved"] and not thread["outdated"]
+        root for root, thread in roots.items() if not thread["resolved"]
     }, request["frozen_sha"])
     for finding in findings:
         if finding["kind"] == "inline":

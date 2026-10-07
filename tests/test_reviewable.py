@@ -261,15 +261,17 @@ class EffectTests(unittest.TestCase):
         self.assertEqual("confirmed", state["effects"][0]["resolution"]["status"])
         self.assertEqual(2, len(publisher.posts))
 
-    def test_outdated_no_code_thread_is_skipped_without_claiming_resolution(self):
+    def test_outdated_already_addressed_thread_receives_reply_and_resolution(self):
         store, name, state, read, publisher = self.context()
         read.outdated = True
         state = self.step(store, name, state, read, publisher)
         state = self.step(store, name, state, read, publisher)
-        self.assertEqual("thread_already_settled", state["effects"][0]["reason"])
-        self.assertNotIn("reply", state["effects"][0])
-        self.assertFalse(read.resolved)
-        self.assertEqual([], publisher.posts)
+        self.assertEqual("confirmed", state["effects"][0]["reply"]["status"])
+        self.assertTrue(publisher.posts[0][2]["body"].startswith("No code change."))
+        state = self.step(store, name, state, read, publisher)
+        self.assertTrue(read.resolved)
+        self.assertEqual("confirmed", state["effects"][0]["resolution"]["status"])
+        self.assertEqual(2, len(publisher.posts))
 
     def test_lost_reply_response_is_reconcile_only_and_unknown_effect_blocks_restart(self):
         from loop.api import APIError
