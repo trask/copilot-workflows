@@ -165,3 +165,51 @@ class APITests(unittest.TestCase):
                 patch("loop.api.time.sleep"), \
                 patch("loop.api.sys.stderr", new_callable=io.StringIO):
             self.assertEqual(b"raw response", API().call(f"repos/{CENTRAL}/actions/runs", raw=True))
+
+    def test_signed_log_tails_stream_without_forwarding_credentials(self):
+        for size in (10, 3 * 65536):
+            payload = b"x" * size + b"\nFAILURE: root cause\n"
+            downloaded = response()
+            downloaded.read.side_effect = io.BytesIO(payload).read
+            redirect = http_error(302)
+            redirect.headers["Location"] = "https://example.com/signed-log"
+            with self.subTest(size=size), \
+                    patch("loop.api.urllib.request.build_opener") as opener, \
+                    patch("loop.api.urllib.request.urlopen", return_value=downloaded) as download, \
+                    patch("loop.api.sys.stderr", new_callable=io.StringIO) as stderr:
+                opener.return_value.open.side_effect = redirect
+                self.assertEqual(payload[-100:], API("secret").signed_download(
+                    "repos/target/repo/actions/jobs/1/logs", 100, tail=True))
+            download.assert_called_once_with("https://example.com/signed-log", timeout=60)
+            self.assertTrue(all(c.args == (65536,) for c in downloaded.read.call_args_list))
+            self.assertEqual(size > 100, "READ EXCERPT" in stderr.getvalue())
+            self.assertNotIn("secret", stderr.getvalue())
+            self.assertNotIn("signed-log", stderr.getvalue())
+
+    def test_signed_artifacts_still_require_the_complete_download(self):
+        redirect = http_error(302)
+        redirect.headers["Location"] = "https://example.com/artifact"
+        with patch("loop.api.urllib.request.build_opener") as opener, \
+                patch("loop.api.urllib.request.urlopen", return_value=response(b"oversized")), \
+                self.assertRaisesRegex(Rejected, "Artifact download exceeds limit"):
+            opener.return_value.open.side_effect = redirect
+            API().artifact_zip(1, 2)
+
+    def test_signed_download_permission_errors_reach_the_caller(self):
+        with patch("loop.api.urllib.request.build_opener") as opener, \
+                patch("loop.api.urllib.request.urlopen") as download, \
+                self.assertRaises(APIError) as error:
+            opener.return_value.open.side_effect = http_error(403)
+            API().signed_download("repos/target/repo/actions/jobs/1/logs", 100, tail=True)
+        self.assertEqual(403, error.exception.status)
+        download.assert_not_called()
+
+    def test_streaming_log_download_has_an_elapsed_deadline(self):
+        redirect = http_error(302)
+        redirect.headers["Location"] = "https://example.com/signed-log"
+        with patch("loop.api.urllib.request.build_opener") as opener, \
+                patch("loop.api.urllib.request.urlopen", return_value=response(b"chunk")), \
+                patch("loop.api.time.monotonic", side_effect=[100, 160]), \
+                self.assertRaisesRegex(DeadlineReached, "Log download deadline"):
+            opener.return_value.open.side_effect = redirect
+            API().signed_download("repos/target/repo/actions/jobs/1/logs", 100, tail=True)

@@ -102,7 +102,7 @@ class API:
     def artifact_zip(self, artifact_id, limit):
         return self.signed_download(f"repos/{CENTRAL}/actions/artifacts/{artifact_id}/zip", limit)
 
-    def signed_download(self, path, limit):
+    def signed_download(self, path, limit, *, tail=False):
         self.authorize(path, "GET", None)
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *_args, **_kwargs):
@@ -115,8 +115,12 @@ class API:
         try:
             urllib.request.build_opener(NoRedirect).open(req, timeout=60)
         except urllib.error.HTTPError as error:
-            require(error.code == 302, "Artifact download did not return a signed redirect")
-            destination = error.headers["Location"]
+            try:
+                if error.code != 302:
+                    raise APIError(error.code, f"GitHub download failed with HTTP {error.code}") from error
+                destination = error.headers["Location"]
+            finally:
+                error.close()
         else:
             raise Rejected("Unexpected artifact download response")
         parsed = urllib.parse.urlsplit(destination)
@@ -124,6 +128,18 @@ class API:
                 and not parsed.password and parsed.port in {None, 443}, "Unsafe artifact redirect")
         # Signed destination came from the authenticated API. Never forward its bearer token.
         with urllib.request.urlopen(destination, timeout=60) as response:
+            if tail:
+                payload, total = b"", 0
+                deadline = time.monotonic() + 60
+                while chunk := response.read(65536):
+                    total += len(chunk)
+                    payload = (payload + chunk)[-limit:]
+                    if time.monotonic() >= deadline:
+                        raise DeadlineReached("Log download deadline reached")
+                if total > limit:
+                    print(f"READ EXCERPT: retained last {len(payload)} of {total} log bytes",
+                          file=sys.stderr)
+                return payload
             payload = response.read(limit + 1)
         require(len(payload) <= limit, "Artifact download exceeds limit")
         return payload

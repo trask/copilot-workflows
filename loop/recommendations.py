@@ -5,7 +5,7 @@ import re
 
 from loop.policy import check_target, exact, require
 
-MAX_DIFF = 200000
+MAX_DIFF = 512 * 1024
 
 
 def description_diff(text):

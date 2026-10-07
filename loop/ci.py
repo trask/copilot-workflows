@@ -7,10 +7,21 @@ from loop.policy import canonical, check_target, exact, require
 from loop.reviews import check_decision, ci_items, copilot_check
 
 
+def excerpt(text, limit):
+    while len(canonical(text)) > limit:
+        text = text[len(text) // 4 + 1:]
+    return text
+
+
 def collect(api, request, required):
     sha, repo = request["frozen_sha"], request["repo"]
     check_target(api, request)
     checks, statuses = ci_items(api, repo, sha)
+    failure_count = sum(c["name"] in required and not copilot_check(c)
+                        and check_decision(c, sha) == "failed" for c in checks)
+    failure_count += sum(s["context"] in required and s["state"] in {"failure", "error"}
+                         for s in statuses)
+    evidence_limit = 60000 // max(1, failure_count)
     executions, selected, failures = {}, [], []
     for check in checks:
         if check["name"] not in required or copilot_check(check):
@@ -66,16 +77,19 @@ def collect(api, request, required):
             availability = "check_output" if text.strip() else "unavailable"
             if identity:
                 try:
-                    log = api.signed_download(f"repos/{repo}/actions/jobs/{identity['job_id']}/logs", 60000)
+                    log = api.signed_download(f"repos/{repo}/actions/jobs/{identity['job_id']}/logs",
+                                              evidence_limit, tail=True)
                 except APIError as error:
                     require(error.status in {403, 404, 410}, "Failed to collect CI logs")
                     availability = "logs_unavailable_" + str(error.status)
                 else:
-                    text = log.decode("utf-8")
-                    availability = "job_log"
-            require(len(text.encode("utf-8")) <= 60000, "CI evidence exceeds limit")
+                    text = log.decode("utf-8", errors="replace")
+                    availability = "job_log_tail"
+            bounded = excerpt(text, evidence_limit)
+            if bounded != text and availability != "job_log_tail":
+                availability += "_tail"
             failures.append({"key": "check:" + str(check["id"]), **item,
-                             "availability": availability, "evidence": text})
+                             "availability": availability, "evidence": bounded})
     for status in statuses:
         if status["context"] not in required:
             continue
@@ -84,11 +98,14 @@ def collect(api, request, required):
         selected.append({"name": status["context"], "id": status["id"],
                          "decision": decision, "actions": None})
         if decision == "failed":
+            text = status.get("description") or ""
+            bounded = excerpt(text, evidence_limit)
             failures.append({"key": "status:" + str(status["id"]),
                              "name": status["context"], "id": status["id"],
                              "decision": decision, "actions": None,
-                             "availability": "status_description" if status.get("description") else "unavailable",
-                             "evidence": status.get("description") or ""})
+                             "availability": ("status_description_tail" if bounded != text else
+                                              "status_description" if text else "unavailable"),
+                             "evidence": bounded})
     names = [s["name"] for s in selected]
     decisions = [s["decision"] for s in selected]
     active_runs = api.pages(f"repos/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
@@ -103,9 +120,9 @@ def collect(api, request, required):
         any(not s["actions"] for s in selected if s["name"] == n)
         or len({s["actions"]["workflow_id"] for s in selected if s["name"] == n}) != names.count(n))
                     for n in set(names))
-    decision = ("pending" if active or "pending" in decisions else "unknown" if duplicate or "unknown" in decisions
+    decision = ("pending" if active or "pending" in decisions else "unknown" if duplicate
                 else "missing" if set(required) - set(names) else "failed" if failures
-                else "passed" if required else "none")
+                else "unknown" if "unknown" in decisions else "passed" if required else "none")
     result = {"sha": sha, "required": required, "checks": selected, "failures": failures,
               "runs": [{"id": r["id"], "attempt": r["run_attempt"], "status": r["status"],
                         "conclusion": r["conclusion"]} for r, _ in executions.values()],

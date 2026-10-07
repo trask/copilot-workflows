@@ -107,8 +107,8 @@ class TaskRead(SelfRead):
             return copy.deepcopy(self.jobs)
         return super().pages(path, key)
 
-    def signed_download(self, path, limit):
-        return self.log
+    def signed_download(self, path, limit, *, tail=False):
+        return self.log[-limit:] if tail else self.log
 
 
 class TaskPublisher:
@@ -813,6 +813,76 @@ class CIRepairTests(unittest.TestCase):
                     diagnoses(value, req)
             self.assertEqual(attempt, req["ci_evidence"]["failures"][0]["actions"]["attempt"])
             self.assertEqual("temporary runner network outage", req["ci_evidence"]["failures"][0]["evidence"])
+
+    def test_large_authoritative_ci_diff_freezes_and_keeps_its_binding(self):
+        req = task_request("ci_fix")
+        read = TaskRead(req)
+        read.diff = ("diff --git a/Foo.java b/Foo.java\n"
+                     "--- a/Foo.java\n+++ b/Foo.java\n@@ -1 +1,3300 @@\n-old\n"
+                     + ("+" + "x" * 90 + "\n") * 3300)
+        self.assertGreater(len(read.diff.encode()), 300000)
+        read.pages = Mock(side_effect=lambda path, key=None: (
+            [{"filename": "Foo.java", "additions": 3300, "deletions": 1}]
+            if path.endswith("/files") else TaskRead.pages(read, path, key)))
+        frozen = freeze(read, 1, REVISION, 100, FIXTURE, loop_kind="ci_fix")
+        self.assertEqual(read.diff, frozen["pr_diff"]["text"])
+        self.assertEqual(list(range(1, 3301)), frozen["pr_diff"]["anchors"]["Foo.java"])
+        self.assertEqual(5, pipeline_limit(frozen))
+
+    def test_many_large_logs_share_a_json_encoded_evidence_budget(self):
+        req, read = self.context()
+        read.log = (b"verbose output\n" * 10000
+                    + ("unicode \u00e9 and escaped \x1b output\n" * 3000).encode()
+                    + b"FAILURE: exact root cause\n")
+        for offset in range(1, 10):
+            read.checks.append(dict(
+                read.checks[0], id=333 + offset, name=f"check-{offset}",
+                details_url=f"https://github.com/{FIXTURE}/actions/runs/200/job/{333 + offset}"))
+            read.jobs.append(dict(
+                read.jobs[0], id=333 + offset, name=f"check-{offset}",
+                check_run_url=f"https://api.github.com/repos/{FIXTURE}/check-runs/{333 + offset}"))
+        read.signed_download = Mock(wraps=read.signed_download)
+        evidence = collect(read, req, [c["name"] for c in read.checks])
+        self.assertEqual("failed", evidence["decision"])
+        self.assertEqual(10, len(evidence["failures"]))
+        self.assertLessEqual(len(canonical(evidence)), 120000)
+        self.assertTrue(all(f["availability"] == "job_log_tail"
+                            and f["evidence"].endswith("FAILURE: exact root cause\n")
+                            for f in evidence["failures"]))
+        self.assertTrue(all(c.args[1] == 6000 and c.kwargs["tail"]
+                            for c in read.signed_download.call_args_list))
+        req["ci_evidence"] = evidence
+        self.assertEqual(evidence, same_attempts(read, req))
+
+    def test_unavailable_log_permissions_keep_the_check_output(self):
+        req, read = self.context()
+        read.checks[0]["output"] = {"summary": "runner failure"}
+        read.signed_download = Mock(side_effect=APIError(403, "Logs forbidden"))
+        evidence = collect(read, req, [CI_CHECK])
+        self.assertEqual("logs_unavailable_403", evidence["failures"][0]["availability"])
+        self.assertEqual("runner failure", evidence["failures"][0]["evidence"].strip())
+
+    def test_failed_checks_allow_diagnosis_but_skipped_checks_do_not_clear_ci(self):
+        req, read = self.context()
+        read.checks.append(dict(
+            read.checks[0], id=334, name="optional job", conclusion="skipped",
+            details_url=f"https://github.com/{FIXTURE}/actions/runs/200/job/334"))
+        read.jobs.append(dict(
+            read.jobs[0], id=334, name="optional job",
+            check_run_url=f"https://api.github.com/repos/{FIXTURE}/check-runs/334"))
+        required = [CI_CHECK, "optional job"]
+        req["publication"]["required_checks"] = required
+        req["ci_evidence"] = collect(read, req, required)
+        self.assertEqual("failed", req["ci_evidence"]["decision"])
+        diagnoses(result(req), req)
+        state = checkpoint(req)
+        state.update(stage="waiting_ci", publications=[], effects=[])
+        store, name = stored(state)
+        ready = watch_ci_fix(store, name, state, read, 100)
+        self.assertEqual("source_pending", ready["stage"])
+        self.assertEqual(0, ready["iteration"])
+        read.checks[0]["conclusion"] = "success"
+        self.assertEqual("unknown", collect(read, req, required)["decision"])
 
     def test_evidence_attribution_unknown_and_run_drift_fail_closed(self):
         req, read = self.context()
