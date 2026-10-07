@@ -34,7 +34,8 @@ code { font: 12px var(--font-mono, Consolas, monospace); overflow-wrap: anywhere
 .pr-heading { align-items: baseline; }
 .pr-heading > a { flex: 1; min-width: 0; }
 .pr-author { margin-left: auto; font-size: 12px; }
-.pr-card .card { margin-top: 14px; margin-bottom: 0; }
+.troubleshooting { margin-top: 24px; }
+.run .card { margin-top: 14px; margin-bottom: 0; }
 .run-result { margin-top: 12px; }
 .task-grid { display: flex; flex-wrap: nowrap; gap: 10px; margin-top: 16px; }
 .task-button { display: flex; flex: 0 1 auto; align-items: center; gap: 6px; min-width: 0; min-height: 40px; max-width: 100%; padding: 8px 10px; text-align: left; white-space: normal; }

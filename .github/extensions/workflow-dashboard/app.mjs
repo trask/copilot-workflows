@@ -116,6 +116,40 @@ function render() {
     $("warnings").textContent = warnings.join(" ");
     renderLoading();
     renderPulls();
+    renderTroubleshooting();
+}
+
+function renderTroubleshooting() {
+    const runs = $("troubleshooting-runs");
+    runs.replaceChildren();
+    if (loadingRepository) {
+        runs.append(element("p", `Loading runs for ${loadingRepository}...`, "empty"));
+        return;
+    }
+    const entries = new Map(state.phases.filter((phase) => phase.target.startsWith(`${state.repository}#`))
+        .map((phase) => [phase.target, { target: phase.target, url: phase.url, phase }]));
+    for (const pr of state.prs) {
+        if (pr.phase || pr.dispatch || pr.actionBlock) entries.set(pr.target, pr);
+    }
+    for (const pr of [...entries.values()].sort((a, b) =>
+        Number(Boolean(b.dispatch)) - Number(Boolean(a.dispatch)) ||
+        (b.phase?.started ?? 0) - (a.phase?.started ?? 0))) {
+        const row = element("article", null, "run");
+        const heading = element("div", null, "row");
+        heading.append(link(pr.title ? `#${pr.number} ${pr.title}` : pr.target, pr.url));
+        if (pr.phase) heading.append(element("span",
+            `${KIND_LABELS[pr.phase.kind] ?? words(pr.phase.kind)} · ${words(pr.phase.stage)}`, "muted"));
+        row.append(heading);
+        if (pr.dispatch) {
+            const message = element("p", pr.dispatch.message, "notice");
+            if (pr.dispatch.runUrl) message.append(document.createTextNode(" "), link("View launch", pr.dispatch.runUrl));
+            row.append(message);
+        } else if (pr.actionBlock) row.append(element("p", pr.actionBlock, "muted"));
+        if (pr.phase) row.append(phaseCard(pr.phase));
+        runs.append(row);
+    }
+    if (!runs.children.length) runs.append(element("p", state.loadedAt
+        ? "No saved runs for this repository." : "Runs have not been loaded yet.", "empty"));
     const failures = $("failures");
     failures.replaceChildren();
     $("failures-count").textContent = state.failures.length;
@@ -214,14 +248,9 @@ function prCard(pr) {
     cancel.title = cancelDispatch && !pr.dispatch.runId
         ? "This dispatch has no recorded run ID. Inspect its Actions launch or refresh to identify its saved task."
         : "Cancel the selected launch or task. This does not undo published changes or guarantee termination of an already authorized effect.";
-    const message = element("p", pr.dispatch?.message ?? "", "notice");
-    message.hidden = !pr.dispatch;
-    if (pr.dispatch?.runUrl) message.append(document.createTextNode(" "), link("View launch", pr.dispatch.runUrl));
     cancel.addEventListener("click", () => taskAction(pr, pr.dispatch?.kind ?? pr.phase?.kind, true));
     if (pr.canCancel || cancelDispatch || pr.dispatch?.operation === "cancel") tasks.append(cancel);
     card.append(tasks);
-    if (pr.actionBlock && !pr.dispatch) card.append(element("p", pr.actionBlock, "muted"));
-    card.append(message);
     if (pr.phase) {
         const completion = completionPresentation(pr.phase);
         if (completion) {
@@ -231,7 +260,6 @@ function prCard(pr) {
             if (pr.phase.pendingReviewUrl) result.append(link("Open pending review", pr.phase.pendingReviewUrl));
             card.append(result);
         }
-        card.append(phaseCard(pr.phase));
     }
     return card;
 }
@@ -296,7 +324,7 @@ function phaseCard(phase) {
     card.addEventListener("toggle", () => {
         if (card.open) {
             expanded.add(phase.id);
-            void renderHistory();
+            if ($("troubleshooting").open) void renderHistory();
         } else expanded.delete(phase.id);
     });
     if (expanded.has(phase.id)) card.open = true;
@@ -417,7 +445,10 @@ async function load(path, repository = null) {
     if (busy) return;
     setBusy(true, repository);
     error(null);
-    if (repository) renderPulls();
+    if (repository) {
+        renderPulls();
+        renderTroubleshooting();
+    }
     let failureMessage = null;
     try {
         state = await api(path, "POST", repository ? { repo: repository } : undefined);
@@ -436,6 +467,9 @@ function refresh() {
 }
 
 $("refresh").addEventListener("click", refresh);
+$("troubleshooting").addEventListener("toggle", () => {
+    if (state && $("troubleshooting").open) renderTroubleshooting();
+});
 $("auto").addEventListener("change", async () => {
     const version = stateVersion;
     try {

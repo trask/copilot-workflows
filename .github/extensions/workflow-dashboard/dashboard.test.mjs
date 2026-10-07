@@ -1102,7 +1102,7 @@ test("ownership toggle defaults to My PRs and shows only Draft review on other a
     assert.equal(active[0].disabled, true);
     assert.equal(active[1].textContent, "Cancel task");
     assert.equal(active[1].disabled, false);
-    assert.ok(cards()[0].children.some((node) => node.tag === "details"));
+    assert.ok(nodes.get("troubleshooting-runs").firstChild.children.some((node) => node.tag === "details"));
     assert.equal(buttons(cards()[1]).length, 1);
     assert.equal(buttons(cards()[1])[0]["aria-label"], "Draft review: Run");
     assert.equal(buttons(cards()[1])[0].disabled, false);
@@ -1173,7 +1173,8 @@ test("renderer preserves safe history and shows per-task buttons with direct dis
     assert.match(failure.firstChild.firstChild.href, /\/37368497585\/attempts\/1$/);
     assert.equal(failure.firstChild.children[1].textContent, "Failed");
     assert.ok(row.children.some((node) => node.children?.some((child) => child.textContent === "#12 <untrusted title>")));
-    const card = row.children.find((node) => node.tag === "details");
+    const card = nodes.get("troubleshooting-runs").firstChild.children.find((node) => node.tag === "details");
+    nodes.get("troubleshooting").open = true;
     card.open = true;
     card.events.toggle();
     await new Promise((resolve) => setImmediate(resolve));
@@ -1322,7 +1323,7 @@ test("PR headings show the author only in Not my PRs without routing, dashboard 
     }
 });
 
-test("PR cards put status in task buttons and keep saved run metadata inside expandable details", async () => {
+test("PR cards put status in task buttons and keep saved metadata in bottom troubleshooting details", async () => {
     const state = rendererState();
     state.prs[0].evidence = { sha: state.prs[0].sha, conflicts: "no", ci: "passing", copilotThreads: 0 };
     Object.assign(state.prs[0], {
@@ -1342,7 +1343,8 @@ test("PR cards put status in task buttons and keep saved run metadata inside exp
     const buttons = row().children.find((node) => node.className === "task-grid").children;
     assert.equal(buttons.length, Object.keys(KIND_LABELS).length);
     assert.ok(buttons.some((node) => node["aria-label"] === "Address Copilot feedback: Clean"));
-    const details = row().children.find((node) => node.tag === "details");
+    assert.equal(row().children.find((node) => node.tag === "details"), undefined);
+    const details = nodes.get("troubleshooting-runs").firstChild.children.find((node) => node.tag === "details");
     assert.equal(details.firstChild.textContent, "Run details");
     assert.equal(details.open, undefined);
     assert.ok(details.children[1].children.find((node) => node.className === "meta")
@@ -1353,7 +1355,7 @@ test("PR cards put status in task buttons and keep saved run metadata inside exp
     assert.equal(all.some((node) => node.textContent === "Central Actions"), false);
 });
 
-test("review cards show the actual outcome above collapsed technical details without claiming approval", async () => {
+test("review cards keep outcomes and pending-review links inline with technical details at the bottom", async () => {
     const state = rendererState();
     const s = fixture({
         stage: "complete", reason: "verified_no_change",
@@ -1367,7 +1369,7 @@ test("review cards show the actual outcome above collapsed technical details wit
     }));
     const card = () => nodes.get("prs").firstChild;
     const result = () => card().children.find((node) => node.className === "run-result");
-    const details = () => card().children.find((node) => node.tag === "details");
+    const details = () => nodes.get("troubleshooting-runs").firstChild.children.find((node) => node.tag === "details");
     const status = () => card().children.find((node) => node.className === "task-grid")
         .children.find((node) => node["aria-label"]?.startsWith("Draft review:"));
     assert.equal(status()["aria-label"], "Draft review: No findings");
@@ -1387,6 +1389,7 @@ test("review cards show the actual outcome above collapsed technical details wit
         "1 review comment in a pending GitHub review. Only you can see it until you submit it.");
     assert.equal(result().children[1].href, "https://github.com/example/project/pull/12#pullrequestreview-42");
     const expanded = details();
+    nodes.get("troubleshooting").open = true;
     expanded.open = true;
     expanded.events.toggle();
     await new Promise((resolve) => setImmediate(resolve));
@@ -1405,6 +1408,67 @@ test("review cards show the actual outcome above collapsed technical details wit
     renderer.render();
     assert.equal(status()["aria-label"], "Draft review: Blocked");
     assert.equal(result(), undefined);
+});
+
+test("collapsed bottom troubleshooting retains launch links and active or recent runs outside PR filters", async () => {
+    const state = rendererState();
+    const phase = phaseSummary(record(fixture()));
+    Object.assign(state.prs[0], { phase, canCancel: true, actionBlock: "A task is already active on this PR." });
+    state.prs.push({
+        ...state.prs[0], target: "example/project#13", number: 13, title: "Launching another PR",
+        url: "https://github.com/example/project/pull/13", phase: null, canCancel: false,
+        dispatch: {
+            operation: "launch", kind: "self_review", status: "accepted",
+            message: "Dispatch accepted. Execution is not yet confirmed; refresh to observe central state.",
+            runUrl: "https://github.com/trask/copilot-workflows/actions/runs/20",
+        },
+    });
+    state.phases = [
+        phase,
+        phaseSummary(record(fixture({ stage: "complete" }, { pr: 14 }))),
+        phaseSummary(record(fixture({}, { repo: "example/other", pr: 15 }))),
+    ];
+    const requests = [];
+    const { renderer, nodes, html } = await rendererFixture(async (path) => {
+        requests.push(path);
+        return { ok: true, json: async () => path.includes("history")
+            ? { ...targetHistory([record(fixture())], target), snapshot: state.snapshot } : state };
+    });
+    assert.ok(html.indexOf('id="troubleshooting"') > html.indexOf('id="prs"'));
+    assert.match(html, /<details id="troubleshooting" class="card">/);
+    assert.equal(nodes.get("troubleshooting").open, undefined);
+    assert.ok(nodes.get("prs").children.every((card) => card.children.length === 2));
+    const runs = () => nodes.get("troubleshooting-runs").children;
+    assert.equal(runs().length, 3);
+    assert.equal(runs()[0].firstChild.firstChild.textContent, "#13 Launching another PR");
+    const message = runs()[0].children.find((node) => node.className === "notice");
+    assert.equal(message.textContent, state.prs[1].dispatch.message);
+    assert.equal(message.children[1].textContent, "View launch");
+    assert.equal(message.children[1].href, state.prs[1].dispatch.runUrl);
+    assert.ok(runs().some((row) => row.firstChild.firstChild.textContent === "example/project#14"));
+    assert.ok(runs().some((row) => row.children.some((node) =>
+        node.textContent === "A task is already active on this PR.")));
+    assert.ok(!requests.some((path) => path.includes("history")));
+
+    nodes.get("search").value = "No matching title";
+    renderer.render();
+    assert.equal(nodes.get("pr-count").textContent, "0 / 2");
+    assert.equal(runs().length, 3);
+    nodes.get("troubleshooting").open = true;
+    nodes.get("troubleshooting").events.toggle();
+    const details = runs().find((row) => row.firstChild.firstChild.textContent.startsWith("#12"))
+        .children.find((node) => node.tag === "details");
+    details.open = true;
+    details.events.toggle();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(requests.filter((path) => path.includes("history")).length, 1);
+    nodes.get("troubleshooting").open = false;
+    renderer.render();
+    const retained = runs().find((row) => row.firstChild.firstChild.textContent.startsWith("#12"))
+        .children.find((node) => node.tag === "details");
+    assert.equal(retained.open, true);
+    retained.events.toggle();
+    assert.equal(requests.filter((path) => path.includes("history")).length, 1);
 });
 
 test("Cancel dispatches the exact displayed identity directly and stays locked pending confirmation", async () => {
@@ -1478,7 +1542,7 @@ test("Cancel launch uses the exact accepted run receipt and locks duplicate clic
     await pending;
     assert.equal(cancelButton().disabled, true);
     assert.ok(grid().children.some((node) => node["aria-label"] === `${KIND_LABELS.self_review}: Cancelling`));
-    const notice = nodes.get("prs").firstChild.children.find((node) => node.className === "notice");
+    const notice = nodes.get("troubleshooting-runs").firstChild.children.find((node) => node.className === "notice");
     assert.equal(notice.children.find((node) => node.tag === "a").href, pr.dispatch.runUrl);
     Object.assign(pr, { dispatch: null, actionBlock: null });
     renderer.render();
@@ -1504,12 +1568,14 @@ test("repository selection shows loading before its response and hides old cards
     assert.equal(nodes.get("prs")["aria-busy"], "true");
     assert.equal(nodes.get("prs").children.length, 1);
     assert.equal(nodes.get("prs").firstChild.textContent, "Loading open PRs for example/other...");
+    assert.equal(nodes.get("troubleshooting-runs").firstChild.textContent, "Loading runs for example/other...");
     assert.equal(nodes.get("pr-count").textContent, "Loading...");
     assert.equal(nodes.get("refresh").textContent, "Loading...");
     for (const id of ["repo", "refresh", "auto"]) assert.equal(nodes.get(id).disabled, true);
     nodes.get("search").events.input();
     assert.equal(nodes.get("repo").value, "example/other");
     assert.equal(nodes.get("prs").firstChild.textContent, "Loading open PRs for example/other...");
+    assert.equal(nodes.get("troubleshooting-runs").firstChild.textContent, "Loading runs for example/other...");
     assert.equal(nodes.get("loading").hidden, false);
     await renderer.refresh();
     assert.deepEqual(selections, [{ repo: "example/other" }]);

@@ -18,13 +18,6 @@
     <p id="error" class="error" role="alert" hidden></p>
   </header>
   <main>
-    <section aria-label="Recent coordinator failures">
-      <details class="card">
-        <summary>Failed launches <span id="failures-count" class="badge attention"></span></summary>
-        <p class="muted">Recent failed launches across all repositories. Open a run to see its error.</p>
-        <div id="failures"></div>
-      </details>
-    </section>
     <section aria-labelledby="prs-title">
       <h2 id="prs-title">Open PRs <span id="pr-count" class="badge"></span></h2>
       <div class="filters">
@@ -42,6 +35,18 @@
       </p>
       <div id="warnings" class="notice" hidden></div>
       <div id="prs" aria-busy="false"></div>
+    </section>
+    <section class="troubleshooting" aria-label="Troubleshooting">
+      <details id="troubleshooting" class="card">
+        <summary>Troubleshooting</summary>
+        <div class="detail">
+          <h3>Active and recent runs</h3>
+          <div id="troubleshooting-runs"></div>
+          <h3>Failed launches <span id="failures-count" class="badge attention"></span></h3>
+          <p class="muted">Recent failed launches across all repositories. Open a run to see its error.</p>
+          <div id="failures"></div>
+        </div>
+      </details>
     </section>
   </main>
   <script type="module" src="/app.mjs"></script>
