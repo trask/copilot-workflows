@@ -223,14 +223,9 @@ function prCard(pr) {
         button.setAttribute("aria-description", presentation.detail);
         button.setAttribute("aria-busy", String(presentation.busy));
         const icon = element("span", null, "task-icon");
-        icon.append(taskIcon(kind));
-        const text = element("span", null, "task-text");
-        const status = element("span", null, "task-status");
-        const marker = element("span", null, presentation.busy ? "task-marker spinner" : "task-marker");
-        marker.setAttribute("aria-hidden", "true");
-        status.append(marker, element("span", presentation.label));
-        text.append(element("span", label, "task-name"), status);
-        button.append(icon, text);
+        icon.setAttribute("aria-hidden", "true");
+        icon.append(presentation.busy ? element("span", null, "spinner") : taskIcon(kind));
+        button.append(icon, element("span", label, "task-name"));
         button.addEventListener("click", () => taskAction(pr, kind));
         tasks.append(button);
     }
