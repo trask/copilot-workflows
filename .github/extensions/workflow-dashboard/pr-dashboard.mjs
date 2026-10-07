@@ -165,9 +165,6 @@ export class PrDashboard extends Dashboard {
             } else if (!dashboard) {
                 this.auto = false;
                 this.pauseReason = "Reviewer dashboard is unavailable. Refresh manually.";
-            } else if (warm && this.value.cost > 12) {
-                this.auto = false;
-                this.pauseReason = "Refresh used more than 12 primary-counted GitHub requests.";
             } else if (warm && this.value.latency > 10000) {
                 this.auto = false;
                 this.pauseReason = "Refresh took more than 10 seconds.";

@@ -124,7 +124,6 @@ export class Dashboard {
             if ([this.github.rate, this.github.graphqlRate].some((rate) =>
                 rate && rate.remaining < rate.limit * 0.1)) this.pauseReason = "Less than 10 percent of GitHub capacity remains.";
             else if (warm && this.value.latency > 10000) this.pauseReason = "Refresh took more than 10 seconds.";
-            else if (warm && this.value.cost > 12) this.pauseReason = "Refresh used more than 12 primary-counted GitHub requests.";
             else this.pauseReason = null;
             if (this.pauseReason) this.auto = false;
         } catch (error) {

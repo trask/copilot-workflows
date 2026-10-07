@@ -912,7 +912,7 @@ test("failed launches survive a fresh controller without inventing a checkpoint 
     assert.equal(stale.auto, false);
 });
 
-test("automatic refresh pauses for a slow or costly steady-state cycle, not initial history loading", async () => {
+test("automatic refresh pauses for slow steady-state cycles and low capacity, not request count", async () => {
     let now = 2000000;
     const dashboard = fakeDashboard(() => now);
     await dashboard.refresh();
@@ -922,10 +922,13 @@ test("automatic refresh pauses for a slow or costly steady-state cycle, not init
     const costly = fakeDashboard();
     await costly.refresh();
     costly.github.get = async () => {
-        costly.github.counted += 13;
+        costly.github.counted += 18;
         return { data: { id: 101, status: "in_progress" } };
     };
-    assert.match((await costly.refresh()).pauseReason, /12 primary/);
+    const highCost = await costly.refresh();
+    assert.equal(highCost.cost, 20);
+    assert.equal(highCost.auto, true);
+    assert.equal(highCost.pauseReason, null);
     const low = fakeDashboard();
     low.github.rate.remaining = 499;
     assert.equal((await low.refresh()).auto, false);

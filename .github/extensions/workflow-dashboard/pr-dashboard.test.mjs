@@ -499,6 +499,23 @@ test("a complete PR refresh shares three read slots and adds one batched live-st
     assert.equal(result.prs[0].actionBlock, null);
 });
 
+test("a healthy PR refresh keeps automatic refresh enabled after 20 counted requests", async () => {
+    const c = controller();
+    await c.canvas.refresh();
+    const pullEvidence = c.github.pullEvidence;
+    c.github.pullEvidence = async (...args) => {
+        c.github.requests += 17;
+        c.github.counted += 17;
+        return pullEvidence(...args);
+    };
+    const result = await c.canvas.refresh();
+    assert.equal(result.cost, 20);
+    assert.equal(result.auto, true);
+    assert.equal(result.pauseReason, null);
+    assert.equal(result.error, null);
+    assert.equal(result.prError, null);
+});
+
 test("fresh checkpoint absence enables Run and is rechecked before the first dispatch", async () => {
     const c = controller();
     const get = c.github.get;
