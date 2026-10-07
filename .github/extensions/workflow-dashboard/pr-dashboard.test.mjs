@@ -288,6 +288,35 @@ test("the canvas remains loading until live evidence has settled", async () => {
     assert.equal((await pending).loading, false);
 });
 
+test("refresh preserves previous PR evidence and workflow state until the replacement is ready", async () => {
+    const c = controller({ records: [checkpoint({ stage: "complete" })] });
+    c.github.pullEvidence = async () => new Map([[12, { detail: detail({ conflicts: "PASSED", checks: [check()] }) }]]);
+    const previous = await c.canvas.refresh();
+    const nextSha = "f".repeat(40);
+    c.setPulls([pull({ title: "Updated PR title", head: { sha: nextSha, repo: { full_name: repo } } })]);
+    c.setRecords([checkpoint({ stage: "running", expected_sha: nextSha })]);
+    let release;
+    c.github.pullEvidence = () => new Promise((resolve) => release = resolve);
+    const pending = c.canvas.refresh();
+    await new Promise((resolve) => setImmediate(resolve));
+    const during = c.canvas.state();
+    assert.equal(during.loading, true);
+    assert.deepEqual(during.prs, previous.prs);
+    assert.deepEqual(during.phases, previous.phases);
+    assert.equal(during.auto, previous.auto);
+    assert.equal(during.pauseReason, previous.pauseReason);
+    assert.equal(taskPresentation(during.prs[0], "pr_conflict_resolver", true).label, "No conflicts");
+    assert.equal(taskPresentation(during.prs[0], "ci_fix", true).label, "CI passing");
+    release(new Map([[12, { detail: detail({ head: nextSha, checks: [check("FAILURE")] }) }]]));
+    const updated = await pending;
+    assert.equal(updated.loading, false);
+    assert.equal(updated.prs[0].title, "Updated PR title");
+    assert.equal(updated.prs[0].sha, nextSha);
+    assert.equal(updated.phases[0].stage, "running");
+    assert.equal(taskPresentation(updated.prs[0], "pr_conflict_resolver", true).label, "Conflicts");
+    assert.equal(taskPresentation(updated.prs[0], "ci_fix", true).label, "CI failing");
+});
+
 test("GraphQL capacity is separate from REST and pauses automatic refresh when low", async () => {
     const c = controller();
     c.github.rate = { limit: 5000, remaining: 4500, reset: 3000000 };

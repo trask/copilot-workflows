@@ -47,15 +47,16 @@ export class PrDashboard extends Dashboard {
         this.prWarnings = [];
         this.dispatches = new Map();
         this.selecting = false;
-        this.evidenceLoading = false;
+        this.refreshState = null;
     }
 
     state() {
-        const workflowReady = Boolean(this.value.loadedAt && !this.value.error && !this.value.warnings.length);
+        const workflow = this.refreshState ?? super.state();
+        const workflowReady = Boolean(workflow.loadedAt && !workflow.error && !workflow.warnings.length);
         const ready = Boolean(this.prLoadedAt && !this.prError && workflowReady);
-        const phases = this.value.phases;
+        const phases = workflow.phases;
         return {
-            ...super.state(), loading: this.value.loading || this.evidenceLoading,
+            ...workflow, loading: this.value.loading || Boolean(this.refreshState),
             repository: this.repository, repositories: REPOSITORIES,
             viewer: this.viewer, prLoadedAt: this.prLoadedAt, prError: this.prError,
             prWarnings: this.prWarnings, workflowReady,
@@ -97,6 +98,7 @@ export class PrDashboard extends Dashboard {
         const started = this.now();
         const counted = this.github.counted;
         const warm = this.prLoadedAt !== null;
+        this.refreshState = super.state();
         this.value.loading = true;
         try {
             const [account, livePulls, reviewerDashboard] = await Promise.allSettled([
@@ -105,7 +107,6 @@ export class PrDashboard extends Dashboard {
                 this.github.get(dashboardPath(this.repository)).then((response) => decodeDashboard(response.data)),
             ]);
             if (account.status === "rejected") throw account.reason;
-            this.viewer = account.value;
             if (livePulls.status === "rejected") throw livePulls.reason;
             const pulls = livePulls.value;
             const dashboard = reviewerDashboard.status === "fulfilled" ? reviewerDashboard.value : null;
@@ -113,19 +114,13 @@ export class PrDashboard extends Dashboard {
             if (reviewerDashboard.status === "rejected") {
                 warnings.push(`Reviewer dashboard unavailable: ${reviewerDashboard.reason.message}`);
             }
-            const prs = pulls.map((pr) => normalizePull(pr, this.repository, dashboard, this.viewer));
+            const prs = pulls.map((pr) => normalizePull(pr, this.repository, dashboard, account.value));
             const incomplete = prs.filter((pr) => !["current", "draft"].includes(pr.dashboardStatus)).length;
             if (incomplete) warnings.push(`${incomplete} PR(s) have missing, failed or invalid dashboard classifications. They remain in their ownership view unless Waiting on reviewers is selected.`);
-            this.prs = prs;
-            this.prWarnings = warnings;
-            this.prLoadedAt = this.now();
-            this.prError = null;
-            this.evidenceLoading = true;
             const [liveStatus] = await Promise.allSettled([
                 this.github.pullEvidence(this.repository, prs.filter((pr) => pr.mine)),
                 super.update(),
             ]);
-            this.evidenceLoading = false;
             for (const pr of prs) {
                 if (!pr.mine) continue;
                 const read = liveStatus.status === "fulfilled" ? liveStatus.value.get(pr.number) : null;
@@ -134,11 +129,15 @@ export class PrDashboard extends Dashboard {
                         (liveStatus.status === "rejected" ? liveStatus.reason.message : "Live action status is missing."));
                     pr.evidence = normalizeEvidence(read.detail, pr.sha);
                 } catch (error) {
-                    this.evidenceLoading = false;
                     pr.evidence = { sha: pr.sha, error: error.message };
                     warnings.push(`${pr.target}: ${error.message}`);
                 }
             }
+            this.viewer = account.value;
+            this.prs = prs;
+            this.prWarnings = warnings;
+            this.prLoadedAt = this.now();
+            this.prError = null;
             this.observeDispatches();
             this.value.latency = this.now() - started;
             this.value.cost = this.github.counted - counted;
@@ -164,6 +163,8 @@ export class PrDashboard extends Dashboard {
             this.value.loading = false;
             this.auto = false;
             this.pauseReason = "Automatic refresh paused after a failed PR read.";
+        } finally {
+            this.refreshState = null;
         }
         return this.state();
     }
