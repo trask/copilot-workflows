@@ -97,7 +97,6 @@ function controller({ records = [], pulls = [pull()], dashboardState = state() }
         pullEvidence: async (_selected, prs) => new Map(prs.map((pr) => [pr.number, {
             detail: detail({ number: pr.number, head: pr.sha }),
         }])),
-        pages: async () => [],
         failedCoordinators: async () => [],
         dispatch: async (inputs) => {
             calls.push(inputs);
@@ -483,7 +482,7 @@ test("a complete PR refresh shares three read slots and adds one batched live-st
         else if (path === `repos/${repo}/pulls?state=open&per_page=100`) data = [pull()];
         else if (path === dashboardPath(repo)) data = file(state());
         else if (path === `repos/${CENTRAL}/git/matching-refs/heads/review-loop-state`) data = [];
-        else if (path === FAILED_COORDINATORS || path.startsWith(`repos/${CENTRAL}/actions/runs?status=`)) {
+        else if (path === FAILED_COORDINATORS) {
             data = { total_count: 0, workflow_runs: [] };
         } else throw new Error(`Unexpected refresh read ${path}`);
         return { code: 0, stdout: `HTTP/2.0 200 OK\r\n\r\n${JSON.stringify(data)}` };
@@ -491,8 +490,8 @@ test("a complete PR refresh shares three read slots and adds one batched live-st
     const canvas = new PrDashboard(github, () => 2000000);
     const result = await canvas.refresh();
     assert.equal(maximum, 3);
-    assert.equal(github.requests, 11);
-    assert.equal(result.cost, 11);
+    assert.equal(github.requests, 6);
+    assert.equal(result.cost, 6);
     assert.equal(result.error, null);
     assert.equal(result.prError, null);
     assert.equal(result.workflowReady, true);

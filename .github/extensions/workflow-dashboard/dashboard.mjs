@@ -1,4 +1,4 @@
-import { GitHub, CENTRAL, ACTIVE_STATUSES } from "./github.mjs";
+import { GitHub, CENTRAL } from "./github.mjs";
 import { Checkpoints } from "./state.mjs";
 import { phaseSummary, targetHistory, actionSummary, failedActionSummary } from "./model.mjs";
 
@@ -87,15 +87,13 @@ export class Dashboard {
             const reads = await Promise.allSettled([
                 this.github.failedCoordinators(),
                 this.checkpoints.load(),
-                ...ACTIVE_STATUSES.map((status) =>
-                    this.github.pages(`repos/${CENTRAL}/actions/runs?status=${status}`)),
             ]);
             if (reads[0].status === "fulfilled") {
                 this.value.failures = reads[0].value.map((run) => failedActionSummary(run, []));
             }
             const failure = reads.find((read) => read.status === "rejected");
             if (failure) throw failure.reason;
-            const [failedRuns, snapshot, ...runPages] = reads.map((read) => read.value);
+            const [failedRuns, snapshot] = reads.map((read) => read.value);
             const phases = [];
             const warnings = [];
             for (const record of snapshot.current) {
@@ -105,12 +103,18 @@ export class Dashboard {
                     warnings.push(error.message);
                 }
             }
-            const runs = new Map();
-            for (const items of runPages) {
-                for (const item of items) runs.set(item.id, item);
-            }
-            const actions = [...runs.values()].filter((run) => run.status !== "completed")
-                .map((run) => actionSummary(run, phases));
+            const workerIds = [...new Set(phases.filter((phase) =>
+                !phase.historical && !phase.unknownStage &&
+                ["dispatched", "running"].includes(phase.stage) && phase.workerId !== null)
+                .map((phase) => phase.workerId))];
+            const workers = await Promise.allSettled(workerIds.map(async (id) => {
+                const run = (await this.github.get(`repos/${CENTRAL}/actions/runs/${id}`)).data;
+                if (run?.id !== id) throw new Error("GitHub returned a different worker run.");
+                return actionSummary(run, phases);
+            }));
+            const workerFailure = workers.find((read) => read.status === "rejected");
+            if (workerFailure) throw workerFailure.reason;
+            const actions = workers.map((read) => read.value);
             const failures = failedRuns.map((run) => failedActionSummary(run, phases));
             phases.sort((a, b) => (b.started ?? 0) - (a.started ?? 0));
             this.value = {

@@ -368,55 +368,6 @@ test("rate limits stop queued CLI reads and preserve the longest concurrent back
     assert.equal(github.readQueue.length, 0);
 });
 
-test("pagination follows trusted links and rejects malformed, oversized, or hostile listings", async () => {
-    const path = `repos/${CENTRAL}/actions/runs?status=queued`;
-    let calls = 0;
-    const github = new GitHub(async () => ++calls === 1
-        ? response({ total_count: 2, workflow_runs: [{ id: 1 }] }, {
-            Link: `<https://api.github.com/${path}&per_page=100&page=2>; rel="next"`,
-        })
-        : response({ total_count: 2, workflow_runs: [{ id: 2 }] }));
-    assert.deepEqual(await github.pages(path), [{ id: 1 }, { id: 2 }]);
-    for (const result of [
-        response({ total_count: 2, workflow_runs: null }),
-        response({ total_count: -1, workflow_runs: [] }),
-        response({ total_count: 1001, workflow_runs: Array.from({ length: 1001 }, (_, id) => ({ id })) }),
-        response({ total_count: 1, workflow_runs: [] }, { Link: '<https://evil.test/steal>; rel="next"' }),
-    ]) {
-        await assert.rejects(new GitHub(async () => result).pages(path), /incomplete|limit|trusted host/);
-    }
-    const forever = new GitHub(async () => response({ total_count: 1000, workflow_runs: [] }, {
-        Link: `<https://api.github.com/${path}&per_page=100&page=2>; rel="next"`,
-    }));
-    await assert.rejects(forever.pages(path), /incomplete/);
-    let pages = 0;
-    const boundary = new GitHub(async () => {
-        const current = ++pages;
-        return response({
-            total_count: 1000,
-            workflow_runs: Array.from({ length: 100 }, (_, index) => ({ id: (current - 1) * 100 + index + 1 })),
-        }, current < 10 ? { Link: `<https://api.github.com/${path}&per_page=100&page=${current + 1}>; rel="next"` } : {});
-    });
-    assert.equal((await boundary.pages(path)).length, 1000);
-    assert.equal(pages, 10);
-});
-
-test("pagination treats mutable totals as advisory, including cached final pages", async () => {
-    const path = `repos/${CENTRAL}/actions/runs?status=in_progress`;
-    let calls = 0;
-    const github = new GitHub(async () => ++calls === 1
-        ? response({ total_count: 2, workflow_runs: [{ id: 1 }] }, { Etag: '"active"' })
-        : response(null, {}, 304));
-    assert.deepEqual(await github.pages(path), [{ id: 1 }]);
-    assert.deepEqual(await github.pages(path), [{ id: 1 }]);
-    assert.equal(github.counted, 1);
-    assert.equal(github.cacheHits, 1);
-    const empty = new GitHub(async () => response({ total_count: 1, workflow_runs: [] }));
-    assert.deepEqual(await empty.pages(path), []);
-    const staleLargeTotal = new GitHub(async () => response({ total_count: 1001, workflow_runs: [{ id: 1 }] }));
-    assert.deepEqual(await staleLargeTotal.pages(path), [{ id: 1 }]);
-});
-
 const failedCoordinator = (updates = {}) => ({
     id: 37368497585, run_attempt: 1, status: "completed", conclusion: "failure",
     name: "Review loop coordinator", display_title: "Review loop launch 37368497585",
@@ -439,21 +390,6 @@ test("recent coordinator failures use one fixed bounded read, not historical pag
         { total_count: 21, workflow_runs: Array.from({ length: 21 }, () => failedCoordinator()) },
     ]) await assert.rejects(new GitHub(async () => response(data)).failedCoordinators(), /invalid/);
     assert.throws(() => github.get(FAILED_COORDINATORS + "&page=2"), /outside/);
-});
-
-test("pagination completes when run totals grow or shrink between linked pages", async () => {
-    const path = `repos/${CENTRAL}/actions/runs?status=in_progress`;
-    const firstPage = Array.from({ length: 100 }, (_, index) => ({ id: index + 1 }));
-    for (const total of [99, 103]) {
-        let calls = 0;
-        const github = new GitHub(async () => ++calls === 1
-            ? response({ total_count: 101, workflow_runs: firstPage }, {
-                Link: `<https://api.github.com/${path}&per_page=100&page=2>; rel="next"`,
-            })
-            : response({ total_count: total, workflow_runs: [{ id: 101 }] }));
-        assert.deepEqual(await github.pages(path), [...firstPage, { id: 101 }]);
-        assert.equal(calls, 2);
-    }
 });
 
 test("rate limits honor Retry-After or reset and never leak response bodies", async () => {
@@ -748,18 +684,23 @@ test("missing snapshots retain confirmed publication links without inventing ite
     assert.equal(history.phases[0].iterations.length, 1);
 });
 
-test("active Actions associate by recorded identities and expose unmatched runs", () => {
+test("worker Actions associate by recorded identities and accept completed runs", () => {
     const phase = phaseSummary(record(fixture({}, { launch_run: { id: 202 } })));
     const run = { id: 202, run_attempt: 1, status: "queued", name: "Coordinator" };
     assert.deepEqual(actionSummary(run, [phase]).targets, [target]);
     assert.deepEqual(actionSummary({ ...run, id: 303 }, [phase]).targets, []);
+    assert.equal(actionSummary({ ...run, status: "completed" }, [phase]).status, "completed");
     assert.throws(() => actionSummary({ ...run, status: "unrecognized" }, [phase]), /invalid/);
 });
 
 function fakeDashboard(now = () => 2000000) {
     const github = {
         requests: 0, counted: 0, cacheHits: 0, rate: { limit: 5000, remaining: 4990, reset: 9000000 },
-        pages: async () => { github.requests++; github.counted++; return []; },
+        get: async (path) => {
+            github.requests++; github.counted++;
+            assert.equal(path, `repos/${CENTRAL}/actions/runs/101`);
+            return { data: { id: 101, status: "in_progress" } };
+        },
         failedCoordinators: async () => { github.requests++; github.counted++; return []; },
     };
     const dashboard = new Dashboard(github, now);
@@ -771,13 +712,12 @@ function fakeDashboard(now = () => 2000000) {
     return dashboard;
 }
 
-test("a fresh state branch absence loads Actions and failed launches without inventing history", async () => {
+test("a fresh state branch absence loads failed launches without inventing history", async () => {
     const github = new GitHub(async (args) => {
         const path = args.at(-1);
         if (path.endsWith("/git/matching-refs/heads/review-loop-state")) return response([]);
         if (path === FAILED_COORDINATORS) return response({ total_count: 1, workflow_runs: [failedCoordinator()] });
-        assert.match(path, /\/actions\/runs\?status=/);
-        return response({ total_count: 0, workflow_runs: [] });
+        throw new Error(`Unexpected dashboard read ${path}`);
     });
     const dashboard = new Dashboard(github, () => 2000000);
     const state = await dashboard.refresh();
@@ -796,9 +736,9 @@ test("refresh coalesces, keeps stale data on failure, and respects manual/low-ca
     const first = dashboard.refresh();
     assert.equal(first, dashboard.refresh());
     const result = await first;
-    assert.equal(result.cost, 7);
+    assert.equal(result.cost, 3);
     assert.equal(result.phases.length, 1);
-    dashboard.github.pages = async () => { throw new GitHubError("HTTP 403 access denied"); };
+    dashboard.github.get = async () => { throw new GitHubError("HTTP 403 access denied"); };
     const failed = await dashboard.refresh();
     assert.equal(failed.loadedAt, result.loadedAt);
     assert.equal(failed.phases.length, 1);
@@ -812,6 +752,72 @@ test("refresh coalesces, keeps stale data on failure, and respects manual/low-ca
     assert.equal((await initialFailure.refresh()).loadedAt, null);
 });
 
+test("worker reads deduplicate active run IDs and preserve queued, running and completed evidence", async () => {
+    const dashboard = fakeDashboard();
+    dashboard.checkpoints.snapshot.current = [
+        record(fixture({ stage: "dispatched" })),
+        record(fixture({}, { pr: 13 }), "pr-v2-123-13.json"),
+        record(fixture({ stage: "waiting_ci", run: { id: 202 } }, { pr: 14 }), "pr-v2-123-14.json"),
+        record(fixture({ stage: "complete", run: { id: 303 } }, { pr: 15 }), "pr-v2-123-15.json"),
+    ];
+    const calls = [];
+    let status = "queued";
+    dashboard.github.get = async (path) => {
+        calls.push(path);
+        return { data: { id: 101, status } };
+    };
+    const queued = await dashboard.refresh();
+    assert.deepEqual(calls, [`repos/${CENTRAL}/actions/runs/101`]);
+    assert.equal(queued.actions.length, 1);
+    assert.deepEqual(queued.actions[0].targets, [target, "example/project#13"]);
+    const pr = { sha: sha("a"), tasks: ["copilot_review"], phase: queued.phases.find((phase) => phase.target === target) };
+    assert.equal(taskPresentation(pr, "copilot_review", true, queued.actions).label, "Queued");
+    status = "in_progress";
+    const running = await dashboard.refresh();
+    assert.equal(taskPresentation(pr, "copilot_review", true, running.actions).label, "Running");
+    status = "completed";
+    assert.equal((await dashboard.refresh()).actions[0].status, "completed");
+    for (const entry of dashboard.checkpoints.snapshot.current.slice(0, 2)) entry.state.stage = "waiting_ci";
+    const waiting = await dashboard.refresh();
+    assert.deepEqual(waiting.actions, []);
+    assert.equal(calls.length, 3);
+    pr.phase = waiting.phases.find((phase) => phase.target === target);
+    assert.equal(taskPresentation(pr, "copilot_review", true, waiting.actions).label, "Waiting for CI");
+});
+
+test("a mismatched worker response pauses refresh and retains the last confirmed task evidence", async () => {
+    const dashboard = fakeDashboard();
+    const previous = await dashboard.refresh();
+    dashboard.github.get = async () => ({ data: { id: 202, status: "queued" } });
+    const failed = await dashboard.refresh();
+    assert.match(failed.error, /different worker run/);
+    assert.equal(failed.loadedAt, previous.loadedAt);
+    assert.deepEqual(failed.actions, previous.actions);
+    assert.equal(failed.auto, false);
+});
+
+test("worker reads settle before releasing the refresh lock after a failure", async () => {
+    const dashboard = fakeDashboard();
+    dashboard.checkpoints.snapshot.current.push(
+        record(fixture({ run: { id: 202 } }, { pr: 13 }), "pr-v2-123-13.json"));
+    let release;
+    dashboard.github.get = async (path) => {
+        if (path.endsWith("/101")) throw new Error("Worker status unavailable");
+        return new Promise((resolve) => release = () => resolve({ data: { id: 202, status: "queued" } }));
+    };
+    const first = dashboard.refresh();
+    let done = false;
+    first.then(() => done = true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(done, false);
+    assert.equal(dashboard.refresh(), first);
+    release();
+    const state = await first;
+    assert.match(state.error, /Worker status unavailable/);
+    assert.equal(state.loading, false);
+    assert.equal(state.auto, false);
+});
+
 test("manual refresh stays off without a notice, but read failures still report an automatic pause", async () => {
     const dashboard = fakeDashboard();
     const manual = dashboard.setAuto(false);
@@ -823,7 +829,7 @@ test("manual refresh stays off without a notice, but read failures still report 
     assert.equal(refreshed.auto, false);
     assert.equal(refreshed.pauseReason, null);
     assert.equal(dashboard.timer, null);
-    dashboard.github.pages = async () => { throw new Error("Manual read unavailable"); };
+    dashboard.github.get = async () => { throw new Error("Manual read unavailable"); };
     const failed = await dashboard.refresh();
     assert.equal(failed.auto, false);
     assert.match(failed.error, /Manual read unavailable/);
@@ -838,7 +844,7 @@ test("parallel refresh reads settle before releasing refresh coalescing after a 
     let release;
     const waiting = new Promise((resolve) => release = resolve);
     dashboard.github.failedCoordinators = async () => { throw new Error("Failure listing unavailable"); };
-    dashboard.github.pages = async () => { await waiting; return []; };
+    dashboard.checkpoints.load = async () => { await waiting; return dashboard.checkpoints.snapshot; };
     const first = dashboard.refresh();
     let done = false;
     first.then(() => done = true);
@@ -915,7 +921,10 @@ test("automatic refresh pauses for a slow or costly steady-state cycle, not init
     assert.match(dashboard.state().pauseReason, /10 seconds/);
     const costly = fakeDashboard();
     await costly.refresh();
-    costly.github.pages = async () => { costly.github.counted += 3; return []; };
+    costly.github.get = async () => {
+        costly.github.counted += 13;
+        return { data: { id: 101, status: "in_progress" } };
+    };
     assert.match((await costly.refresh()).pauseReason, /12 primary/);
     const low = fakeDashboard();
     low.github.rate.remaining = 499;
@@ -998,7 +1007,7 @@ test("loopback serves assets and read-only endpoints; cross-origin data reads an
     assert.equal((await history.json()).phases.length, 1);
     assert.equal((await fetch(new URL("api/history?target=../secret", server.url))).status, 400);
     assert.equal((await fetch(new URL("api/cancel", server.url), { method: "POST" })).status, 404);
-    dashboard.github.pages = async () => { throw new Error("GitHub unavailable"); };
+    dashboard.github.get = async () => { throw new Error("GitHub unavailable"); };
     const stale = await fetch(new URL("api/refresh", server.url), { method: "POST" });
     assert.equal(stale.status, 502);
     assert.equal((await stale.json()).phases.length, 1);
@@ -1350,7 +1359,7 @@ test("review cards show the actual outcome above collapsed technical details wit
     }, { loop_kind: "pr_review" });
     const history = () => ({ ...targetHistory([record(s)], target), snapshot: state.snapshot });
     state.prs[0].phase = phaseSummary(record(s));
-    const { renderer, nodes, html } = await rendererFixture(async (path) => ({
+    const { renderer, nodes } = await rendererFixture(async (path) => ({
         ok: true, json: async () => path.includes("history") ? history() : state,
     }));
     const card = () => nodes.get("prs").firstChild;
@@ -1362,7 +1371,6 @@ test("review cards show the actual outcome above collapsed technical details wit
     assert.equal(result().firstChild.textContent, "No new findings. No pending review was created.");
     assert.equal(details().firstChild.textContent, "Run details");
     assert.equal(details().open, undefined);
-    assert.match(html, /<details class="card">\s*<summary>Background jobs/);
 
     const comments = [{ path: "src/example.js", line: 12, side: "RIGHT", body: "<img src=x> Missing input guard" }];
     Object.assign(s, {

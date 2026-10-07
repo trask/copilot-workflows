@@ -37,7 +37,6 @@ function connection(value) {
     }
     return value;
 }
-export const ACTIVE_STATUSES = ["queued", "in_progress", "waiting", "pending", "requested"];
 export const FAILED_COORDINATORS = `repos/${CENTRAL}/actions/workflows/coordinator.yml/runs?event=workflow_dispatch&status=failure&per_page=20`;
 
 export class GitHubError extends Error {
@@ -246,33 +245,6 @@ export class GitHub {
             while (this.cache.size > 100) this.cache.delete(this.cache.keys().next().value);
         }
         return value;
-    }
-
-    async pages(path) {
-        let next = safePath(`${path}${path.includes("?") ? "&" : "?"}per_page=100`);
-        const results = [];
-        for (let page = 0; next && page < 10; page++) {
-            const response = await this.get(next);
-            const items = response.data.workflow_runs;
-            if (!Array.isArray(items) || !Number.isSafeInteger(response.data.total_count) ||
-                response.data.total_count < 0 || items.length > 100) {
-                throw new GitHubError("GitHub Actions listing is incomplete or exceeds the dashboard limit.");
-            }
-            results.push(...items);
-            if (results.length > 1000) throw new GitHubError("GitHub Actions listing exceeds the dashboard limit.");
-            const link = response.link?.split(",").find((item) => /;\s*rel="next"/.test(item));
-            // Active-run totals are not a snapshot; next links define the page chain.
-            if (!link) next = null;
-            else {
-                const match = /^\s*<([^>]+)>/.exec(link);
-                if (!match) throw new GitHubError("GitHub returned an invalid pagination link.");
-                const url = new URL(match[1]);
-                if (url.origin !== "https://api.github.com") throw new GitHubError("GitHub pagination left the trusted host.");
-                next = safePath(url.pathname.slice(1) + url.search);
-            }
-        }
-        if (next) throw new GitHubError("GitHub Actions pagination is incomplete.");
-        return results;
     }
 
     async failedCoordinators() {

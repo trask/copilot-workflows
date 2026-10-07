@@ -306,8 +306,9 @@ export function targetHistory(records, target) {
 }
 
 export function actionSummary(run, summaries) {
-    if (!Number.isSafeInteger(run.id) || !["queued", "in_progress", "waiting", "pending", "requested"].includes(run.status)) {
-        throw new Error("GitHub returned an invalid active Actions run.");
+    if (!Number.isSafeInteger(run.id) || run.id < 1 ||
+        !["queued", "in_progress", "waiting", "pending", "requested", "completed"].includes(run.status)) {
+        throw new Error("GitHub returned an invalid worker Actions run.");
     }
     return summarizeAction(run, summaries);
 }

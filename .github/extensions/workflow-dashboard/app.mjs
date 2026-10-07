@@ -116,17 +116,6 @@ function render() {
     $("warnings").textContent = warnings.join(" ");
     renderLoading();
     renderPulls();
-    const actions = $("actions");
-    actions.replaceChildren();
-    $("actions-count").textContent = state.actions.length;
-    for (const run of state.actions) {
-        const row = element("article", null, "run");
-        const heading = element("div", null, "row");
-        heading.append(link(run.title || run.name, run.url), element("span", words(run.status), "badge active"));
-        row.append(heading, element("p", `${run.name} · ${date(run.created)}${run.targets.length ? ` · ${run.targets.join(", ")}` : " · shared or unmatched run"}`, "muted"));
-        actions.append(row);
-    }
-    if (!actions.children.length) actions.append(element("p", state.loadedAt ? "No background jobs are running." : "Background jobs have not been loaded yet.", "empty"));
     const failures = $("failures");
     failures.replaceChildren();
     $("failures-count").textContent = state.failures.length;
