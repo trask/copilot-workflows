@@ -7,7 +7,7 @@ from loop.policy import (BOT_ID, DEFAULTS, bot, canonical, digest, require,
                          timestamp, unchanged)
 
 def body_classification(body):
-    """Only the bounded CCR v2 clean grammar can establish a clean body."""
+    """Only complete CCR v2 zero-finding summaries can establish a clean body."""
     return _body_classification(body)[0]
 
 
@@ -17,33 +17,41 @@ def _body_classification(body):
     if body.count("<!-- ccr-overview-v2 -->") != 1:
         return "unknown", []
     counts = re.findall(r"\*\*Findings:\*\*\s*(None|[0-9]+)\b", body)
+    counts += re.findall(r"(?:\*\*|<strong>)([0-9]+) open findings?(?:\*\*|</strong>)", body)
     if len(counts) != 1:
         return "unknown", []
     if counts[0] != "None" and int(counts[0]) > 0:
         return "findings", []
+    effort = re.search(r"\n\n\U0001f9e0 \*\*Review effort:\*\* Balanced\n?\Z", body)
+    if effort is not None:
+        body = body[:effort.start()]
     resolved_ids = []
     resolved = re.search(
-        r"\n\n<details>\n<summary><strong>Resolved since last review "
-        r"\(([1-9][0-9]{0,3})\)</strong></summary>\n\n(.+)\n</details>\n?\Z",
+        r"\n\n<details>\n<summary><strong>(?:Resolved since last review "
+        r"\(([1-9][0-9]*)\)|([1-9][0-9]*) resolved since last review)"
+        r"</strong></summary>\n\n(.+)\n</details>\n?\Z",
         body, re.DOTALL)
     if resolved is not None:
         entry = (r"- (?:<picture>(?:<source [^<>\n]+>)+<img [^<>\n]+></picture> )?"
                  r"\[[^\[\]<>\n]+\]\(#discussion_r([1-9][0-9]{0,19})\)")
-        for line in resolved[2].splitlines():
+        for line in resolved[3].splitlines():
             item = re.fullmatch(entry, line)
             if item is None:
                 return "unknown", []
             resolved_ids.append(int(item[1]))
-        if len(resolved_ids) != int(resolved[1]) or len(set(resolved_ids)) != len(resolved_ids):
+        if (len(resolved_ids) != int(resolved[1] or resolved[2])
+                or len(set(resolved_ids)) != len(resolved_ids)):
             return "unknown", []
         body = body[:resolved.start()]
     if re.search(r"discussion_r[0-9]+|Previously missed|Open \([1-9]|New \([1-9]", body):
         return "findings", []
-    clean = (r"<!-- ccr-overview-v2 -->\n\n## Copilot review overview\n\n"
-             r"### (?:\U0001f7e2 Approval recommended|\U0001f535 Needs a closer look)"
-             r"\n\n[^\n<>#*]+\n\n"
-             r"\*\*Review effort:\*\* Balanced  \n\*\*Findings:\*\* None\n?")
-    if counts == ["None"] and re.fullmatch(clean, body):
+    heading = (r"### (?:\U0001f7e2 Approval recommended|\U0001f535 Needs a closer look)"
+               r"\n\n[^\n<>#*]+\n\n")
+    clean = (r"<!-- ccr-overview-v2 -->\n\n" + heading + r"\*\*0 open findings\*\*\n?"
+             if effort is not None else
+             r"<!-- ccr-overview-v2 -->\n\n## Copilot review overview\n\n" + heading
+             + r"\*\*Review effort:\*\* Balanced  \n\*\*Findings:\*\* None\n?")
+    if counts[0] in {"None", "0"} and re.fullmatch(clean, body):
         return "clean", resolved_ids
     return "unknown", []
 
@@ -114,14 +122,12 @@ def fresh_collection(api, request, baseline, requested_at, expected_sha, now):
                           and c["original_commit_id"] == submitted[c["pull_request_review_id"]]["commit_id"]
                           and not c.get("in_reply_to_id")}
     classification = classifications[latest["id"]]
-    if ("unknown" in classifications.values()
-            or not resolved_ids <= roots.keys() & original_bot_roots):
-        decision = "unknown"
-    elif (relevant or any(not roots[root]["resolved"]
-                         for root in resolved_ids)
-          or "findings" in classifications.values()
-          or any(r["state"] == "CHANGES_REQUESTED" for r in fresh)):
+    if (relevant or "findings" in classifications.values()
+            or any(r["state"] == "CHANGES_REQUESTED" for r in fresh)):
         decision = "findings"
+    elif ("unknown" in classifications.values()
+          or not resolved_ids <= roots.keys() & original_bot_roots):
+        decision = "unknown"
     else:
         decision = "clean"
     unchanged(dict(request, frozen_sha=expected_sha), api.call(path))

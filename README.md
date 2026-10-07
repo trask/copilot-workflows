@@ -161,9 +161,9 @@ Repository configuration and instruction files, binary files, executable files, 
 
 ## Reviews, CI and state
 
-External-review freezes include full submitted verified Copilot bodies and unresolved original bot roots at the exact head. Human roots and bot replies in human threads are excluded. Fresh external review decisions require the verified bot identity, a new submitted review after the durable baseline, exact expected SHA, complete paginated body/inline collection and a propagation delay. Unknown review bodies fail closed.
+External-review freezes include full submitted verified Copilot bodies at the exact head and every unresolved original bot root, including older-head threads. Human roots and bot replies in human threads are excluded. Fresh external review decisions require the verified bot identity, a new submitted review after the durable baseline, exact expected SHA, complete paginated body/inline collection and a propagation delay. Unknown overviews cannot establish clean, but do not override verified open findings.
 
-Recognized CCR v2 `Findings: None` overviews may recommend approval or human review. Clean means no remaining findings and passing exact-head CI, not approval to merge.
+Recognized CCR v2 `0 open findings` summaries and legacy `Findings: None` overviews may recommend approval or human review. Counted resolved sections must link only to independently resolved original verified bot roots. Clean means no remaining findings and passing exact-head CI, not approval to merge.
 
 Retained roots do not prevent a bounded continuation for new inline findings or new body-only findings in a complete counted CCR v2 `Previously missed` section. Every unresolved root remains in the worker's frozen findings. Repeated collections and entirely reused roots without new body-only feedback still stop; changing overview wording does not reopen an investigation.
 

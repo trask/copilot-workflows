@@ -58,6 +58,32 @@ RESOLVED = """
 
 - <picture><source media="(prefers-color-scheme: dark)" srcset="https://github.githubassets.com/static/images/icons/copilot-code-review/high-v2-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://github.githubassets.com/static/images/icons/copilot-code-review/high-v2-light.svg"><img src="https://github.githubassets.com/static/images/icons/copilot-code-review/high-v2-light.png" alt="High severity" width="62" height="18" align="texttop"></picture> [Loop omits the final element](#discussion_r20)
 </details>"""
+CURRENT_CLEAN = """<!-- ccr-overview-v2 -->
+
+### \U0001f7e2 Approval recommended
+
+The breaking behavior, metadata, dependencies, documentation, and regression coverage are consistent and complete.
+
+**0 open findings**
+
+\U0001f9e0 **Review effort:** Balanced"""
+CURRENT_RESOLVED = RESOLVED.replace(
+    "Resolved since last review (1)", "1 resolved since last review")
+CURRENT_CLEAN_RESOLVED = CURRENT_CLEAN.replace(
+    "\n\n\U0001f9e0", "\n" + CURRENT_RESOLVED + "\n\n\U0001f9e0")
+CURRENT_NONCLEAN = """<!-- ccr-overview-v2 -->
+
+### \U0001f7e1 Changes recommended
+
+Raw MapMessage keys need empty-key handling to prevent valid log messages from being dropped.
+
+<details open>
+<summary><strong>1 open finding</strong></summary>
+
+- [Skip empty map keys before creating OpenTelemetry attributes](#discussion_r21) \u00b7 New
+</details>
+
+\U0001f9e0 **Review effort:** Balanced"""
 NONCLEAN = """<!-- ccr-overview-v2 -->
 ## Copilot review overview
 ### Changes recommended
@@ -1258,6 +1284,52 @@ class ReviewTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertEqual("unknown", body_classification(body))
 
+    def test_current_summary_recognizes_open_counts_and_the_effort_footer(self):
+        self.assertEqual("clean", body_classification(CURRENT_CLEAN))
+        self.assertEqual("clean", body_classification(CURRENT_CLEAN_RESOLVED))
+        self.assertEqual("findings", body_classification(CURRENT_NONCLEAN))
+        self.assertEqual("unknown", body_classification(CURRENT_CLEAN.replace(
+            "\n\n\U0001f9e0 **Review effort:** Balanced", "")))
+        self.assertEqual("unknown", body_classification(CURRENT_CLEAN_RESOLVED.replace(
+            "1 resolved since last review", "2 resolved since last review")))
+        self.assertEqual("unknown", body_classification(CURRENT_CLEAN + "\nUnexpected finding"))
+
+    def test_current_resolved_summary_requires_closed_verified_roots(self):
+        read, req = Read(), personal_request()
+        read.reviews.append(review(id=13, body=CURRENT_CLEAN_RESOLVED, submitted_at=iso(200)))
+        self.assertEqual("findings", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
+        read.resolved = True
+        self.assertEqual("clean", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
+        read.reviews[-1]["body"] = CURRENT_CLEAN_RESOLVED.replace(
+            "#discussion_r20", "#discussion_r99")
+        self.assertEqual("unknown", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
+        read.reviews[-1]["body"] = CURRENT_CLEAN_RESOLVED
+        read.comments[0]["user"] = {"id": AUTHOR_ID, "type": "User"}
+        self.assertEqual("unknown", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
+
+    def test_verified_new_inline_finding_advances_with_current_or_unknown_overview(self):
+        state = live_state(stage="waiting_review")
+        state["review_request"] = {"baseline_review_ids": [12], "recorded_at": 100, "sha": SHA}
+        for body in (CURRENT_NONCLEAN, "Unknown review format"):
+            read = Read()
+            read.resolved = True
+            read.reviews.append(review(id=13, body=body, submitted_at=iso(200)))
+            read.comments.append(dict(read.comments[0], id=21, pull_request_review_id=13,
+                                      body="Skip empty map keys"))
+            connection = read.graphql("", {})["repository"]["pullRequest"]["reviewThreads"]
+            connection["nodes"].append({
+                "id": "PRRT_new", "isResolved": False, "isOutdated": False,
+                "comments": {"nodes": [{"databaseId": 21}]}})
+            store, name = stored(state)
+            with self.subTest(body=body), patch.object(read, "graphql", return_value={
+                    "repository": {"pullRequest": {"reviewThreads": connection}}}):
+                fresh = fresh_collection(read, state["request"], [12], 100, SHA, 400)
+                self.assertEqual("findings", fresh["decision"])
+                self.assertEqual([21], fresh["inline_ids"])
+                result = watch_review(store, name, state, read, 400)
+                self.assertEqual("ready", result["stage"])
+                self.assertIn("inline:21", {f["key"] for f in result["request"]["findings"]})
+
     def test_no_finding_human_review_uses_the_same_bounded_clean_grammar(self):
         self.assertEqual("clean", body_classification(HUMAN_REVIEW))
         two = RESOLVED.replace("(1)", "(2)").replace(
@@ -1353,13 +1425,13 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual("findings", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
 
     def test_watcher_finishes_resolved_clean_review_without_another_pipeline(self):
-        for body in (CLEAN, HUMAN_REVIEW):
+        for body in (CLEAN + RESOLVED, HUMAN_REVIEW + RESOLVED, CURRENT_CLEAN_RESOLVED):
             with self.subTest(body=body):
                 state = live_state(stage="waiting_review")
                 state["review_request"] = {"recorded_at": 100, "baseline_review_ids": [12]}
                 read = Read()
                 read.resolved = True
-                read.reviews.append(review(id=13, body=body + RESOLVED, submitted_at=iso(200)))
+                read.reviews.append(review(id=13, body=body, submitted_at=iso(200)))
                 store, name = stored(state)
                 publisher = Mock()
                 result = advance(store, name, state, FakeAPI(), read, publisher, 400)
