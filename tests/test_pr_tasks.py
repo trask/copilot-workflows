@@ -1,13 +1,15 @@
 import copy
 import hashlib
+import io
 import json
 import os
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from loop.api import APIError
+from loop.api import API, APIError
 from loop.candidates import semantic
 from loop.ci import collect, diagnoses, same_attempts
 from loop.coordinator import cancel, checkpoint, quiescent
@@ -744,6 +746,44 @@ class MergeGitTests(unittest.TestCase):
             self.assertEqual(3, manifest["history_count"])
             self.assertEqual(req["base_sha"], git(["rev-parse", "incoming"], imported).decode().strip())
 
+    def test_shallow_merge_history_preserves_side_branch_boundaries_on_import(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as root, \
+                tempfile.TemporaryDirectory() as imported:
+            git(["init", "--bare", "--quiet"], directory)
+            earlier = objects(directory, {"Foo.java": "earlier\n"})
+            oldest = objects(directory, {"Foo.java": "oldest\n", "History.txt": "x" * 16384}, [earlier])
+            older = objects(directory, {"Foo.java": "older\n"}, [oldest])
+            ancestor = objects(directory, {"Foo.java": "old\n"}, [older])
+            side = objects(directory, {"Foo.java": "side\n"}, [older])
+            head = objects(directory, {"Foo.java": "head\n"}, [ancestor, side])
+            base = objects(directory, {"Foo.java": "old\n", "Incoming.txt": "incoming\n"}, [ancestor])
+            for name, sha in (("head", head), ("base", base)):
+                git(["update-ref", "refs/heads/" + name, sha], directory)
+            req = task_request("pr_conflict_resolver")
+            req.update(frozen_sha=head, base_sha=base, merge_base_sha=ancestor)
+            read = TaskRead(req)
+            read.pr["head"]["sha"] = head
+            read.base_tip = base
+            destination = Path(root, "package")
+
+            def fetch(target, request, repo=None, sha=None, depth=1):
+                self.assertEqual(256, depth)
+                git(["-c", "protocol.file.allow=always", "fetch", "--quiet", "--depth=4",
+                     "--no-auto-maintenance", directory, sha or request["frozen_sha"]], target)
+
+            with patch.dict(os.environ, {"GITHUB_RUN_ID": "88", "GITHUB_RUN_ATTEMPT": "1"}), \
+                    patch("loop.source.time.time", return_value=100), \
+                    patch("loop.source.MAX_SOURCE", 8192), \
+                    patch("loop.source.public_fetch", side_effect=fetch):
+                manifest = package_source(req, 6, read, destination)
+            self.assertEqual(5, manifest["history_count"])
+            self.assertEqual(sorted([ancestor, older]), manifest["merge_history"]["shallow_commits"])
+            git(["init", "--bare", "--quiet"], imported)
+            import_source(imported, destination / "source.bundle", manifest, req)
+            self.assertEqual(ancestor, git(["merge-base", head, base], imported).decode().strip())
+            self.assertEqual(b"head\n", git(["show", "snapshot:Foo.java"], imported))
+            self.assertEqual(b"incoming\n", git(["show", "incoming:Incoming.txt"], imported))
+
     def test_ordinary_fixes_and_report_results_bind_full_source_scope(self):
         for kind in ("pr_simplify", "pr_consistency", "pr_review"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
@@ -860,6 +900,22 @@ class CIRepairTests(unittest.TestCase):
         read.signed_download = Mock(side_effect=APIError(403, "Logs forbidden"))
         evidence = collect(read, req, [CI_CHECK])
         self.assertEqual("logs_unavailable_403", evidence["failures"][0]["availability"])
+        self.assertEqual("runner failure", evidence["failures"][0]["evidence"].strip())
+
+    def test_missing_signed_log_blob_keeps_the_check_output(self):
+        req, read = self.context()
+        read.checks[0]["output"] = {"summary": "runner failure"}
+        read.signed_download = API("read-token").signed_download
+        redirect = urllib.error.HTTPError("https://api.github.com/logs", 302, "redirect",
+                                          {"Location": "https://example.com/signed-log"}, io.BytesIO())
+        missing = urllib.error.HTTPError("https://example.com/signed-log", 404,
+                                         "The specified blob does not exist.", {}, io.BytesIO())
+        with patch("loop.api.urllib.request.build_opener") as opener, \
+                patch("loop.api.urllib.request.urlopen", side_effect=missing):
+            opener.return_value.open.side_effect = redirect
+            evidence = collect(read, req, [CI_CHECK])
+        self.assertEqual("failed", evidence["decision"])
+        self.assertEqual("logs_unavailable_404", evidence["failures"][0]["availability"])
         self.assertEqual("runner failure", evidence["failures"][0]["evidence"].strip())
 
     def test_failed_checks_allow_diagnosis_but_skipped_checks_do_not_clear_ci(self):

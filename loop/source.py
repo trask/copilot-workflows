@@ -155,15 +155,21 @@ def package_source(request, generation, api, destination, fetch=None):
     destination.mkdir(exist_ok=False)
     with tempfile.TemporaryDirectory(prefix="review-source-") as directory:
         git(["init", "--bare", "--quiet"], directory)
+        shallow_path = Path(directory, "shallow")
         if fetch is None:
             if loop_kind(request) == "pr_conflict_resolver":
                 public_fetch(directory, request, request["repo"], request["base_sha"], depth=256)
                 git(["update-ref", "refs/heads/incoming", request["base_sha"]], directory)
                 public_fetch(directory, request, depth=256)
                 git(["update-ref", "refs/heads/review-base", request["merge_base_sha"]], directory)
-                git_dir = git(["rev-parse", "--git-dir"], directory).decode().strip()
-                (Path(directory) / git_dir / "shallow").write_text(
-                    request["merge_base_sha"] + "\n", encoding="ascii")
+                revisions = git(["rev-list", "--boundary", request["frozen_sha"],
+                                 request["base_sha"], "^" + request["merge_base_sha"]],
+                                directory).decode().splitlines()
+                boundaries = {request["merge_base_sha"]}
+                boundaries.update(line[1:] for line in revisions if line.startswith("-"))
+                if shallow_path.exists():
+                    boundaries.update(shallow_path.read_text(encoding="ascii").splitlines())
+                shallow_path.write_text("\n".join(sorted(boundaries)) + "\n", encoding="ascii")
             elif diff_scope(request):
                 public_fetch(directory, request, request["repo"], request["merge_base_sha"])
                 require(git(["rev-parse", "FETCH_HEAD"], directory).decode().strip()
@@ -176,6 +182,9 @@ def package_source(request, generation, api, destination, fetch=None):
         require(git(["rev-parse", "FETCH_HEAD"], directory).decode().strip() == request["frozen_sha"],
                 "Source acquisition returned a different head")
         git(["update-ref", "refs/heads/snapshot", request["frozen_sha"]], directory)
+        if loop_kind(request) == "pr_conflict_resolver":
+            git(["repack", "-a", "-d"], directory)
+            git(["prune", "--expire=now"], directory)
         tree, count = snapshot_identity(directory, request["frozen_sha"], request)
         bundle = destination / "source.bundle"
         refs = ["refs/heads/snapshot"]
@@ -201,9 +210,13 @@ def package_source(request, generation, api, destination, fetch=None):
             manifest["review_scope"]["tree"] = git(
                 ["rev-parse", "review-base^{tree}"], directory).decode().strip()
         if loop_kind(request) == "pr_conflict_resolver":
+            reachable = set(git(["rev-list", "snapshot", "incoming"], directory).decode().splitlines())
             manifest["merge_history"] = {
                 "base_tree": git(["rev-parse", "incoming^{tree}"], directory).decode().strip(),
-                "boundary": request["merge_base_sha"]}
+                "boundary": request["merge_base_sha"],
+                "shallow_commits": sorted(
+                    set(shallow_path.read_text(encoding="ascii").splitlines()) & reachable
+                ) if manifest["shallow"] else []}
         require(manifest["run_attempt"] == 1, "Source acquisition reruns are forbidden")
         (destination / "manifest.json").write_bytes(canonical(manifest))
     check_target(api, request)
@@ -225,10 +238,17 @@ def bind_manifest(manifest, request, generation):
         count = len({request["frozen_sha"], request["merge_base_sha"]})
     if loop_kind(request) == "pr_conflict_resolver":
         fields.add("merge_history")
-        exact(manifest.get("merge_history"), {"base_tree", "boundary"})
+        exact(manifest.get("merge_history"), {"base_tree", "boundary", "shallow_commits"})
         require(manifest["merge_history"]["boundary"] == request["merge_base_sha"]
                 and re.fullmatch(r"[0-9a-f]{40}", manifest["merge_history"]["base_tree"]),
                 "Merge history source binding differs")
+        boundaries = manifest["merge_history"]["shallow_commits"]
+        require(isinstance(boundaries, list) and len(boundaries) <= 256
+                and all(isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha)
+                        for sha in boundaries)
+                and boundaries == sorted(set(boundaries))
+                and bool(boundaries) == manifest["shallow"],
+                "Merge history shallow boundaries differ")
         count = manifest["history_count"]
         require(type(count) is int and 0 < count <= 256, "Merge history exceeds limit")
     exact(manifest, fields)
@@ -322,7 +342,7 @@ def import_source(directory, bundle, manifest, request):
         if diff_scope(request):
             commits.add(request["merge_base_sha"])
         if loop_kind(request) == "pr_conflict_resolver":
-            commits = {request["merge_base_sha"]}
+            commits = set(manifest["merge_history"]["shallow_commits"])
         (Path(directory) / git_dir / "shallow").write_text(
             "\n".join(sorted(commits)) + "\n", encoding="ascii")
     git(["bundle", "verify", str(Path(bundle).resolve())], directory)

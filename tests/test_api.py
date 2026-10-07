@@ -204,6 +204,21 @@ class APITests(unittest.TestCase):
         self.assertEqual(403, error.exception.status)
         download.assert_not_called()
 
+    def test_missing_signed_blob_reaches_the_caller_without_exposing_its_url(self):
+        redirect = http_error(302)
+        redirect.headers["Location"] = "https://example.com/log?signature=secret"
+        missing = http_error(404)
+        with patch("loop.api.urllib.request.build_opener") as opener, \
+                patch("loop.api.urllib.request.urlopen", side_effect=missing) as download, \
+                self.assertRaises(APIError) as error:
+            opener.return_value.open.side_effect = redirect
+            API("read-token").signed_download("repos/target/repo/actions/jobs/1/logs",
+                                             100, tail=True)
+        self.assertEqual(404, error.exception.status)
+        self.assertEqual("Signed download failed with HTTP 404", str(error.exception))
+        self.assertTrue(missing.fp.closed)
+        download.assert_called_once_with(redirect.headers["Location"], timeout=60)
+
     def test_streaming_log_download_has_an_elapsed_deadline(self):
         redirect = http_error(302)
         redirect.headers["Location"] = "https://example.com/signed-log"

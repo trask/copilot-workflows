@@ -127,19 +127,23 @@ class API:
         require(parsed.scheme == "https" and parsed.hostname and not parsed.username
                 and not parsed.password and parsed.port in {None, 443}, "Unsafe artifact redirect")
         # Signed destination came from the authenticated API. Never forward its bearer token.
-        with urllib.request.urlopen(destination, timeout=60) as response:
-            if tail:
-                payload, total = b"", 0
-                deadline = time.monotonic() + 60
-                while chunk := response.read(65536):
-                    total += len(chunk)
-                    payload = (payload + chunk)[-limit:]
-                    if time.monotonic() >= deadline:
-                        raise DeadlineReached("Log download deadline reached")
-                if total > limit:
-                    print(f"READ EXCERPT: retained last {len(payload)} of {total} log bytes",
-                          file=sys.stderr)
-                return payload
-            payload = response.read(limit + 1)
+        try:
+            with urllib.request.urlopen(destination, timeout=60) as response:
+                if tail:
+                    payload, total = b"", 0
+                    deadline = time.monotonic() + 60
+                    while chunk := response.read(65536):
+                        total += len(chunk)
+                        payload = (payload + chunk)[-limit:]
+                        if time.monotonic() >= deadline:
+                            raise DeadlineReached("Log download deadline reached")
+                    if total > limit:
+                        print(f"READ EXCERPT: retained last {len(payload)} of {total} log bytes",
+                              file=sys.stderr)
+                    return payload
+                payload = response.read(limit + 1)
+        except urllib.error.HTTPError as error:
+            error.close()
+            raise APIError(error.code, f"Signed download failed with HTTP {error.code}") from error
         require(len(payload) <= limit, "Artifact download exceeds limit")
         return payload
