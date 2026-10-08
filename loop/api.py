@@ -14,9 +14,11 @@ MAX_RESPONSE = 16 * 1024 * 1024
 
 
 class APIError(RuntimeError):
-    def __init__(self, status, message):
+    def __init__(self, status, message, *, rate_limited=False, retry_at=None):
         super().__init__(message)
         self.status = status
+        self.rate_limited = rate_limited
+        self.retry_at = retry_at
 
 
 class DeadlineReached(TimeoutError):
@@ -61,7 +63,26 @@ class API:
                 error.close()
                 if method != "GET" or attempt == 2 or error.code not in {500, 502, 503, 504}:
                     # Do not echo response bodies, which can include untrusted text.
-                    raise APIError(error.code, f"GitHub API {method} failed with HTTP {error.code}") from error
+                    limits = {}
+                    for header in ("X-RateLimit-Limit", "X-RateLimit-Remaining",
+                                   "X-RateLimit-Reset", "Retry-After"):
+                        value = error.headers.get(header)
+                        if value is not None and value.isascii() and value.isdecimal():
+                            limits[header] = int(value)
+                    rate_limited = (error.code == 429 or error.code == 403
+                                    and (limits.get("X-RateLimit-Remaining") == 0
+                                         or "Retry-After" in limits))
+                    retry_at = (limits.get("X-RateLimit-Reset")
+                                if limits.get("X-RateLimit-Remaining") == 0 else
+                                int(time.time()) + limits["Retry-After"]
+                                if "Retry-After" in limits else None)
+                    message = f"GitHub API {method} failed with HTTP {error.code}; endpoint={path}"
+                    if rate_limited:
+                        message += "; rate limited"
+                    for header, value in limits.items():
+                        message += f"; {header}={value}"
+                    raise APIError(error.code, message, rate_limited=rate_limited,
+                                   retry_at=retry_at) from error
                 failure = f"HTTP {error.code}"
             except (TimeoutError, urllib.error.URLError) as error:
                 if (method != "GET" or attempt == 2

@@ -97,6 +97,8 @@ External-review publication freezes every unresolved original comment from submi
 
 ## Explicit operations
 
+API errors report the failed endpoint and numeric rate-limit headers without printing response bodies or credentials. A rate-limited HTTP 403 is distinct from a permission denial. `X-RateLimit-Remaining=0` identifies an exhausted primary quota, and `X-RateLimit-Reset` gives its UTC epoch reset time. The central Actions token shares a 1,000-request hourly quota across jobs in this repository.
+
 Dispatch `coordinator.yml` from central `main`. Only the existing personal owner can launch work. The target must be open and authored by that user or be a Copilot PR GitHub attributes to them, except for PR Reviewer.
 
 ```bash

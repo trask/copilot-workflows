@@ -97,6 +97,26 @@ class APITests(unittest.TestCase):
             open_request.assert_called_once()
             sleep.assert_not_called()
 
+    def test_rate_limit_errors_report_numeric_headers_without_exposing_response_text(self):
+        failure = http_error(403)
+        failure.headers.update({
+            "X-RateLimit-Limit": "1000", "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset": "2000", "Retry-After": "untrusted header",
+            "Authorization": "secret-token",
+        })
+        with patch("loop.api.urllib.request.urlopen", side_effect=failure), \
+                patch("loop.api.time.sleep") as sleep, self.assertRaises(APIError) as error:
+            API("secret-token").call(f"repos/{CENTRAL}/git/ref/heads/main")
+        self.assertTrue(error.exception.rate_limited)
+        self.assertEqual(2000, error.exception.retry_at)
+        self.assertIn("X-RateLimit-Remaining=0", str(error.exception))
+        self.assertIn("X-RateLimit-Limit=1000", str(error.exception))
+        self.assertIn(f"endpoint=repos/{CENTRAL}/git/ref/heads/main", str(error.exception))
+        self.assertNotIn("secret-token", str(error.exception))
+        self.assertNotIn("untrusted", str(error.exception))
+        self.assertTrue(failure.fp.closed)
+        sleep.assert_not_called()
+
     def test_mutations_and_graphql_posts_are_never_retried(self):
         for method, path in (("POST", f"repos/{CENTRAL}/actions/workflows/coordinator.yml/dispatches"),
                              ("PATCH", f"repos/{CENTRAL}/git/refs/heads/review-loop-state"),
