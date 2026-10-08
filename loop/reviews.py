@@ -194,25 +194,22 @@ def current_actions_checks(api, repo, sha, checks, cache, workflow_runs):
         if match is None:
             return None
         run_id, job_id = int(match[1]), int(match[2])
+        check_ids.add(check["id"])
         if run_id not in cache:
             require(len(cache) < 100, "Duplicate CI provenance exceeds execution limit")
             run = api.call(f"repos/{repo}/actions/runs/{run_id}")
-            jobs = api.pages(f"repos/{repo}/actions/runs/{run_id}/attempts/1/jobs", "jobs")
+            require(type(run["run_attempt"]) is int and 1 <= run["run_attempt"] <= 100,
+                    "CI run attempt is invalid")
+            jobs = api.pages(f"repos/{repo}/actions/runs/{run_id}/attempts/{run['run_attempt']}/jobs", "jobs")
             cache[run_id] = run, jobs
         run, jobs = cache[run_id]
         path = run.get("path", "").split("@")[0]
-        selected = [job for job in jobs if job["id"] == job_id]
-        if (run["id"] != run_id or run["head_sha"] != sha or run["run_attempt"] != 1
+        if (run["id"] != run_id or run["head_sha"] != sha
                 or run["repository"]["full_name"] != repo
                 or type(run.get("workflow_id")) is not int or run["workflow_id"] <= 0
                 or re.fullmatch(r"\.github/workflows/[^/\\@?#]+\.ya?ml", path) is None
                 or run.get("check_suite_id") != check.get("check_suite", {}).get("id")
-                or type(run.get("check_suite_id")) is not int
-                or len(selected) != 1):
-            return None
-        job = selected[0]
-        if (job["run_id"] != run_id or job["run_attempt"] != 1 or job["name"] != check["name"]
-                or job["check_run_url"] != f"https://api.github.com/repos/{repo}/check-runs/{check['id']}"):
+                or type(run.get("check_suite_id")) is not int):
             return None
         require(type(run.get("run_number")) is int and run["run_number"] > 0
                 and isinstance(run.get("event"), str) and run["event"],
@@ -222,10 +219,32 @@ def current_actions_checks(api, repo, sha, checks, cache, workflow_runs):
         if prior and prior["run_number"] == run["run_number"] and prior["id"] != run_id:
             return None
         sequences[key] = run
-        check_ids.add(check["id"])
+        selected = [job for job in jobs if job["id"] == job_id]
+        retained = False
+        if not selected and run["run_attempt"] > 1:
+            if any(job["name"] == check["name"] for job in jobs):
+                continue
+            if check_decision(check, sha, accept_nonblocking=True) == "passed":
+                job = api.call(f"repos/{repo}/actions/jobs/{job_id}")
+                if (type(job["run_attempt"]) is not int
+                        or not 1 <= job["run_attempt"] < run["run_attempt"]
+                        or job["conclusion"] not in {"success", "skipped", "neutral"}):
+                    return None
+                selected = [job]
+                retained = True
+        if len(selected) != 1:
+            return None
+        job = selected[0]
+        if (job["id"] != job_id or job["run_id"] != run_id
+                or type(job["run_attempt"]) is not int
+                or not retained and job["run_attempt"] != run["run_attempt"]
+                or job["name"] != check["name"]
+                or job["check_run_url"] != f"https://api.github.com/repos/{repo}/check-runs/{check['id']}"):
+            return None
         verified.append((check, {"workflow_id": run["workflow_id"], "path": path,
                                 "event": run["event"], "run_id": run_id,
-                                "attempt": 1, "job_id": job_id}))
+                                "attempt": run["run_attempt"], "job_id": job_id,
+                                "job_attempt": job["run_attempt"]}))
     latest = latest_workflows(repo, sha, [*workflow_runs, *(r for r, _ in cache.values())])
     selected, identities, workflow_ids, workflow_paths = [], [], set(), set()
     for check, identity in verified:

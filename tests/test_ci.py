@@ -32,7 +32,7 @@ class IndependentWorkflowCITests(unittest.TestCase):
             if path.startswith(f"repos/{FIXTURE}/actions/runs/") else call(path)))
         read.pages = Mock(side_effect=lambda path, key=None: (
             jobs[int(path.split("/actions/runs/", 1)[1].split("/", 1)[0])]
-            if path.endswith("/attempts/1/jobs") else pages(path, key)))
+            if "/actions/runs/" in path and path.endswith("/jobs") else pages(path, key)))
         return read, executions, jobs
 
     def test_newer_execution_supersedes_cancelled_checks_without_hiding_new_failures(self):
@@ -73,6 +73,53 @@ class IndependentWorkflowCITests(unittest.TestCase):
         self.assertEqual("passed", result["decision"])
         self.assertEqual([2], result["checks"][0]["ids"])
 
+    def test_same_execution_rerun_selects_current_attempt_jobs(self):
+        read, executions, jobs = self.context()
+        executions[200]["run_attempt"] = 2
+        read.runs = [executions[200]]
+        read.checks[0]["conclusion"] = "failure"
+        read.checks[1].update(
+            details_url=f"https://github.com/{FIXTURE}/actions/runs/200/job/334",
+            check_suite={"id": 500})
+        jobs[200] = [dict(jobs[200][0], id=334, run_attempt=2,
+                          check_run_url=f"https://api.github.com/repos/{FIXTURE}/check-runs/334")]
+        for status, conclusion, expected in [("completed", "success", "passed"),
+                                             ("in_progress", None, "pending"),
+                                             ("completed", "failure", "failed")]:
+            with self.subTest(status=status, conclusion=conclusion):
+                read.checks[1].update(status=status, conclusion=conclusion)
+                result = exact_ci(read, FIXTURE, SHA, [CI_CHECK])
+                self.assertEqual(expected, result["decision"])
+                self.assertEqual([334], result["checks"][0]["ids"])
+                self.assertEqual(2, result["checks"][0]["workflows"][0]["attempt"])
+                self.assertEqual(2, result["checks"][0]["workflows"][0]["job_attempt"])
+        read.pages.assert_any_call(f"repos/{FIXTURE}/actions/runs/200/attempts/2/jobs", "jobs")
+        executions[200]["status"] = "in_progress"
+        read.checks[1].update(
+            id=335, details_url=f"https://github.com/{FIXTURE}/actions/runs/200/job/335")
+        self.assertEqual("pending", exact_ci(read, FIXTURE, SHA, [CI_CHECK])["decision"])
+
+    def test_failed_job_retry_preserves_only_proven_nonblocking_previous_jobs(self):
+        read, executions, jobs = self.context()
+        executions[200]["run_attempt"] = 2
+        prior = dict(jobs[200][0], conclusion="success")
+        jobs[200] = []
+        original = read.call.side_effect
+        read.call.side_effect = lambda path: (
+            prior if path == f"repos/{FIXTURE}/actions/jobs/333" else original(path))
+        result = exact_ci(read, FIXTURE, SHA, [CI_CHECK])
+        self.assertEqual("passed", result["decision"])
+        self.assertEqual(2, result["checks"][0]["workflows"][0]["attempt"])
+        self.assertEqual(1, result["checks"][0]["workflows"][0]["job_attempt"])
+        for mutation in ({"conclusion": "failure"}, {"run_id": 201}, {"run_attempt": 2}):
+            with self.subTest(mutation=mutation):
+                prior.clear()
+                prior.update(id=333, run_id=200, run_attempt=1, name=CI_CHECK,
+                             conclusion="success",
+                             check_run_url=f"https://api.github.com/repos/{FIXTURE}/check-runs/333")
+                prior.update(mutation)
+                self.assertEqual("unknown", exact_ci(read, FIXTURE, SHA, [CI_CHECK])["decision"])
+
     def test_distinct_verified_workflows_with_matching_names_all_must_pass(self):
         for status, conclusion, expected in [
             ("completed", "success", "passed"),
@@ -90,7 +137,7 @@ class IndependentWorkflowCITests(unittest.TestCase):
             self.assertEqual([600, 601], [item["workflow_id"]
                                         for item in result["checks"][0]["workflows"]])
 
-    def test_duplicate_contexts_require_bound_independent_first_attempt_workflows(self):
+    def test_duplicate_contexts_require_bound_independent_workflows_and_attempts(self):
         for mutation in [
             "same_workflow", "same_path", "duplicate_check", "foreign_link", "foreign_app",
             "unknown_app", "wrong_check_head", "wrong_run_head", "wrong_repository",
