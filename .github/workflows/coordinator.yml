@@ -66,6 +66,7 @@ jobs:
       live_generation: ${{ steps.control.outputs.live_generation }}
       live_stage: ${{ steps.control.outputs.live_stage }}
       live_publisher_secret: ${{ steps.control.outputs.live_publisher_secret }}
+      live_target_publisher_secret: ${{ steps.control.outputs.live_target_publisher_secret }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -92,8 +93,9 @@ jobs:
           PUBLICATION_AUTH_MODE: ${{ inputs.publication_auth || 'disabled' }}
           PUBLISHER_SECRET_MAP: ${{ vars.PUBLISHER_SECRETS }}
           PUBLISHER_SECRET_NAME: ${{ steps.publisher.outputs.publisher_secret }}
+          TARGET_PUBLISHER_SECRET_NAME: ${{ steps.publisher.outputs.target_publisher_secret }}
           PUBLISHER_HEAD_REPO: ${{ steps.publisher.outputs.publisher_head_repo }}
-          PUBLISHER_AVAILABLE: ${{ steps.publisher.outputs.publisher_secret != '' && secrets[steps.publisher.outputs.publisher_secret] != '' }}
+          PUBLISHER_AVAILABLE: ${{ steps.publisher.outputs.publisher_secret != '' && secrets[steps.publisher.outputs.publisher_secret] != '' && steps.publisher.outputs.target_publisher_secret != '' && secrets[steps.publisher.outputs.target_publisher_secret] != '' }}
           SOURCE_READ_TOKEN: ${{ secrets.REVIEW_LOOP_SOURCE_READ_TOKEN }}
         run: python3 -m loop.cli "$OPERATION" --target "$TARGET"
       - id: source
@@ -192,6 +194,8 @@ jobs:
           PUBLISHER_SECRET_MAP: ${{ vars.PUBLISHER_SECRETS }}
           PUBLISHER_SECRET_NAME: ${{ needs.coordinate.outputs.live_publisher_secret }}
           PUBLISHER_TOKEN: ${{ secrets[needs.coordinate.outputs.live_publisher_secret] }}
+          TARGET_PUBLISHER_SECRET_NAME: ${{ needs.coordinate.outputs.live_target_publisher_secret }}
+          TARGET_PUBLISHER_TOKEN: ${{ secrets[needs.coordinate.outputs.live_target_publisher_secret] }}
           PR: ${{ needs.coordinate.outputs.live_pr }}
           TARGET_REPO: ${{ needs.coordinate.outputs.live_repo }}
           REQUEST_ID: ${{ needs.coordinate.outputs.live_request }}

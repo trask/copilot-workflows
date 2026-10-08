@@ -73,6 +73,7 @@ def select_publisher(api, target, kind="copilot_review"):
     require(request["pr"] == number, "Publisher selection returned another PR")
     output("publisher_head_repo", effect_repository(dict(request, loop_kind=kind)))
     output("publisher_secret", publisher_secret(effect_repository(dict(request, loop_kind=kind))))
+    output("target_publisher_secret", publisher_secret(request["repo"]))
 
 
 def choose_verification(store, now=None, api=None, only=None):
@@ -158,6 +159,7 @@ def choose_live(store, now, api=None, only=None):
                            "live_revision": execution_revision(state),
                            "live_generation": state["generation"],
                            "live_stage": state["stage"],
+                           "live_target_publisher_secret": publisher_secret(request["repo"]),
                            "live_publisher_secret": publisher_secret(effect_repository(
                                request, (state.get("report") or {}).get("dispositions", {}).get("outcome")))}.items():
             output(key, value)
@@ -474,6 +476,10 @@ def main():
                     and os.environ.get("PUBLISHER_SECRET_NAME", "")
                     == publisher_secret(effect_repository(request)),
                     "Publisher routing changed before the target freeze")
+        target_secret = publisher_secret(request["repo"])
+        if target_secret != publisher_secret(effect_repository(request)):
+            require(os.environ.get("TARGET_PUBLISHER_SECRET_NAME", "") == target_secret,
+                    "Upstream publisher routing changed before the target freeze")
         request["workflow_ref"] = pin_revision(api, revision)
         name, state = start_publication(
                 store, api, request, args.previous_request, int(args.previous_generation or "0"),

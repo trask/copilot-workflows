@@ -187,11 +187,18 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("PUBLISHER_HEAD_REPO: ${{ steps.publisher.outputs.publisher_head_repo }}",
                       coordinate)
         self.assertIn("secrets[steps.publisher.outputs.publisher_secret] != ''", coordinate)
+        self.assertIn("secrets[steps.publisher.outputs.target_publisher_secret] != ''", coordinate)
+        self.assertIn("TARGET_PUBLISHER_SECRET_NAME: ${{ steps.publisher.outputs.target_publisher_secret }}",
+                      coordinate)
         self.assertNotIn("PUBLISHER_TOKEN:", coordinate)
         self.assertNotIn("toJSON(secrets)", coordinator)
         self.assertIn("PUBLISHER_TOKEN: ${{ secrets[needs.coordinate.outputs.live_publisher_secret] }}",
                       live)
         self.assertIn("PUBLISHER_SECRET_NAME: ${{ needs.coordinate.outputs.live_publisher_secret }}",
+                      live)
+        self.assertIn("TARGET_PUBLISHER_TOKEN: ${{ secrets[needs.coordinate.outputs.live_target_publisher_secret] }}",
+                      live)
+        self.assertIn("TARGET_PUBLISHER_SECRET_NAME: ${{ needs.coordinate.outputs.live_target_publisher_secret }}",
                       live)
         for job in ("verify", "finalize"):
             section = re.split(r"\n  [a-z_]+:", coordinator.split("\n  " + job + ":", 1)[1])[0]

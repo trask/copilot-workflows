@@ -27,12 +27,16 @@ def git(args, directory):
 
 
 class PublisherAPI(API):
-    def __init__(self, token, request, auth_mode, *, source_write=True):
+    def __init__(self, token, request, auth_mode, *, source_write=True, target_token=None):
         require(auth_mode == "fine_grained_pat" and isinstance(token, str)
                 and token.startswith("github_pat_") and len(token) > 30,
                 "Explicit fine-grained publisher PAT required; no inference/classic/App fallback")
         personal(request)
         super().__init__(token)
+        require(target_token is None or isinstance(target_token, str)
+                and target_token.startswith("github_pat_") and len(target_token) > 30,
+                "Explicit fine-grained upstream PAT required")
+        self.target_token = token if target_token is None else target_token
         self.number = request["pr"]
         self.repo = request["repo"]
         self.head_repo = request["head_repo"]
@@ -42,6 +46,18 @@ class PublisherAPI(API):
         self.source_write = source_effect(request) and source_write
         self.request = request
         self.effect = None
+
+    def request_token(self, path):
+        root = f"repos/{self.repo}"
+        return (self.target_token if path == "graphql" or path == root or path.startswith(root + "/")
+                else self.token)
+
+    def call(self, path, method="GET", data=None, **kwargs):
+        return super().call(path, method, data, token=self.request_token(path), **kwargs)
+
+    def signed_download(self, path, limit=None, *, log_windows=()):
+        return super().signed_download(path, limit, log_windows=log_windows,
+                                       token=self.request_token(path))
 
     def bind_effect(self, intent):
         if intent is not None:
@@ -115,6 +131,10 @@ class PublisherAPI(API):
         login = request["commit_author"]["login"]
         require(isinstance(user.get("login"), str) and user["login"].casefold() == login.casefold(),
                 "Publisher account differs from the frozen GitHub commit author")
+        if self.target_token != self.token:
+            target_user = super().call("user", token=self.target_token)
+            require(target_user["id"] == user["id"] and target_user["type"] == "User",
+                    "Upstream publisher must authenticate as the authorized personal owner")
         repo = None
         if self.source_write:
             repo = self.call(f"repos/{self.head_repo}")

@@ -4,13 +4,14 @@ import os
 import unittest
 from unittest.mock import Mock, patch
 
-from loop.api import APIError
+from loop.api import API, APIError
 from loop.cli import choose_live, main as cli_main, select_publisher
 from loop.publisher_auth import publisher_secret
 from loop.live import main as live_main
 from loop.policy import AUTHOR_ID, CENTRAL, Rejected, checkpoint_name
-from loop.publication import SECRET
-from tests.test_live import FIXTURE, TEST_TOKEN, Read, live_state, personal_pr, stored
+from loop.publication import PublisherAPI, SECRET
+from tests.test_api import response
+from tests.test_live import FIXTURE, TEST_TOKEN, Read, live_state, personal_pr, personal_request, stored
 from tests.test_loop import FakeAPI, MemoryState, REVISION
 
 MAPPING = json.dumps({
@@ -85,7 +86,8 @@ class PublisherCredentialTests(unittest.TestCase):
         publisher.assert_not_called()
         api.call.assert_called_once_with("repos/organization/workflows/pulls/1")
         self.assertEqual({"publisher_head_repo": FIXTURE,
-                          "publisher_secret": "TRASK_PUBLISH_TOKEN"},
+                          "publisher_secret": "TRASK_PUBLISH_TOKEN",
+                          "target_publisher_secret": "OPENTELEMETRY_PUBLISH_TOKEN"},
                          dict(call.args for call in output.call_args_list))
 
     def test_read_access_gate_is_preserved_and_other_api_failures_are_not_hidden(self):
@@ -119,7 +121,8 @@ class PublisherCredentialTests(unittest.TestCase):
                 patch("loop.cli.output") as output:
             select_publisher(api, FIXTURE + "#1", "self_review")
             self.assertEqual({"publisher_head_repo": FIXTURE,
-                              "publisher_secret": "TRASK_PUBLISH_TOKEN"},
+                              "publisher_secret": "TRASK_PUBLISH_TOKEN",
+                              "target_publisher_secret": "TRASK_PUBLISH_TOKEN"},
                              dict(call.args for call in output.call_args_list))
             output.reset_mock()
             ownership["search"]["nodes"] = []
@@ -202,6 +205,7 @@ class PublisherCredentialTests(unittest.TestCase):
                     self.assertEqual(name, choose_live(store, 100))
                 outputs = dict(call.args for call in output.call_args_list)
                 self.assertEqual(expected, outputs["live_publisher_secret"])
+                self.assertEqual("TRASK_PUBLISH_TOKEN", outputs["live_target_publisher_secret"])
                 self.assertEqual(stage, outputs["live_stage"])
                 self.assertEqual(state, store.entries[name])
 
@@ -222,6 +226,8 @@ class PublisherCredentialTests(unittest.TestCase):
                 DISPATCH, PUBLISHER_SECRET_MAP=MAPPING, PUBLISHER_SECRET_NAME=secret,
                 PUBLISHER_TOKEN=token, PR="1", REQUEST_ID=state["request"]["request_id"],
                 GENERATION="6", EXPECTED_STAGE=state["stage"], TARGET_REPO=FIXTURE,
+                TARGET_PUBLISHER_SECRET_NAME="TRASK_PUBLISH_TOKEN",
+                TARGET_PUBLISHER_TOKEN=TEST_TOKEN,
             )
             with self.subTest(head=head_repo, secret=secret, error=expected_error), \
                     patch.dict(os.environ, environment, clear=True), \
@@ -240,9 +246,99 @@ class PublisherCredentialTests(unittest.TestCase):
                 else:
                     live_main()
                     publisher.assert_called_once_with(token, state["request"], "fine_grained_pat",
-                                                      source_write=True)
+                                                      source_write=True,
+                                                      **({"target_token": TEST_TOKEN}
+                                                         if secret != "TRASK_PUBLISH_TOKEN" else {}))
                     publisher.return_value.identity.assert_called_once()
                     advance.assert_called_once()
+
+    def test_fork_live_job_requires_the_frozen_upstream_owner_token(self):
+        state = live_state()
+        state["request"].update(repo="organization/workflows", repo_id=77)
+        upstream_token = "github_pat_" + "upstream_not_a_token" * 3
+        environment = dict(
+            DISPATCH, PUBLISHER_SECRET_MAP=MAPPING, PUBLISHER_SECRET_NAME="TRASK_PUBLISH_TOKEN",
+            PUBLISHER_TOKEN=TEST_TOKEN, PR="1", REQUEST_ID=state["request"]["request_id"],
+            GENERATION="6", EXPECTED_STAGE=state["stage"], TARGET_REPO="organization/workflows",
+            TARGET_PUBLISHER_SECRET_NAME="OPENTELEMETRY_PUBLISH_TOKEN",
+            TARGET_PUBLISHER_TOKEN=upstream_token,
+        )
+        for secret, token, error in (
+                ("OPENTELEMETRY_PUBLISH_TOKEN", upstream_token, None),
+                ("TRASK_PUBLISH_TOKEN", upstream_token, "frozen target owner"),
+                ("OPENTELEMETRY_PUBLISH_TOKEN", "", "human_gate_OPENTELEMETRY_PUBLISH_TOKEN")):
+            store, name = stored(state)
+            with self.subTest(secret=secret, token=bool(token)), patch.dict(
+                    os.environ, dict(environment, TARGET_PUBLISHER_SECRET_NAME=secret,
+                                     TARGET_PUBLISHER_TOKEN=token), clear=True), \
+                    patch("loop.live.API"), patch("loop.live.State", return_value=store), \
+                    patch("loop.live.git", return_value=REVISION.encode()), \
+                    patch("loop.live.PublisherAPI") as publisher, \
+                    patch("loop.live.advance", return_value=copy.deepcopy(state)) as advance, \
+                    patch("loop.cli.summary"), patch("loop.live.time.time", return_value=100):
+                if error:
+                    with self.assertRaisesRegex(Rejected, error):
+                        live_main()
+                    publisher.assert_not_called()
+                    advance.assert_not_called()
+                    self.assertEqual("blocked", store.entries[name]["stage"])
+                else:
+                    live_main()
+                    publisher.assert_called_once_with(TEST_TOKEN, state["request"], "fine_grained_pat",
+                                                      source_write=True, target_token=upstream_token)
+
+    def test_upstream_rest_graphql_and_review_requests_use_the_upstream_token(self):
+        req = personal_request()
+        req.update(repo="organization/workflows", repo_id=77)
+        upstream_token = "github_pat_" + "upstream_not_a_token" * 3
+        publisher = PublisherAPI(TEST_TOKEN, req, "fine_grained_pat", target_token=upstream_token)
+        with patch("loop.api.urllib.request.urlopen", return_value=response()) as transport:
+            publisher.call(f"repos/{req['repo']}")
+            publisher.call(f"repos/{req['head_repo']}/git/ref/heads/{req['head_ref']}")
+            publisher.call("graphql", "POST", {"query": "query { repository { id } }",
+                                              "variables": {"owner": "organization",
+                                                            "name": "workflows"}})
+            publisher.call(f"repos/{req['repo']}/pulls/1/requested_reviewers", "POST",
+                           {"reviewers": ["copilot-pull-request-reviewer[bot]"]})
+        self.assertEqual(
+            ["Bearer " + upstream_token, "Bearer " + TEST_TOKEN,
+             "Bearer " + upstream_token, "Bearer " + upstream_token],
+            [entry.args[0].get_header("Authorization") for entry in transport.call_args_list])
+        with patch.object(API, "signed_download", return_value=b"logs") as download:
+            self.assertEqual(b"logs", publisher.signed_download(
+                f"repos/{req['repo']}/actions/jobs/42/logs", 60000))
+            download.assert_called_once_with(f"repos/{req['repo']}/actions/jobs/42/logs", 60000,
+                                             log_windows=(), token=upstream_token)
+        self.assertEqual(TEST_TOKEN, publisher.token)
+
+    def test_both_fork_and_upstream_tokens_must_authenticate_as_the_launch_owner(self):
+        req = personal_request()
+        req.update(repo="organization/workflows", repo_id=77)
+        upstream_token = "github_pat_" + "upstream_not_a_token" * 3
+        publisher = PublisherAPI(TEST_TOKEN, req, "fine_grained_pat", target_token=upstream_token)
+        live = personal_pr()
+        live["base"]["repo"].update(full_name=req["repo"], id=77)
+        upstream_user = {"id": AUTHOR_ID, "type": "User", "login": "launch-owner"}
+        def call(_api, path, method="GET", data=None, **kwargs):
+            token = kwargs["token"]
+            if path == "user":
+                return (upstream_user if token == upstream_token else
+                        {"id": AUTHOR_ID, "type": "User", "login": "launch-owner"})
+            if path == f"repos/{req['head_repo']}":
+                self.assertEqual(TEST_TOKEN, token)
+                return {"id": req["head_repo_id"], "node_id": "fork-node",
+                        "full_name": req["head_repo"], "private": False,
+                        "permissions": {"push": True}}
+            self.assertEqual(upstream_token, token)
+            if path == f"repos/{req['repo']}":
+                return {"id": 77, "full_name": req["repo"], "private": False}
+            self.assertEqual(f"repos/{req['repo']}/pulls/1", path)
+            return live
+        with patch.object(API, "call", autospec=True, side_effect=call):
+            self.assertEqual("fork-node", publisher.identity(req)["repo_node"])
+            upstream_user["id"] = 999
+            with self.assertRaisesRegex(Rejected, "Upstream publisher must authenticate"):
+                publisher.identity(req)
 
     def test_concurrent_owner_phases_do_not_share_secret_selection(self):
         personal = live_state()

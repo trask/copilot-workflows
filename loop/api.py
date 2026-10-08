@@ -36,7 +36,8 @@ class API:
         if method != "GET" and path != "graphql":
             require(path.startswith(f"repos/{CENTRAL}/"), "Target mutation is forbidden")
 
-    def call(self, path, method="GET", data=None, raw=False, limit=MAX_RESPONSE, accept=None):
+    def call(self, path, method="GET", data=None, raw=False, limit=MAX_RESPONSE, accept=None,
+             *, token=None):
         self.authorize(path, method, data)
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
                    "User-Agent": "copilot-review-loop"}
@@ -44,8 +45,9 @@ class API:
             require(method == "GET" and accept == "application/vnd.github.diff",
                     "Unsupported response format")
             headers["Accept"] = accept
-        if self.token:
-            headers["Authorization"] = "Bearer " + self.token
+        token = self.token if token is None else token
+        if token:
+            headers["Authorization"] = "Bearer " + token
         body = None if data is None else json.dumps(data).encode()
         req = urllib.request.Request("https://api.github.com/" + path, data=body,
                                      headers=headers, method=method)
@@ -123,7 +125,7 @@ class API:
     def artifact_zip(self, artifact_id, limit):
         return self.signed_download(f"repos/{CENTRAL}/actions/artifacts/{artifact_id}/zip", limit)
 
-    def signed_download(self, path, limit=None, *, log_windows=()):
+    def signed_download(self, path, limit=None, *, log_windows=(), token=None):
         self.authorize(path, "GET", None)
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *_args, **_kwargs):
@@ -131,7 +133,8 @@ class API:
 
         url = "https://api.github.com/" + path
         req = urllib.request.Request(url, headers={
-            "Authorization": "Bearer " + (self.token or ""), "User-Agent": "copilot-review-loop",
+            "Authorization": "Bearer " + ((self.token if token is None else token) or ""),
+            "User-Agent": "copilot-review-loop",
         })
         try:
             urllib.request.build_opener(NoRedirect).open(req, timeout=60)

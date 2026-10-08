@@ -728,10 +728,20 @@ def main():
                 "Publisher secret selection differs from the frozen head owner")
         token = os.environ.get("PUBLISHER_TOKEN", "")
         require(token, "human_gate_" + secret)
+        target_secret = publisher_secret(state["request"]["repo"])
+        require(target_secret, "human_gate_publisher_secret_for_target_owner")
+        target_credentials = {}
+        if target_secret != secret:
+            require(os.environ.get("TARGET_PUBLISHER_SECRET_NAME") == target_secret,
+                    "Upstream publisher secret selection differs from the frozen target owner")
+            target_token = os.environ.get("TARGET_PUBLISHER_TOKEN", "")
+            require(target_token, "human_gate_" + target_secret)
+            target_credentials["target_token"] = target_token
         publisher = PublisherAPI(token, state["request"],
                                  state["request"]["publication"]["auth_mode"],
                                  source_write=not (loop_kind(state["request"]) == "ci_fix"
-                                                   and outcome == "rerun"))
+                                                   and outcome == "rerun"),
+                                 **target_credentials)
         read = publisher
         if state["stage"] == "publication_intent":
             live = read.call(f"repos/{state['request']['repo']}/pulls/{state['request']['pr']}")
