@@ -42,7 +42,10 @@ const state = (record = cached()) => ({
 });
 const connection = (nodes = [], more = false) => ({ nodes, pageInfo: { hasNextPage: more, endCursor: more ? "next" : null } });
 const check = (conclusion = "SUCCESS", changes = {}) => ({
-    __typename: "CheckRun", name: "Tests", status: "COMPLETED", conclusion, ...changes,
+    __typename: "CheckRun", databaseId: 1, name: "Tests", status: "COMPLETED", conclusion,
+    checkSuite: { app: { id: "app", slug: "github-actions" },
+        workflowRun: { runNumber: 1, event: "pull_request", workflow: { id: "workflow" } } },
+    ...changes,
 });
 const thread = (changes = {}) => ({
     isResolved: false, isOutdated: false,
@@ -167,13 +170,62 @@ test("CI evidence distinguishes failures, pending and absent checks without coun
     assert.equal(evidence([check(null, { status: "IN_PROGRESS" })]).ci, "pending");
     assert.equal(evidence([check("FAILURE"), check(null, { name: "Build", status: "IN_PROGRESS" })]).ci, "failing");
     assert.equal(evidence([check(), check("FAILURE", { name: "Copilot code review" })]).ci, "passing");
-    assert.equal(evidence([{ __typename: "StatusContext", context: "Build", state: "ERROR" }]).ci, "failing");
+    assert.equal(evidence([{ __typename: "StatusContext", context: "Build", state: "ERROR",
+        createdAt: "2026-10-07T21:00:00Z" }]).ci, "failing");
     assert.equal(evidence([check(null)]).ci, "unknown");
     const incomplete = detail({ checks: [check()] });
     incomplete.commits.nodes[0].commit.statusCheckRollup.contexts.pageInfo.hasNextPage = true;
     assert.throws(() => normalizeEvidence(incomplete, sha), /incomplete/);
     incomplete.commits.nodes[0].commit.oid = "f".repeat(40);
     assert.throws(() => normalizeEvidence(incomplete, sha), /PR head/);
+});
+
+test("superseded CI failures and cancellations do not keep a passing task highlighted", () => {
+    const newer = check("SUCCESS", { databaseId: 2 });
+    for (const checks of [[check("CANCELLED"), newer], [newer, check("FAILURE")]]) {
+        const evidence = normalizeEvidence(detail({ checks }), sha);
+        assert.equal(evidence.ci, "passing");
+        assert.equal(evidence.failing, 0);
+        const pr = { ...normalizePull(pull(), repo, state(), account), tasks: ["ci_fix"], actionBlock: null, evidence };
+        assert.equal(taskPresentation(pr, "ci_fix", true).disabled, true);
+        assert.equal(taskPresentation(pr, "ci_fix", true).tone, "idle");
+    }
+    assert.throws(() => normalizeEvidence(detail({ checks: [check("SUCCESS", { databaseId: null })] }), sha),
+        /ordering is incomplete/);
+});
+
+test("latest CI results retain new failures and queued reruns", () => {
+    for (const current of [
+        check("FAILURE", { databaseId: 2 }),
+        check(null, { databaseId: 2, status: "QUEUED" }),
+    ]) {
+        const evidence = normalizeEvidence(detail({ checks: [current, check()] }), sha);
+        assert.equal(evidence.ci, current.status === "QUEUED" ? "pending" : "failing");
+        const pr = { ...normalizePull(pull(), repo, state(), account), tasks: ["ci_fix"], actionBlock: null, evidence };
+        assert.equal(taskPresentation(pr, "ci_fix", true).disabled, false);
+    }
+});
+
+test("CI check selection uses workflow sequence and preserves distinct workflows and events", () => {
+    const previous = check("FAILURE", { databaseId: 3 });
+    const newer = check("SUCCESS", { databaseId: 2, checkSuite: {
+        app: { id: "app", slug: "github-actions" },
+        workflowRun: { runNumber: 2, event: "pull_request", workflow: { id: "workflow" } },
+    } });
+    assert.equal(normalizeEvidence(detail({ checks: [previous, newer] }), sha).ci, "passing");
+    for (const run of [
+        { runNumber: 2, event: "pull_request", workflow: { id: "other-workflow" } },
+        { runNumber: 2, event: "push", workflow: { id: "workflow" } },
+    ]) {
+        const separate = check("SUCCESS", { databaseId: 4, checkSuite: {
+            app: { id: "app", slug: "github-actions" }, workflowRun: run,
+        } });
+        assert.equal(normalizeEvidence(detail({ checks: [previous, separate] }), sha).ci, "failing");
+    }
+    assert.equal(normalizeEvidence(detail({ checks: [
+        { __typename: "StatusContext", context: "Build", state: "ERROR", createdAt: "2026-10-07T21:00:00Z" },
+        { __typename: "StatusContext", context: "Build", state: "SUCCESS", createdAt: "2026-10-07T22:00:00Z" },
+    ] }), sha).ci, "passing");
 });
 
 test("Copilot hints count all unresolved submitted roots by stable bot identity", () => {
@@ -246,7 +298,7 @@ test("fresh conflict and CI preflight rejects unnecessary tasks after an enabled
 
 test("live evidence batches PRs and paginates checks and threads before claiming clear", async () => {
     const queries = [];
-    const first = detail({ checks: [check()] });
+    const first = detail({ checks: [check("CANCELLED")] });
     first.commits.nodes[0].commit.statusCheckRollup.contexts.pageInfo = connection([], true).pageInfo;
     first.reviewThreads.pageInfo = connection([], true).pageInfo;
     first.reviewThreads.nodes = [thread({ isResolved: true })];
@@ -256,13 +308,14 @@ test("live evidence batches PRs and paginates checks and threads before claiming
         if (!query.includes("after:")) return response({ data: { repository: { pr12: first, pr13: detail({ number: 13 }) } } });
         const more = query.includes("reviewThreads")
             ? { number: 12, headRefOid: sha, reviewThreads: connection([thread()]) }
-            : detail({ checks: [check("FAILURE", { name: "Build" })] });
+            : detail({ checks: [check("SUCCESS", { databaseId: 2 }), check("FAILURE", { name: "Build" })] });
         return response({ data: { repository: { pullRequest: more } } });
     });
     const result = await github.pullEvidence(repo, [{ number: 12, sha }, { number: 13, sha }]);
     assert.equal(queries.length, 3);
     assert.ok(queries[0].includes("pr12:") && queries[0].includes("pr13:"));
     assert.equal(normalizeEvidence(result.get(12).detail, sha).ci, "failing");
+    assert.equal(normalizeEvidence(result.get(12).detail, sha).failing, 1);
     assert.equal(normalizeEvidence(result.get(12).detail, sha).copilotThreads, 1);
     assert.equal(result.get(13).error, undefined);
 });

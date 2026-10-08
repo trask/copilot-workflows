@@ -101,10 +101,28 @@ export function normalizeEvidence(detail, sha) {
     let pending = 0;
     let total = 0;
     let unknown = false;
+    const latest = new Map();
     for (const check of checks) {
         const name = check?.__typename === "CheckRun" ? check.name : check?.__typename === "StatusContext" ? check.context : null;
         if (typeof name !== "string" || !name) throw new Error("Live CI status contains an unsupported check.");
         if (/copilot/i.test(name) || check.checkSuite?.app?.slug === "copilot-pull-request-reviewer") continue;
+        const run = check.checkSuite?.workflowRun;
+        const sequence = check.__typename === "CheckRun" ? check.databaseId : Date.parse(check.createdAt);
+        if (!Number.isSafeInteger(sequence) || sequence < 0 ||
+            check.__typename === "CheckRun" && (sequence === 0 ||
+                run != null && (!Number.isSafeInteger(run.runNumber) || run.runNumber < 1))) {
+            throw new Error("Live CI check ordering is incomplete.");
+        }
+        const key = JSON.stringify([check.__typename, name,
+            check.checkSuite?.app?.id ?? null, run?.workflow?.id ?? null, run?.event ?? null]);
+        const previous = latest.get(key);
+        const runNumber = run?.runNumber ?? 0;
+        if (!previous || runNumber > previous.runNumber ||
+            runNumber === previous.runNumber && sequence >= previous.sequence) {
+            latest.set(key, { check, runNumber, sequence });
+        }
+    }
+    for (const { check } of latest.values()) {
         total++;
         if (check.__typename === "CheckRun") {
             if (["QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "PENDING"].includes(check.status)) pending++;

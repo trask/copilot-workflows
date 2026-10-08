@@ -9,8 +9,11 @@ const READ_CONCURRENCY = 3;
 const READ_RETRY_DELAY = 250;
 const CHECK_FIELDS = `
     __typename
-    ... on CheckRun { name status conclusion checkSuite { app { slug } } }
-    ... on StatusContext { context state }`;
+    ... on CheckRun {
+        databaseId name status conclusion
+        checkSuite { app { id slug } workflowRun { runNumber event workflow { id } } }
+    }
+    ... on StatusContext { context state createdAt }`;
 const THREAD_FIELDS = `
     isResolved isOutdated comments(first: 1) {
         nodes { author { login __typename ... on Bot { id } } pullRequestReview { state } }
