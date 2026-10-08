@@ -52,12 +52,18 @@ const thread = (changes = {}) => ({
     comments: { nodes: [{ author: { id: "BOT_kgDOCnlnWA", login: "copilot-pull-request-reviewer", __typename: "Bot" },
         pullRequestReview: { state: "COMMENTED" } }] }, ...changes,
 });
-function detail({ number = 12, head = sha, conflicts = "FAILED", checks = [], threads = [] } = {}) {
+const cleanBody = "<!-- ccr-overview-v2 -->\n\n### \u{1f7e2} Approval recommended\n\nThe change preserves behavior.\n\n**0 open findings**\n\n\u{1f9e0} **Review effort:** Balanced";
+const review = (changes = {}) => ({
+    author: { id: "BOT_kgDOCnlnWA", login: "copilot-pull-request-reviewer", __typename: "Bot" },
+    state: "COMMENTED", submittedAt: "2026-10-08T15:15:56Z", commit: { oid: sha }, body: cleanBody, ...changes,
+});
+function detail({ number = 12, head = sha, conflicts = "FAILED", checks = [], threads = [], reviews = [] } = {}) {
     return {
         number, headRefOid: head,
         mergeRequirements: { conditions: [{ __typename: "PullRequestMergeConflictStateCondition", result: conflicts }] },
         commits: { nodes: [{ commit: { oid: head, statusCheckRollup: { contexts: connection(checks) } } }] },
         reviewThreads: connection(threads),
+        reviews: connection(reviews),
     };
 }
 function file(value) {
@@ -246,6 +252,57 @@ test("Copilot hints count all unresolved submitted roots by stable bot identity"
     }), sha).copilotThreads, 3);
 });
 
+test("zero-finding Copilot summaries and informational sections do not enable feedback tasks", () => {
+    const changed = "\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nSimplifies configuration tests.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| test.js | Preserves supported behavior. |\n</details>";
+    const resolved = "\n\n<details>\n<summary><strong>1 resolved since last review</strong></summary>\n\n- [Input guard](#discussion_r42)\n</details>";
+    const footer = "\n\n---\n\nGive feedback about Copilot approvals in [this survey](https://survey.example.com/copilot) to enter a drawing for a $150 gift card.";
+    const legacy = "<!-- ccr-overview-v2 -->\n\n## Copilot review overview\n\n### \u{1f535} Needs a closer look\n\nHuman validation is recommended.\n\n**Review effort:** Balanced  \n**Findings:** None\n";
+    const bodies = [cleanBody, cleanBody.replace("\n\n\u{1f9e0}", changed + resolved + "\n\n\u{1f9e0}") + footer, legacy, ""];
+    const evidence = normalizeEvidence(detail({
+        reviews: bodies.map((body) => review({ body })), threads: [thread({ isResolved: true })],
+    }), sha);
+    assert.equal(evidence.copilotBodies, 0);
+    const pr = { ...normalizePull(pull(), repo, state(), account), tasks: ["copilot_review"], evidence };
+    assert.equal(taskPresentation(pr, "copilot_review", true).disabled, true);
+    assert.equal(actionEvidence(pr, "copilot_review").label, "No Copilot feedback");
+});
+
+test("only submitted verified current-head review bodies count, and unknown text remains actionable", () => {
+    const feedback = review({ body: "Fix the missing input guard." });
+    const reviews = [
+        feedback, review({ body: feedback.body, commit: { oid: "f".repeat(40) } }),
+        review({ body: feedback.body, author: { __typename: "User", id: "BOT_kgDOCnlnWA" } }),
+        review({ body: feedback.body, author: { __typename: "Bot", id: "unrelated-bot" } }),
+        review({ body: feedback.body, state: "PENDING", submittedAt: null }),
+        review({ body: feedback.body, state: "DISMISSED" }),
+    ];
+    const evidence = normalizeEvidence(detail({ reviews }), sha);
+    assert.equal(evidence.copilotBodies, 1);
+    const pr = { ...normalizePull(pull(), repo, state(), account), tasks: ["copilot_review"], evidence };
+    assert.equal(taskPresentation(pr, "copilot_review", true).disabled, false);
+    assert.equal(taskPresentation(pr, "copilot_review", true).tone, "needed");
+    for (const reviewBody of [
+        review({ body: cleanBody + "\nUnexpected finding" }),
+        review({ body: cleanBody + "\n\n<details><summary>Previously missed (1)</summary>\nMissing guard\n</details>" }),
+        review({ state: "CHANGES_REQUESTED" }),
+    ]) assert.equal(normalizeEvidence(detail({ reviews: [reviewBody] }), sha).copilotBodies, 1);
+});
+
+test("incomplete Copilot review-body evidence stays unknown rather than disabling the task", () => {
+    const raw = detail();
+    raw.reviews.pageInfo.hasNextPage = true;
+    assert.throws(() => normalizeEvidence(raw, sha), /review-body status is incomplete/);
+    delete raw.reviews;
+    assert.throws(() => normalizeEvidence(raw, sha), /review-body status is incomplete/);
+    assert.throws(() => normalizeEvidence(detail({ reviews: [review({ body: null })] }), sha), /review body is incomplete/);
+    const pr = {
+        ...normalizePull(pull(), repo, state(), account), tasks: ["copilot_review"],
+        evidence: { sha, error: "Review-body read failed." },
+    };
+    assert.equal(taskPresentation(pr, "copilot_review", true).label, "Status unknown");
+    assert.equal(taskPresentation(pr, "copilot_review", true).disabled, false);
+});
+
 test("live action evidence overrides completed results without replacing active workflow state", () => {
     const pr = {
         ...normalizePull(pull(), repo, state(), account), tasks: Object.keys(KIND_LABELS), actionBlock: null,
@@ -261,7 +318,10 @@ test("live action evidence overrides completed results without replacing active 
     pr.evidence = normalizeEvidence(detail({ conflicts: "PASSED", checks: [check()] }), sha);
     assert.equal(actionEvidence(pr, "pr_conflict_resolver").unnecessary, true);
     assert.equal(taskPresentation(pr, "ci_fix", true).disabled, true);
-    assert.equal(taskPresentation(pr, "copilot_review", true).disabled, false);
+    assert.equal(taskPresentation(pr, "copilot_review", true).disabled, true);
+    pr.phase = { kind: "copilot_review", stage: "running", sha };
+    assert.equal(taskPresentation(pr, "copilot_review", true).label, "Running");
+    assert.equal(taskPresentation(pr, "copilot_review", true).busy, true);
     pr.evidence.sha = "f".repeat(40);
     assert.equal(taskPresentation(pr, "ci_fix", true).disabled, false);
     assert.equal(taskPresentation(pr, "ci_fix", true).label, "Status unknown");
@@ -280,10 +340,14 @@ test("failed live evidence remains unknown rather than falling back to saved no-
     assert.match(result.prWarnings.join(" "), /Live status unavailable/);
 });
 
-test("fresh conflict and CI preflight rejects unnecessary tasks after an enabled snapshot", async () => {
-    for (const kind of ["pr_conflict_resolver", "ci_fix"]) {
+test("fresh conflict, CI and Copilot preflight rejects unnecessary tasks after an enabled snapshot", async () => {
+    for (const kind of ["pr_conflict_resolver", "ci_fix", "copilot_review"]) {
         const c = controller();
-        await c.canvas.refresh();
+        c.github.pullEvidence = async () => new Map([[12, {
+            detail: detail({ checks: [check("FAILURE")], threads: [thread()] }),
+        }]]);
+        const snapshot = await c.canvas.refresh();
+        assert.equal(taskPresentation(snapshot.prs[0], kind, true).disabled, false);
         c.github.pullEvidence = async () => new Map([[12, { detail: detail({ conflicts: "PASSED", checks: [check()] }) }]]);
         await assert.rejects(c.canvas.launch({ target, kind, confirmed: true }), /unnecessary/);
         assert.equal(c.calls.filter((call) => typeof call === "object").length, 0);
@@ -296,27 +360,42 @@ test("fresh conflict and CI preflight rejects unnecessary tasks after an enabled
     assert.equal(c.calls.find((call) => typeof call === "object").loop_kind, "pr_conflict_resolver");
 });
 
-test("live evidence batches PRs and paginates checks and threads before claiming clear", async () => {
+test("new review-body feedback can enable a Copilot launch after a no-feedback snapshot", async () => {
+    const c = controller();
+    const snapshot = await c.canvas.refresh();
+    assert.equal(taskPresentation(snapshot.prs[0], "copilot_review", true).disabled, true);
+    c.github.pullEvidence = async () => new Map([[12, {
+        detail: detail({ reviews: [review({ body: "Fix the missing input guard." })] }),
+    }]]);
+    await c.canvas.launch({ target, kind: "copilot_review", confirmed: true });
+    assert.equal(c.calls.find((call) => typeof call === "object").loop_kind, "copilot_review");
+});
+
+test("live evidence batches PRs and paginates checks, threads and reviews before claiming clear", async () => {
     const queries = [];
     const first = detail({ checks: [check("CANCELLED")] });
     first.commits.nodes[0].commit.statusCheckRollup.contexts.pageInfo = connection([], true).pageInfo;
     first.reviewThreads.pageInfo = connection([], true).pageInfo;
     first.reviewThreads.nodes = [thread({ isResolved: true })];
+    first.reviews = connection([review()], true);
     const github = new GitHub(async (args) => {
         const query = args.find((arg) => arg.startsWith("query="));
         queries.push(query);
         if (!query.includes("after:")) return response({ data: { repository: { pr12: first, pr13: detail({ number: 13 }) } } });
         const more = query.includes("reviewThreads")
             ? { number: 12, headRefOid: sha, reviewThreads: connection([thread()]) }
-            : detail({ checks: [check("SUCCESS", { databaseId: 2 }), check("FAILURE", { name: "Build" })] });
+            : query.includes("reviews(")
+                ? { number: 12, headRefOid: sha, reviews: connection([review({ body: "Fix the missing input guard." })]) }
+                : detail({ checks: [check("SUCCESS", { databaseId: 2 }), check("FAILURE", { name: "Build" })] });
         return response({ data: { repository: { pullRequest: more } } });
     });
     const result = await github.pullEvidence(repo, [{ number: 12, sha }, { number: 13, sha }]);
-    assert.equal(queries.length, 3);
+    assert.equal(queries.length, 4);
     assert.ok(queries[0].includes("pr12:") && queries[0].includes("pr13:"));
     assert.equal(normalizeEvidence(result.get(12).detail, sha).ci, "failing");
     assert.equal(normalizeEvidence(result.get(12).detail, sha).failing, 1);
     assert.equal(normalizeEvidence(result.get(12).detail, sha).copilotThreads, 1);
+    assert.equal(normalizeEvidence(result.get(12).detail, sha).copilotBodies, 1);
     assert.equal(result.get(13).error, undefined);
 });
 

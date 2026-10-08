@@ -1270,7 +1270,7 @@ test("every task dispatches directly on click and locks duplicate and competing 
 test("live action hints use amber, explain effects and disable only confirmed unnecessary fixes", async () => {
     const state = rendererState();
     state.prs[0].evidence = {
-        sha: state.prs[0].sha, conflicts: "yes", ci: "failing", failing: 2, copilotThreads: 1,
+        sha: state.prs[0].sha, conflicts: "yes", ci: "failing", failing: 2, copilotThreads: 1, copilotBodies: 0,
     };
     const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
     const buttons = () => nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid").children;
@@ -1288,7 +1288,12 @@ test("live action hints use amber, explain effects and disable only confirmed un
     renderer.render(state);
     assert.equal(button("pr_conflict_resolver").disabled, true);
     assert.equal(button("ci_fix").disabled, true);
+    assert.equal(button("copilot_review").disabled, true);
+    assert.equal(button("copilot_review")["aria-label"], "Address Copilot feedback: No Copilot feedback");
+    Object.assign(state.prs[0].evidence, { copilotBodies: 1 });
+    renderer.render();
     assert.equal(button("copilot_review").disabled, false);
+    assert.equal(button("copilot_review")["data-tone"], "needed");
     assert.match(button("pr_conflict_resolver").title, /unnecessary/);
     state.prs[0].evidence = { sha: state.prs[0].sha, error: "Status read failed." };
     renderer.render(state);
@@ -1347,7 +1352,7 @@ test("PR headings put Draft and Approved after the title and the other author's 
 
 test("PR cards put status in task buttons and keep saved metadata in bottom troubleshooting details", async () => {
     const state = rendererState();
-    state.prs[0].evidence = { sha: state.prs[0].sha, conflicts: "no", ci: "passing", copilotThreads: 0 };
+    state.prs[0].evidence = { sha: state.prs[0].sha, conflicts: "no", ci: "passing", copilotThreads: 0, copilotBodies: 0 };
     Object.assign(state.prs[0], {
         waitingSince: 2000000, dashboardStatus: "current",
         ciFailing: 0, ciPending: 0, conflicts: "no", reviewers: [{ login: "laurit", approved: true }],

@@ -18,6 +18,9 @@ const THREAD_FIELDS = `
     isResolved isOutdated comments(first: 1) {
         nodes { author { login __typename ... on Bot { id } } pullRequestReview { state } }
     }`;
+const REVIEW_FIELDS = `
+    author { login __typename ... on Bot { id } }
+    state body submittedAt commit { oid }`;
 const EVIDENCE_FIELDS = `
     number headRefOid
     mergeRequirements { conditions { __typename result } }
@@ -30,6 +33,10 @@ const EVIDENCE_FIELDS = `
     reviewThreads(first: 100) {
         pageInfo { hasNextPage endCursor }
         nodes { ${THREAD_FIELDS} }
+    }
+    reviews(first: 100) {
+        pageInfo { hasNextPage endCursor }
+        nodes { ${REVIEW_FIELDS} }
     }`;
 
 function connection(value) {
@@ -368,9 +375,11 @@ export class GitHub {
                             throw new GitHubError("Live CI status does not match the PR head.");
                         }
                         const threads = connection(detail.reviewThreads);
+                        const reviews = connection(detail.reviews);
                         const checks = commit.statusCheckRollup === null ? null : connection(commit.statusCheckRollup?.contexts);
                         const pages = await Promise.allSettled([
                             this.completeConnection(repo, pr, threads, "threads"),
+                            this.completeConnection(repo, pr, reviews, "reviews"),
                             checks && this.completeConnection(repo, pr, checks, "checks"),
                         ]);
                         const failed = pages.find((page) => page.status === "rejected");
@@ -396,7 +405,12 @@ export class GitHub {
                 throw new GitHubError("Live PR status pagination is incomplete or oversized.");
             }
             cursors.add(cursor);
-            const fields = kind === "threads"
+            const fields = kind === "reviews"
+                ? `reviews(first: 100, after: ${JSON.stringify(cursor)}) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes { ${REVIEW_FIELDS} }
+                }`
+                : kind === "threads"
                 ? `reviewThreads(first: 100, after: ${JSON.stringify(cursor)}) {
                     pageInfo { hasNextPage endCursor }
                     nodes { ${THREAD_FIELDS} }
@@ -418,7 +432,8 @@ export class GitHub {
             }
             const commit = detail.commits?.nodes?.[0]?.commit;
             if (kind === "checks" && commit?.oid !== pr.sha) throw new GitHubError("Live CI pagination belongs to a different commit.");
-            const page = connection(kind === "threads" ? detail.reviewThreads : commit?.statusCheckRollup?.contexts);
+            const page = connection(kind === "reviews" ? detail.reviews :
+                kind === "threads" ? detail.reviewThreads : commit?.statusCheckRollup?.contexts);
             size += Buffer.byteLength(JSON.stringify(page.nodes));
             if (size > MAX_RESPONSE) throw new GitHubError("Live PR status exceeds the dashboard size limit.");
             value.nodes.push(...page.nodes);

@@ -283,7 +283,7 @@ export class PrDashboard extends Dashboard {
             const blocked = actionBlock(current.pr, current.viewer, current.phase, true, null);
             if (blocked) throw new Error(blocked);
             if (!taskChoices(current.pr, current.viewer).includes(input.kind)) throw new Error("This task is not eligible for the PR's author.");
-            if (["pr_conflict_resolver", "ci_fix"].includes(input.kind)) {
+            if (["pr_conflict_resolver", "ci_fix", "copilot_review"].includes(input.kind)) {
                 const read = (await this.github.pullEvidence(current.pr.repo, [current.pr])).get(current.pr.number);
                 if (!read?.detail) throw new Error(read?.error ?? "Live action status is unavailable. Refresh before launching.");
                 current.pr.evidence = normalizeEvidence(read.detail, current.pr.sha);

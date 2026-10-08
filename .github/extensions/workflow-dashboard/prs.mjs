@@ -2,6 +2,8 @@ import { KIND_LABELS } from "./kinds.mjs";
 import { LAUNCH_OWNER_ID } from "./repositories.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
+const SUBMITTED_REVIEWS = new Set(["COMMENTED", "APPROVED", "CHANGES_REQUESTED"]);
+const copilot = (author) => author?.__typename === "Bot" && author.id === "BOT_kgDOCnlnWA";
 const ROUTES = {
     approver: "Waiting on reviewers", author: "Waiting on authors",
     maintainer: "Waiting on maintainers", "transient-failure": "Dashboard retrieval failed",
@@ -81,6 +83,18 @@ export function taskChoices(pr, viewer) {
     return Object.keys(KIND_LABELS).filter((kind) => kind === "pr_review" || pr.mine);
 }
 
+function hasCopilotBodyFeedback(body) {
+    if (!body.trim()) return false;
+    const summary = body.replaceAll("\r\n", "\n")
+        .replace(/\n\n---\n\nGive feedback about Copilot approvals in \[this survey\]\(https:\/\/[^\s()<>]+\) to enter a drawing for a \$[0-9]+ gift card\.\n?$/, "")
+        .replace(/\n\n\u{1f9e0} \*\*Review effort:\*\* Balanced\n?$/u, "")
+        .replace(/\n\n<details>\n<summary><strong>What changed in this PR<\/strong><\/summary>\n\n(?:(?!<\/?details[>\s])[\s\S])+\n<\/details>(?=\n|$)/, "")
+        .replace(/\n\n<details>\n<summary><strong>(?:Resolved since last review \([1-9][0-9]*\)|[1-9][0-9]* resolved since last review)<\/strong><\/summary>\n\n(?:- (?:<picture>(?:<source [^<>\n]+>)+<img [^<>\n]+><\/picture> )?\[[^\[\]<>\n]+\]\(#discussion_r[1-9][0-9]*\)\n)+<\/details>\n?$/, "");
+    const heading = String.raw`### (?:\u{1f7e2} Approval recommended|\u{1f535} Needs a closer look)\n\n[^\n<>#*]+\n\n`;
+    const noFindings = new RegExp(String.raw`^<!-- ccr-overview-v2 -->\n\n(?:${heading}\*\*0 open findings\*\*|## Copilot review overview\n\n${heading}\*\*Review effort:\*\* Balanced  \n\*\*Findings:\*\* None)\n?$`, "u");
+    return !noFindings.test(summary);
+}
+
 export function normalizeEvidence(detail, sha) {
     if (detail?.headRefOid !== sha || !Object.hasOwn(detail, "mergeRequirements") ||
         detail.mergeRequirements !== null && !Array.isArray(detail.mergeRequirements?.conditions)) {
@@ -145,12 +159,25 @@ export function normalizeEvidence(detail, sha) {
             throw new Error("Live review thread contains incomplete root-comment data.");
         }
         const root = thread.comments.nodes[0];
-        if (!thread.isResolved && root.author?.__typename === "Bot" &&
-            root.author.id === "BOT_kgDOCnlnWA" &&
-            ["COMMENTED", "APPROVED", "CHANGES_REQUESTED"].includes(root.pullRequestReview?.state)) copilotThreads++;
+        if (!thread.isResolved && copilot(root.author) &&
+            SUBMITTED_REVIEWS.has(root.pullRequestReview?.state)) copilotThreads++;
+    }
+    const reviews = detail.reviews;
+    if (!Array.isArray(reviews?.nodes) || reviews.pageInfo?.hasNextPage !== false) {
+        throw new Error("Live Copilot review-body status is incomplete.");
+    }
+    let copilotBodies = 0;
+    for (const review of reviews.nodes) {
+        if (!review || typeof review.state !== "string") throw new Error("Live review state is incomplete.");
+        if (!copilot(review.author) || !SUBMITTED_REVIEWS.has(review.state)) continue;
+        if (!review.submittedAt || typeof review.body !== "string") {
+            throw new Error("Live Copilot review body is incomplete.");
+        }
+        if (review.commit?.oid === sha &&
+            (review.state === "CHANGES_REQUESTED" || hasCopilotBodyFeedback(review.body))) copilotBodies++;
     }
     return {
-        sha, conflicts, copilotThreads, failing, pending,
+        sha, conflicts, copilotThreads, copilotBodies, failing, pending,
         ci: failing ? "failing" : pending ? "pending" : total && !unknown ? "passing" : "unknown",
     };
 }
@@ -174,7 +201,13 @@ export function actionEvidence(pr, kind) {
     }
     if (evidence.copilotThreads) return result("Open Copilot threads",
         `${evidence.copilotThreads} unresolved Copilot review thread(s).`, "needed");
-    return result("Run", "No open Copilot-rooted threads detected. This is not proof of review clearance.");
+    if (!Number.isSafeInteger(evidence.copilotBodies) || evidence.copilotBodies < 0) {
+        return result("Status unknown", "Live Copilot review-body status is unavailable. Refresh before deciding whether feedback needs attention.", "unknown");
+    }
+    if (evidence.copilotBodies) return result("Copilot review-body feedback",
+        `${evidence.copilotBodies} current-head Copilot review ${evidence.copilotBodies === 1 ? "body" : "bodies"} may require attention.`, "needed");
+    return result("No Copilot feedback",
+        "No unresolved Copilot threads or current-head review-body feedback. Addressing feedback is unnecessary; this is not proof of review clearance.", "idle", true);
 }
 
 export function actionBlock(pr, viewer, phase, ready, dispatch) {
