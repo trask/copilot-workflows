@@ -53,9 +53,9 @@ sandbox:
     version: v0.28.49
     runtime: docker
     images:
-      agent: ghcr.io/github/gh-aw-firewall/agent:0.28.49@sha256:0041ab94c9c3e190fbd851add7dd46bf950e987322ca2bf20e9fadb5803e94e7
+      agent: ghcr.io/github/gh-aw-firewall/agent:0.28.49@sha256:39f923c51e2790a2a00085959bf8c31a06a23fb3d7fd463f704d7d41291425b3
       apiProxy: ghcr.io/github/gh-aw-firewall/api-proxy:0.28.49@sha256:ef6d61dac70d98389384c3a760882931d20310a45b908f30dd2cc0ebf36f1b39
-      squid: ghcr.io/github/gh-aw-firewall/squid:0.28.49@sha256:39f923c51e2790a2a00085959bf8c31a06a23fb3d7fd463f704d7d41291425b3
+      squid: ghcr.io/github/gh-aw-firewall/squid:0.28.49@sha256:0041ab94c9c3e190fbd851add7dd46bf950e987322ca2bf20e9fadb5803e94e7
 network:
   allowed:
     - github.com
