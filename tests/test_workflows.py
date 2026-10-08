@@ -191,6 +191,23 @@ class WorkflowTests(unittest.TestCase):
         for name in ("result.json", "candidate.patch", "diagnostics.txt"):
             self.assertIn(name, staging)
 
+    def test_completed_no_change_investigations_do_not_require_builds(self):
+        worker = (Path(__file__).resolve().parents[1] /
+                  ".github" / "workflows" / "copilot-worker.md").read_text(encoding="utf-8")
+        contract = worker.split("For `pr_simplify` and `pr_consistency`,", 1)[1].split(
+            "\nAll new results", 1)[0]
+        for rule in ("return `no_change` with empty\npatch and batches",
+                     "Builds and tests are not prerequisites",
+                     "do not run them solely to validate unchanged code",
+                     "check failure does not turn a completed no-change investigation into `blocked`",
+                     "Record any attempted checks and their failures",
+                     "a check needed to decide whether a change qualifies"):
+            self.assertIn(rule, contract)
+        self.assertIn("When source-changing tasks make edits,\n"
+                      "run appropriate existing repository checks", worker)
+        self.assertIn("The `copilot_review` and `self_review` loops also run checks "
+                      "on no-change passes.", worker)
+
     def test_publisher_routing_exposes_names_and_presence_only_outside_live_job(self):
         root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
         coordinator = (root / "coordinator.yml").read_text(encoding="utf-8")

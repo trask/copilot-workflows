@@ -225,8 +225,9 @@ Use the inherited dedicated `/tmp/review-loop-worker-home` HOME for target comma
 The caches start empty and are not shared with
 other jobs or restored from Actions caches. Use existing build tooling and checks from
 the repository. Only the configured dependency domains are reachable. Missing tools,
-unsupported setup, or blocked dependencies are explicit failed or blocked outcomes,
-not a reason to invent passing validation. Do not assume every language is installed.
+unsupported setup, or blocked dependencies must be recorded explicitly, never as
+passing validation. If they prevent the required investigation or checks for a
+candidate change, report `blocked`. Do not assume every language is installed.
 
 Require the trusted request's `protocol` to be `reviewable-v1`. There is no alternate
 worker result contract. For `copilot_review`, investigate every frozen finding, including complete review bodies and hidden details.
@@ -320,11 +321,21 @@ path-and-line citations. Explain necessary deviations
 and uncertainty. Fix only avoidable differences. Preserve the report even when no
 fix qualifies. Outcome is `fixes`, `no_change`, or `blocked`.
 
+For `pr_simplify` and `pr_consistency`, complete the investigation before deciding
+whether to edit. If it finds no qualifying change, return `no_change` with empty
+patch and batches. Builds and tests are not prerequisites for that no-change result;
+do not run them solely to validate unchanged code. A missing SDK or an optional
+check failure does not turn a completed no-change investigation into `blocked`.
+Record any attempted checks and their failures in diagnostics without claiming
+passing validation or clean-review clearance. An incomplete investigation, including
+a check needed to decide whether a change qualifies, still reports `blocked`.
+
 All new results use the common schema/request_digest/outcome/batches fields and only
 their task-specific fields above. Do not add external findings or invent commits.
-Description/reviewer do not run target code. Source-changing tasks choose appropriate
-existing repository checks and record actual results in diagnostics. Single-pass
-completion is not clean-review clearance; resulting target CI stays separate.
+Description/reviewer do not run target code. When source-changing tasks make edits,
+run appropriate existing repository checks and record actual results in diagnostics.
+The `copilot_review` and `self_review` loops also run checks on no-change passes.
+Single-pass completion is not clean-review clearance; resulting target CI stays separate.
 
 Repository configuration and instruction files, executable files, binary files,
 symlinks and submodule pointers may be changed when warranted by the task.

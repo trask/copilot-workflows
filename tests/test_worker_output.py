@@ -50,6 +50,21 @@ class WorkerOutputTests(unittest.TestCase):
             with self.assertRaisesRegex(Rejected, "Metadata outcome contradicts"):
                 worker_output.check_output(req, Path(directory))
 
+    def test_no_change_preserves_optional_build_failure_diagnostics(self):
+        for kind in ("pr_simplify", "pr_consistency"):
+            req = task_request(kind)
+            value = result(req)
+            diagnostics = (b"Full investigation found no qualifying change.\n"
+                           b"Optional Gradle compilation exited 1: invalid source release: 21.\n"
+                           b"Available JDK is 17; no compilation or CI success is claimed.\n")
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                self.files(directory, value)
+                Path(directory, "diagnostics.txt").write_bytes(diagnostics)
+                worker_output.check_output(req, Path(directory))
+                self.assertEqual(canonical(value), Path(directory, "result.json").read_bytes())
+                self.assertEqual(diagnostics, Path(directory, "diagnostics.txt").read_bytes())
+                self.assertEqual(b"", Path(directory, "candidate.patch").read_bytes())
+
     def test_patch_spans_are_checked_without_source_or_git_execution(self):
         req = task_request("pr_simplify")
         value = result(req, "fixes", GOOD_PATCH)
