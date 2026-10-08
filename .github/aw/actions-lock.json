@@ -5,6 +5,11 @@
       "version": "11d5960a326750d5838078e36cf38b85af677262",
       "sha": "11d5960a326750d5838078e36cf38b85af677262"
     },
+    "actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961": {
+      "repo": "actions/setup-java",
+      "version": "b6effb05e454b25005698d916606bdc6ffcbf961",
+      "sha": "b6effb05e454b25005698d916606bdc6ffcbf961"
+    },
     "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02": {
       "repo": "actions/upload-artifact",
       "version": "ea165f8d65b6e75b540449e92b4886f43607fa02",

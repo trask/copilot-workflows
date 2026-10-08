@@ -106,6 +106,20 @@ class WorkflowTests(unittest.TestCase):
                 runpy.run_path(str(script), run_name="__main__")
             prepare.assert_not_called()
 
+    def test_java_checks_use_preinstalled_runtime_and_writable_gradle_home(self):
+        root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+        worker = (root / "copilot-worker.md").read_text(encoding="utf-8")
+        compiled = (root / "copilot-worker.lock.yml").read_text(encoding="utf-8")
+        for text in (worker, compiled):
+            with self.subTest(compiled=text is compiled):
+                self.assertIn("GRADLE_USER_HOME: /tmp/review-loop-worker-home/.gradle", text)
+                self.assertIn("actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961", text)
+                self.assertIn("distribution: temurin", text)
+                self.assertIn('java-version: "25"', text)
+                self.assertLess(text.index("Install Java runtime for sandbox checks"),
+                                text.index("Prepare fresh writable sandbox home"))
+        self.assertIn("preserve AWF's `JAVA_TOOL_OPTIONS` proxy settings", worker)
+
     def test_launch_titles_identify_task_and_target_without_changing_tick_identity(self):
         coordinator = (Path(__file__).resolve().parents[1] /
                        ".github" / "workflows" / "coordinator.yml").read_text(encoding="utf-8")

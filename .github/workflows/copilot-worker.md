@@ -47,6 +47,7 @@ engine:
   env:
     AWF_CHROOT_IDENTITY_HOME: /tmp/review-loop-worker-home
     XDG_CACHE_HOME: /tmp/review-loop-worker-home/.cache
+    GRADLE_USER_HOME: /tmp/review-loop-worker-home/.gradle
     COPILOT_PROVIDER_MODEL_ID: gpt-6.1-sol
     COPILOT_PROVIDER_WIRE_API: responses
 sandbox:
@@ -117,6 +118,11 @@ steps:
       PR: ${{ inputs.pr }}
       TARGET_REPO: ${{ inputs.repo }}
     run: python3 -m loop.cli prepare
+  - name: Install Java runtime for sandbox checks
+    uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+    with:
+      distribution: temurin
+      java-version: "25"
   - name: Prepare fresh writable sandbox home
     run: python3 -m loop.worker_home
 pre-agent-steps:
@@ -229,12 +235,16 @@ AWF does not make malicious build scripts safe to run with credentials; never ex
 to test commands. Run only narrow relevant formatting and tests, not CI repair loops.
 
 Use the inherited dedicated `/tmp/review-loop-worker-home` HOME for target commands.
+Java 25 is installed before sandbox execution. Use the inherited `JAVA_HOME` and
+`GRADLE_USER_HOME`; preserve AWF's `JAVA_TOOL_OPTIONS` proxy settings.
 The caches start empty and are not shared with
 other jobs or restored from Actions caches. Use existing build tooling and checks from
 the repository. Only the configured dependency domains are reachable. Missing tools,
 unsupported setup, or blocked dependencies must be recorded explicitly, never as
 passing validation. If they prevent the required investigation or checks for a
 candidate change, report `blocked`. Do not assume every language is installed.
+Bound check commands and reserve time to write the three required output files
+before the worker's 20-minute execution limit, including when checks are blocked.
 
 Require the trusted request's `protocol` to be `reviewable-v1`. There is no alternate
 worker result contract. For `copilot_review`, investigate every frozen finding, including complete review bodies and hidden details.

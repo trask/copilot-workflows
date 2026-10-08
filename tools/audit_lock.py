@@ -40,8 +40,10 @@ def audit():
     assert "--exclude-env COPILOT_GITHUB_TOKEN" in text
     assert "SOURCE_READ_TOKEN" not in agent_job
     for setting in ("AWF_CHROOT_IDENTITY_HOME: /tmp/review-loop-worker-home",
-                    "XDG_CACHE_HOME: /tmp/review-loop-worker-home/.cache"):
+                    "XDG_CACHE_HOME: /tmp/review-loop-worker-home/.cache",
+                    "GRADLE_USER_HOME: /tmp/review-loop-worker-home/.gradle"):
         assert setting in text
+    assert text.index("Install Java runtime for sandbox checks") < text.index("id: agentic_execution")
     assert text.index("Prepare fresh writable sandbox home") < text.index("id: agentic_execution")
     assert "run: python3 -m loop.worker_home" in text
     assert "loop.validation" not in text
