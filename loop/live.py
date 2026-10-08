@@ -570,7 +570,7 @@ def watch_self(store, name, state, read, now):
         if request.get("launch_run"):
             fresh["launch_run"] = request["launch_run"]
         value = checkpoint(fresh)
-        value.update(stage="source_pending", generation=state["generation"] + 1,
+        value.update(stage="source_pending" if staged_source(fresh) else "ready", generation=state["generation"] + 1,
                      phase=state.get("phase", publication["phase"]), iteration=state["iteration"],
                      effects=[], publications=state["publications"],
                      seen_findings=[], seen_inline_findings=[])
@@ -631,7 +631,8 @@ def watch_ci_fix(store, name, state, read, now):
     if state["iteration"] >= pipeline_budget(state):
         return cas(store, name, state, stage="exhausted", reason="CI_failure_pipeline_budget", ci=ci)
     if (state["iteration"] == 0 and ci == request["ci_evidence"]):
-        return cas(store, name, state, stage="source_pending", ci=ci, next_check_at=now)
+        return cas(store, name, state, stage="source_pending" if staged_source(request) else "ready",
+                   ci=ci, next_check_at=now)
     fresh = freeze(read, request["pr"], execution_revision(state), now, request["repo"],
                    request["authorized_actor_id"], loop_kind="ci_fix")
     inherit_pin(fresh, state)
@@ -645,7 +646,7 @@ def watch_ci_fix(store, name, state, read, now):
     if request.get("launch_run"):
         fresh["launch_run"] = request["launch_run"]
     value = checkpoint(fresh)
-    value.update(stage="source_pending", generation=state["generation"] + 1,
+    value.update(stage="source_pending" if staged_source(fresh) else "ready", generation=state["generation"] + 1,
                  phase=state["phase"], iteration=state["iteration"], publications=state["publications"],
                  effects=[], ci=ci, ci_reruns=state.get("ci_reruns", []),
                  ci_warnings=state.get("ci_warnings", []))

@@ -144,7 +144,7 @@ class SelfReviewTests(unittest.TestCase):
         store = MemoryState()
         name, state = start(store, FakeAPI(), req, "", 0, True,
                             "fine_grained_pat", [CI_CHECK], True, 100)
-        self.assertEqual("source_pending", state["stage"])
+        self.assertEqual("ready", state["stage"])
         state["source"] = {"durably": "bound"}
         state["stage"] = "ready"
         store.entries[name] = state
@@ -216,13 +216,13 @@ class SelfReviewTests(unittest.TestCase):
                 patch("loop.cli.API", return_value=FakeAPI()), \
                 patch("loop.cli.State", return_value=store), \
                 patch("loop.cli.target_api", return_value=read), \
-                patch("loop.cli.stage_source") as source, patch("loop.cli.summary"), \
+                patch("loop.cli.dispatch") as dispatched, patch("loop.cli.summary"), \
                 patch("loop.cli.time.time", return_value=100):
             cli_main()
-        source.assert_called_once()
+        dispatched.assert_called_once()
         state = next(iter(store.entries.values()))
         self.assertEqual("self_review", loop_kind(state["request"]))
-        self.assertEqual("source_pending", state["stage"])
+        self.assertEqual("ready", state["stage"])
         self.assertEqual(88, state["request"]["launch_run"]["id"])
 
     def test_publication_time_is_refreshed_after_slow_freeze(self):
@@ -243,15 +243,15 @@ class SelfReviewTests(unittest.TestCase):
                 patch("loop.cli.target_api", return_value=read), \
                 patch("loop.cli.freeze", side_effect=lambda *args, **kwargs: freeze(
                     *args, now=120, **kwargs)), \
-                patch("loop.cli.stage_source") as source, patch("loop.cli.summary"), \
+                patch("loop.cli.dispatch") as dispatched, patch("loop.cli.summary"), \
                 patch("loop.cli.time.time", side_effect=[100, 120, 120]):
             cli_main()
-        source.assert_called_once()
+        dispatched.assert_called_once()
         state = next(iter(store.entries.values()))
         self.assertEqual(120, state["request"]["frozen_at"])
         self.assertEqual(120, state["request"]["publication"]["authorized_at"])
         self.assertEqual(7320, state["request"]["deadline"])
-        self.assertEqual("source_pending", state["stage"])
+        self.assertEqual("ready", state["stage"])
 
     def test_worker_semantics_are_exact_digest_bound_and_separate(self):
         req = self_request()
@@ -292,7 +292,7 @@ class SelfReviewTests(unittest.TestCase):
             result = advance(store, name, result, Mock(), read, publisher, 100)
         push.assert_called_once()
         self.assertEqual([], publisher.posts)
-        self.assertEqual("source_pending", result["stage"])
+        self.assertEqual("ready", result["stage"])
         self.assertEqual(candidate["commit"], result["request"]["frozen_sha"])
         self.assertEqual(MERGE_BASE, result["request"]["merge_base_sha"])
         self.assertEqual(1, result["iteration"])
@@ -370,7 +370,7 @@ class SelfReviewTests(unittest.TestCase):
         store, name = stored(state)
         read.pr["base"]["sha"] = "7" * 40
         result = advance(store, name, state, Mock(), read, Publisher(read), 100)
-        self.assertEqual("source_pending", result["stage"])
+        self.assertEqual("ready", result["stage"])
         self.assertEqual(BASE, result["request"]["base_sha"])
         self.assertEqual(MERGE_BASE, result["request"]["merge_base_sha"])
 
@@ -403,7 +403,7 @@ class SelfReviewTests(unittest.TestCase):
         store, name = stored(state)
         read.base_tip = "f" * 40
         result = advance(store, name, state, Mock(), read, Publisher(read), 100)
-        self.assertEqual("source_pending", result["stage"])
+        self.assertEqual("ready", result["stage"])
         self.assertEqual(read.base_tip, result["request"]["base_sha"])
         self.assertEqual(state["expected_sha"], result["request"]["frozen_sha"])
         self.assertEqual(state["request"]["deadline"], result["request"]["deadline"])

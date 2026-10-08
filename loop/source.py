@@ -132,54 +132,61 @@ def snapshot_identity(directory, sha, request=None):
     return git(["rev-parse", "snapshot^{tree}"], directory).decode().strip(), count
 
 
+def acquire_source(directory, request, fetch=None):
+    public_request(request)
+    require(int(time.time()) < request["deadline"], "Source acquisition deadline passed")
+    git_dir = git(["rev-parse", "--git-dir"], directory).decode().strip()
+    shallow_path = Path(directory) / git_dir / "shallow"
+    if fetch is None:
+        if loop_kind(request) == "pr_conflict_resolver":
+            depth = 256
+            while True:
+                public_fetch(directory, request, request["repo"], request["base_sha"], depth=depth)
+                git(["update-ref", "refs/heads/incoming", request["base_sha"]], directory)
+                public_fetch(directory, request, depth=depth)
+                if all(request["merge_base_sha"].encode() in git(
+                        ["rev-list", request[key]], directory).splitlines()
+                       for key in ("frozen_sha", "base_sha")):
+                    break
+                require(shallow_path.exists(), "Frozen merge base is not reachable")
+                depth *= 2
+            git(["update-ref", "refs/heads/review-base", request["merge_base_sha"]], directory)
+            revisions = git(["rev-list", "--boundary", request["frozen_sha"],
+                             request["base_sha"], "^" + request["merge_base_sha"]],
+                            directory).decode().splitlines()
+            boundaries = {request["merge_base_sha"]}
+            boundaries.update(line[1:] for line in revisions if line.startswith("-"))
+            if shallow_path.exists():
+                boundaries.update(shallow_path.read_text(encoding="ascii").splitlines())
+            shallow_path.write_text("\n".join(sorted(boundaries)) + "\n", encoding="ascii")
+        elif diff_scope(request):
+            public_fetch(directory, request, request["repo"], request["merge_base_sha"])
+            require(git(["rev-parse", "FETCH_HEAD"], directory).decode().strip()
+                    == request["merge_base_sha"], "Source acquisition returned a different merge-base")
+            git(["update-ref", "refs/heads/review-base", request["merge_base_sha"]], directory)
+        if loop_kind(request) != "pr_conflict_resolver":
+            public_fetch(directory, request)
+    else:
+        fetch(directory)
+    require(git(["rev-parse", "FETCH_HEAD"], directory).decode().strip() == request["frozen_sha"],
+            "Source acquisition returned a different head")
+    git(["update-ref", "refs/heads/snapshot", request["frozen_sha"]], directory)
+    if loop_kind(request) == "pr_conflict_resolver":
+        git(["repack", "-a", "-d"], directory)
+        git(["prune", "--expire=now"], directory)
+    return snapshot_identity(directory, request["frozen_sha"], request)
+
+
 def package_source(request, generation, api, destination, fetch=None):
     require(request["schema"] == 2 and staged_source(request),
             "Staged source requires a complete public PR review scope")
-    require(int(time.time()) < request["deadline"], "Source acquisition deadline passed")
     check_target(api, request)
     destination = Path(destination).resolve()
     destination.mkdir(exist_ok=False)
     with tempfile.TemporaryDirectory(prefix="review-source-") as directory:
         git(["init", "--bare", "--quiet"], directory)
+        tree, count = acquire_source(directory, request, fetch)
         shallow_path = Path(directory, "shallow")
-        if fetch is None:
-            if loop_kind(request) == "pr_conflict_resolver":
-                depth = 256
-                while True:
-                    public_fetch(directory, request, request["repo"], request["base_sha"], depth=depth)
-                    git(["update-ref", "refs/heads/incoming", request["base_sha"]], directory)
-                    public_fetch(directory, request, depth=depth)
-                    if all(request["merge_base_sha"].encode() in git(
-                            ["rev-list", request[key]], directory).splitlines()
-                           for key in ("frozen_sha", "base_sha")):
-                        break
-                    require(shallow_path.exists(), "Frozen merge base is not reachable")
-                    depth *= 2
-                git(["update-ref", "refs/heads/review-base", request["merge_base_sha"]], directory)
-                revisions = git(["rev-list", "--boundary", request["frozen_sha"],
-                                 request["base_sha"], "^" + request["merge_base_sha"]],
-                                directory).decode().splitlines()
-                boundaries = {request["merge_base_sha"]}
-                boundaries.update(line[1:] for line in revisions if line.startswith("-"))
-                if shallow_path.exists():
-                    boundaries.update(shallow_path.read_text(encoding="ascii").splitlines())
-                shallow_path.write_text("\n".join(sorted(boundaries)) + "\n", encoding="ascii")
-            elif diff_scope(request):
-                public_fetch(directory, request, request["repo"], request["merge_base_sha"])
-                require(git(["rev-parse", "FETCH_HEAD"], directory).decode().strip()
-                        == request["merge_base_sha"], "Source acquisition returned a different merge-base")
-                git(["update-ref", "refs/heads/review-base", request["merge_base_sha"]], directory)
-            if loop_kind(request) != "pr_conflict_resolver":
-                public_fetch(directory, request)
-        else:
-            fetch(directory)
-        require(git(["rev-parse", "FETCH_HEAD"], directory).decode().strip() == request["frozen_sha"],
-                "Source acquisition returned a different head")
-        git(["update-ref", "refs/heads/snapshot", request["frozen_sha"]], directory)
-        if loop_kind(request) == "pr_conflict_resolver":
-            git(["repack", "-a", "-d"], directory)
-            git(["prune", "--expire=now"], directory)
-        tree, count = snapshot_identity(directory, request["frozen_sha"], request)
         bundle = destination / "source.bundle"
         refs = ["refs/heads/snapshot"]
         if diff_scope(request):

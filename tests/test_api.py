@@ -1,9 +1,11 @@
 import http.client
 import io
 import ssl
+import tempfile
 import unittest
 import urllib.error
 from unittest.mock import Mock, call, patch
+from pathlib import Path
 
 from loop.api import API, APIError, DeadlineReached
 from loop.policy import CENTRAL, Rejected
@@ -265,6 +267,23 @@ class APITests(unittest.TestCase):
         self.assertEqual(3, opener.return_value.open.call_count)
         self.assertEqual(2, download.call_count)
         self.assertEqual([call(1), call(2)], sleep.call_args_list)
+
+    def test_signed_logs_stream_to_local_storage_and_replace_partial_downloads_on_retry(self):
+        redirect = http_error(302)
+        redirect.headers["Location"] = "https://example.com/log?signature=secret"
+        interrupted, completed = response(), response()
+        interrupted.read.side_effect = [b"partial data", ConnectionResetError("connection reset")]
+        completed.read.side_effect = [b"complete evidence\n", b""]
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("loop.api.urllib.request.build_opener") as opener, \
+                patch("loop.api.urllib.request.urlopen", side_effect=[interrupted, completed]), \
+                patch("loop.api.time.sleep"), \
+                patch("loop.api.sys.stderr", new_callable=io.StringIO):
+            opener.return_value.open.side_effect = [redirect, redirect]
+            destination = Path(directory, "failure.log")
+            self.assertEqual(destination, API().signed_download(
+                "repos/target/repo/actions/jobs/1/logs", destination=destination))
+            self.assertEqual(b"complete evidence\n", destination.read_bytes())
 
     def test_signed_download_transport_retries_are_bounded_and_do_not_retry_certificate_errors(self):
         for reason, attempts in ((ssl.SSLEOFError("TLS connection closed"), 3),

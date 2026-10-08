@@ -127,7 +127,7 @@ def probe_target(api, number, revision, now=None, repo=None, actor_id=AUTHOR_ID,
     from loop.candidates import PROTOCOL
     return dict(target, schema=2, protocol=PROTOCOL, request_id=uuid.uuid4().hex, workflow_revision=revision,
                 frozen_at=now, frozen_at_iso=iso(now),
-                deadline=now + DEFAULTS["deadline_seconds"],
+                deadline=now + DEFAULTS["deadline_seconds"], input_mode="direct",
                 budgets=DEFAULTS.copy(), baseline_review_ids=[], findings=[], loop_kind=loop_kind)
 
 
@@ -137,9 +137,6 @@ def freeze(api, number, revision, now=None, repo=None, actor_id=AUTHOR_ID,
     path = f"repos/{repo}/pulls/{number}"
     if loop_kind != "copilot_review":
         check_target(api, request)
-        if loop_kind != "self_review":
-            from loop.recommendations import collect_diff
-            request["pr_diff"] = collect_diff(api, request)
         if loop_kind == "ci_fix":
             from loop.ci import collect
             from loop.reviews import select_checks

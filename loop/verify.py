@@ -15,6 +15,7 @@ from loop.coordinator import run_binding
 from loop.candidates import current_request, message, patches
 from loop.policy import (CENTRAL, REPO, Rejected, candidate_outcome, commit_author, diff_scope, digest, loop_kind,
                          private_source, require, staged_source, worker_result)
+from loop.policy import direct_inputs
 
 FILES = {"result.json", "candidate.patch", "diagnostics.txt"}
 
@@ -156,6 +157,8 @@ def patch_sections(patch, directory=None):
 def reconstruct(files, request, fetch_source=None, package_dir=None):
     require(request["schema"] == 2, "Legacy candidates are read-only")
     current_request(request)
+    require(not direct_inputs(request) or loop_kind(request) in {"copilot_review", "self_review"}
+            or "inputs" in request, "Task inputs must be independently acquired before verification")
     result = parse_json(files["result.json"])
     worker_result(result, request)
     if loop_kind(request) == "pr_description":
@@ -177,11 +180,15 @@ def reconstruct(files, request, fetch_source=None, package_dir=None):
     with tempfile.TemporaryDirectory(prefix="review-verify-") as directory:
         git(["init", "--bare", "--quiet"], directory)
         if fetch_source is None:
-            require(request["schema"] == 2 and REPO.fullmatch(request["head_repo"])
-                    and not staged_source(request),
-                    "Review source requires a bound trusted snapshot, never public fallback")
-            git(["fetch", "--quiet", "--no-auto-maintenance", "--depth=1", "--no-tags",
-                 "https://github.com/" + request["head_repo"] + ".git", request["frozen_sha"]], directory)
+            if direct_inputs(request):
+                from loop.source import acquire_source
+                acquire_source(directory, request)
+            else:
+                require(request["schema"] == 2 and REPO.fullmatch(request["head_repo"])
+                        and not staged_source(request),
+                        "Review source requires a bound trusted snapshot, never public fallback")
+                git(["fetch", "--quiet", "--no-auto-maintenance", "--depth=1", "--no-tags",
+                     "https://github.com/" + request["head_repo"] + ".git", request["frozen_sha"]], directory)
         else:
             fetch_source(directory)
         require(git(["rev-parse", "FETCH_HEAD"], directory).decode().strip()
@@ -271,7 +278,7 @@ def package_candidate(candidate, request, package_dir, directory=None):
 
 def verify_diff_source(directory, request):
     git(["read-tree", request["merge_base_sha"]], directory)
-    patch = request["pr_diff"]["text"].encode("utf-8")
+    patch = request.get("inputs", request)["pr_diff"]["text"].encode("utf-8")
     if patch:
         sections = patch_sections(patch, directory)
         binary_paths = {path for _, old, new, added, _ in sections if added is None

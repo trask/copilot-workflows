@@ -9,6 +9,7 @@ import time
 import subprocess
 import zipfile
 import shutil
+import tempfile
 from pathlib import Path
 
 from loop.api import API, APIError
@@ -19,12 +20,13 @@ from loop.publisher_auth import publisher_secret
 from loop.freeze import freeze
 from loop.policy import (AUTHOR_ID, CENTRAL, LOOP_KINDS, REQUEST, TERMINAL, Rejected, attributed_owner, canonical,
                          check_target, checkpoint_name, digest, effect_repository, eligible, loop_kind, parse_target,
-                         staged_source, publication_gate,
+                         direct_inputs, staged_source, publication_gate,
                          pipeline_budget, require, supported_checkpoint)
 from loop.state import State
 from loop.verify import artifact_metadata, git, parse_json, verify
 from loop.source import (bind_manifest, download_source, gated_request, import_source,
-                         package_source, source_metadata, target_api)
+                         acquire_source, package_source, source_metadata, target_api)
+from loop.inputs import acquire as acquire_inputs
 from loop.reviews import select_checks
 from loop.live import (STAGES as LIVE_STAGES, publication_invocation,
                        authorize_publication_reconciliation, execution_revision,
@@ -182,6 +184,7 @@ def prepare(api, store, args):
     if staged_source(request):
         source = download_source(api, state, "frozen-source")
         output("source_bundle", str(source / "source.bundle"))
+    request = acquire_inputs(target_api(api, request["repo"], request["head_repo"]), request, Path.cwd())
     require(int(time.time()) < request["deadline"], "Request deadline passed")
     Path("frozen-request.json").write_bytes(canonical(request))
     Path("frozen-digest.txt").write_text(digest(request), encoding="ascii")
@@ -219,9 +222,15 @@ def verify_pending(api, store, args):
         payload = api.artifact_zip(artifact["id"], artifact["size_in_bytes"])
         require("sha256:" + hashlib.sha256(payload).hexdigest() == artifact["digest"],
                 "Downloaded artifact differs from trusted server digest")
-        report.update(verification="verified",
-                      result=verify(payload, request, run, artifact, fetch,
-                                    package_dir="candidate-package"))
+        with tempfile.TemporaryDirectory(prefix="verification-inputs-") as directory:
+            acquired = acquire_inputs(target_api(api, request["repo"], request["head_repo"]),
+                                      request, directory)
+            if direct_inputs(request) and loop_kind(request) != "pr_description":
+                def fetch(target):
+                    acquire_source(target, request)
+            report.update(verification="verified",
+                          result=verify(payload, acquired, run, artifact, fetch,
+                                        package_dir="candidate-package"))
         if source is not None:
             shutil.copyfile(source / "source.bundle", Path("candidate-package") / "source.bundle")
             manifest_path = Path("candidate-package", "manifest.json")

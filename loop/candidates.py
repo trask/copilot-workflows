@@ -2,7 +2,7 @@
 
 import hashlib
 
-from loop.policy import bot, digest, exact, loop_kind, require
+from loop.policy import bot, digest, direct_inputs, exact, loop_kind, require
 
 PROTOCOL = "reviewable-v1"
 TRAILER = "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"
@@ -35,7 +35,11 @@ def semantic(value, request):
              "pr_consistency": {"consistency"}, "pr_conflict_resolver": {"merge"},
              "ci_fix": {"diagnoses", "rerun_run"}}.get(kind, set())
     exact(value, {"schema", "request_digest", "outcome", "batches"}
+          | ({"input_identity"} if direct_inputs(request) else set())
           | ({"findings"} if external else set()) | extra)
+    if direct_inputs(request):
+        from loop.inputs import identity
+        identity(value["input_identity"], request)
     require(type(value["schema"]) is int and value["schema"] == 2
             and value["request_digest"] == digest(request), "Wrong current worker binding")
     outcomes = ({"fixes", "no_change", "blocked"} if external else
@@ -67,7 +71,8 @@ def semantic(value, request):
             "Consistency fixes require an avoidable difference")
     if kind == "ci_fix":
         from loop.ci import diagnoses
-        diagnoses(value, request)
+        if not direct_inputs(request) or "inputs" in request:
+            diagnoses(value, request)
     if kind == "pr_conflict_resolver":
         require(not value["batches"], "Merge is not a linear code batch")
         exact(value["merge"], MESSAGE_FIELDS)

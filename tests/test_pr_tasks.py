@@ -15,13 +15,14 @@ from loop.candidates import semantic
 from loop.ci import collect, diagnoses, same_attempts
 from loop.coordinator import cancel, checkpoint, quiescent
 from loop.freeze import freeze
+from loop.inputs import acquire
 from loop.live import advance, start, watch_ci_fix, watch_single
 from loop.policy import (AUTHOR_ID, CENTRAL, LOOP_KINDS, Rejected, candidate_outcome, check_target,
                          canonical, digest, effect_repository, eligible, pipeline_budget)
 from loop.policy import iso, pipeline_limit, staged_source
 from loop.publication import PublisherAPI, authenticated_push, evidence, import_candidate
 from loop.recommendations import collect_diff, comments, description_diff, diff_anchors
-from loop.source import SourceAPI, import_source, package_source
+from loop.source import SourceAPI, acquire_source, import_source, package_source
 from loop.task_effects import confirm_task, publish_task
 from loop.revisions import revision_ref
 from loop.verify import git, reconstruct, verify
@@ -56,6 +57,8 @@ def task_request(kind):
 def result(req, outcome="no_change", patch_bytes=b""):
     value = {"schema": 2, "request_digest": digest(req), "outcome": outcome,
              "batches": [batch(patch_bytes)] if patch_bytes else []}
+    if req.get("input_mode") == "direct":
+        value["input_identity"] = req["inputs"]["identity"]
     kind = req["loop_kind"]
     if kind == "pr_description":
         value["proposal"] = dict(req["metadata"])
@@ -113,7 +116,10 @@ class TaskRead(SelfRead):
             return copy.deepcopy(self.jobs)
         return super().pages(path, key)
 
-    def signed_download(self, path, limit=None, *, log_windows=()):
+    def signed_download(self, path, limit=None, *, log_windows=(), destination=None):
+        if destination is not None:
+            Path(destination).write_bytes(self.log)
+            return Path(destination)
         return self.log
 
 
@@ -162,6 +168,21 @@ def task_state(req, value):
 
 
 class TaskContractsTests(unittest.TestCase):
+    def test_direct_inputs_bind_the_downloaded_diff_without_changing_task_identity(self):
+        req = task_request("pr_description")
+        read = TaskRead(req)
+        frozen = freeze(read, 1, REVISION, 100, FIXTURE, loop_kind="pr_description")
+        with tempfile.TemporaryDirectory() as directory:
+            acquired = acquire(read, frozen, directory)
+            self.assertEqual(digest(frozen), digest(acquired))
+            self.assertEqual(req["pr_diff"], acquired["inputs"]["pr_diff"])
+            value = result(acquired)
+            semantic(value, acquired)
+            read.diff += "\ndiff --git a/logo.png b/logo.png\nBinary files differ\n"
+            changed = acquire(read, frozen, directory)
+            with self.assertRaisesRegex(Rejected, "inputs changed"):
+                semantic(value, changed)
+
     def test_all_eight_kinds_keep_existing_default_and_exact_new_schemas(self):
         self.assertEqual(8, len(LOOP_KINDS))
         for kind in LOOP_KINDS - {"copilot_review", "self_review", "pr_conflict_resolver"}:
@@ -202,8 +223,8 @@ class TaskContractsTests(unittest.TestCase):
         frozen = freeze(read, 1, REVISION, 100, FIXTURE, loop_kind="pr_review")
         self.assertEqual(AUTHOR_ID, frozen["pr_author_id"])
         self.assertEqual(AUTHOR_ID, frozen["commit_author"]["id"])
-        self.assertEqual(req["pr_diff"], frozen["pr_diff"])
-        self.assertEqual("source_pending", start(
+        self.assertEqual(req["pr_diff"], collect_diff(read, frozen))
+        self.assertEqual("ready", start(
             MemoryState(), FakeAPI(), frozen, "", 0, True,
             "fine_grained_pat", [], True, 100)[1]["stage"])
         check_target(read, frozen)
@@ -218,7 +239,7 @@ class TaskContractsTests(unittest.TestCase):
         frozen = freeze(read, 1, REVISION, 100, FIXTURE, loop_kind="pr_review")
         self.assertEqual(999, frozen["pr_author_id"])
         self.assertEqual(req["commit_author"], frozen["commit_author"])
-        self.assertEqual(req["pr_diff"], frozen["pr_diff"])
+        self.assertEqual(req["pr_diff"], collect_diff(read, frozen))
         check_target(read, frozen)
         for kind in LOOP_KINDS - {"pr_review"}:
             with self.subTest(kind=kind), self.assertRaisesRegex(Rejected, "Wrong author"):
@@ -267,19 +288,20 @@ class TaskContractsTests(unittest.TestCase):
                 with self.assertRaisesRegex(Rejected, "ownership search is incomplete"):
                     freeze(read, 1, REVISION, 100, FIXTURE, loop_kind=kind)
 
-    def test_new_freezes_include_live_base_and_complete_actual_diff(self):
+    def test_new_tasks_bind_live_base_and_acquire_complete_diff_on_the_runner(self):
         for kind in ("pr_review", "pr_description", "pr_simplify", "pr_consistency", "pr_conflict_resolver"):
             req = task_request(kind)
             read = TaskRead(req)
             frozen = freeze(read, 1, REVISION, 100, FIXTURE, loop_kind=kind)
-            self.assertEqual(req["pr_diff"], frozen["pr_diff"])
+            self.assertNotIn("pr_diff", frozen)
+            self.assertEqual(req["pr_diff"], collect_diff(read, frozen))
             if kind == "pr_description":
                 self.assertNotIn("base_sha", frozen)
                 self.assertNotIn("merge_base_sha", frozen)
             else:
                 self.assertEqual(BASE, frozen["base_sha"])
             self.assertEqual(AUTHOR_ID, frozen["commit_author"]["id"])
-            self.assertEqual("ready" if kind == "pr_description" else "source_pending", start(
+            self.assertEqual("ready", start(
                 MemoryState(), FakeAPI(), frozen, "", 0, True, "fine_grained_pat", [], True, 100)[1]["stage"])
         read.pr["changed_files"] = 2
         with self.assertRaisesRegex(Rejected, "Incomplete"):
@@ -311,7 +333,7 @@ class TaskContractsTests(unittest.TestCase):
         read.pr["changed_files"] = 1001
         read.pages = Mock(side_effect=AssertionError("Description must not request a file inventory"))
         frozen = freeze(read, 1, REVISION, 100, FIXTURE, loop_kind="pr_description")
-        self.assertEqual(description_diff(read.diff), frozen["pr_diff"])
+        self.assertEqual(description_diff(read.diff), collect_diff(read, frozen))
         self.assertFalse(staged_source(frozen))
         self.assertFalse(any("/git/" in path or "/compare/" in path for path in read.paths))
         self.assertEqual("ready", start(
@@ -325,13 +347,17 @@ class TaskContractsTests(unittest.TestCase):
                      + "+a sufficiently long added line\n" * 10001)
         self.assertGreater(len(read.diff.encode()), 200000)
         frozen = freeze(read, 1, REVISION, 100, FIXTURE, loop_kind="pr_description")
-        self.assertEqual(read.diff, frozen["pr_diff"]["text"])
-        self.assertNotIn("anchors", frozen["pr_diff"])
+        diff = collect_diff(read, frozen)
+        self.assertEqual(read.diff, diff["text"])
+        self.assertNotIn("anchors", diff)
         self.assertEqual(5, pipeline_limit(frozen))
-        changed = copy.deepcopy(frozen)
-        changed["pr_diff"]["text"] += "changed"
-        with self.assertRaisesRegex(Rejected, "binding"):
-            pipeline_limit(changed)
+        with tempfile.TemporaryDirectory() as directory:
+            acquired = acquire(read, frozen, directory)
+            value = result(acquired)
+            acquired["inputs"]["identity"]["pr_diff_sha256"] = "0" * 64
+            value["input_identity"] = dict(value["input_identity"], pr_diff_sha256="1" * 64)
+            with self.assertRaisesRegex(Rejected, "inputs changed"):
+                semantic(value, acquired)
 
     def test_prior_description_request_binding_remains_readable(self):
         req = task_request("pr_description")
@@ -711,6 +737,29 @@ def objects(directory, texts, parents=(), subject="Commit"):
 
 
 class MergeGitTests(unittest.TestCase):
+    def test_direct_merge_verification_and_publication_import_need_no_source_artifact(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                tempfile.TemporaryDirectory() as package, \
+                tempfile.TemporaryDirectory() as imported, \
+                patch("loop.source.time.time", return_value=100):
+            req = self.context(directory)
+            diff = req.pop("pr_diff")
+            req.update(input_mode="direct", inputs={
+                "pr_diff": diff, "identity": {"pr_diff_sha256": diff["sha256"]}})
+            git(["read-tree", req["base_sha"]], directory)
+            head_blob = git(["rev-parse", req["frozen_sha"] + ":Foo.java"], directory).decode().strip()
+            git(["update-index", "--cacheinfo", "100644", head_blob, "Foo.java"], directory)
+            patch_bytes = git(["diff", "--cached", req["frozen_sha"]], directory)
+            def fetch(target):
+                acquire_source(target, req, self.copy_source(directory))
+            candidate = reconstruct(
+                {"result.json": canonical(result(req, "merge")), "candidate.patch": patch_bytes},
+                req, fetch, package)
+            self.assertEqual([req["frozen_sha"], req["base_sha"]], candidate["commits"][0]["parents"])
+            import_candidate(imported, Path(package, "candidate.bundle"), req, candidate, fetch)
+            self.assertEqual(candidate["commit"], git(
+                ["rev-parse", "candidate"], imported).decode().strip())
+
     def context(self, directory, equal=False, conflicting=False):
         git(["init", "--bare", "--quiet"], directory)
         ancestor = objects(directory, {"Foo.java": "old\n"})
@@ -1034,6 +1083,35 @@ class MergeGitTests(unittest.TestCase):
                         candidate_outcome(value, req, candidate)
 
 class CIRepairTests(unittest.TestCase):
+    def test_direct_ci_logs_stay_on_disk_and_quotes_are_independently_checked(self):
+        req, read = self.context()
+        read.log = b"x" * (2 * 1024 * 1024 - 7) + b"temporary runner network outage\n"
+        read.signed_download = Mock(wraps=read.signed_download)
+        frozen = freeze(read, 1, REVISION, 100, FIXTURE, loop_kind="ci_fix")
+        self.assertLess(len(canonical(frozen)), 10000)
+        read.signed_download.assert_not_called()
+        with tempfile.TemporaryDirectory() as directory:
+            acquired = acquire(read, frozen, directory)
+            self.assertLess(len(canonical(acquired)), 20000)
+            failure = acquired["inputs"]["ci_evidence"]["failures"][0]
+            self.assertEqual(read.log, Path(failure["log_path"]).read_bytes())
+            self.assertEqual(digest(frozen), digest(acquired))
+            value = result(acquired)
+            semantic(value, acquired)
+            value["diagnoses"][0]["evidence"] = ["fabricated failure"]
+            with self.assertRaisesRegex(Rejected, "citation"):
+                semantic(value, acquired)
+        self.assertNotIn("inputs", frozen)
+
+    def test_direct_ci_setup_stops_when_a_manual_retry_changes_the_selected_attempt(self):
+        req, read = self.context()
+        frozen = freeze(read, 1, REVISION, 100, FIXTURE, loop_kind="ci_fix")
+        read.runs[0]["run_attempt"] = 2
+        read.jobs[0]["run_attempt"] = 2
+        with tempfile.TemporaryDirectory() as directory, \
+                self.assertRaisesRegex(Rejected, "attempts or evidence changed"):
+            acquire(read, frozen, directory)
+
     def test_read_credential_cannot_download_logs_from_another_repository(self):
         source = SourceAPI("read-token", FIXTURE)
         with self.assertRaises(Rejected):
@@ -1062,7 +1140,7 @@ class CIRepairTests(unittest.TestCase):
             self.assertEqual(attempt, req["ci_evidence"]["failures"][0]["actions"]["attempt"])
             self.assertEqual("temporary runner network outage", req["ci_evidence"]["failures"][0]["evidence"])
 
-    def test_large_authoritative_ci_diff_freezes_and_keeps_its_binding(self):
+    def test_large_authoritative_ci_diff_is_acquired_without_storing_it_in_the_checkpoint(self):
         req = task_request("ci_fix")
         read = TaskRead(req)
         read.diff = ("diff --git a/Foo.java b/Foo.java\n"
@@ -1079,10 +1157,12 @@ class CIRepairTests(unittest.TestCase):
                for index in range(1000)]]
             if path.endswith("/files") else TaskRead.pages(read, path, key)))
         frozen = freeze(read, 1, REVISION, 100, FIXTURE, loop_kind="ci_fix")
-        self.assertEqual(read.diff, frozen["pr_diff"]["text"])
-        self.assertEqual(list(range(1, 11002)), frozen["pr_diff"]["anchors"]["Foo.java"])
+        diff = collect_diff(read, frozen)
+        self.assertNotIn("pr_diff", frozen)
+        self.assertEqual(read.diff, diff["text"])
+        self.assertEqual(list(range(1, 11002)), diff["anchors"]["Foo.java"])
         self.assertEqual({f"New-{index}.txt": [1] for index in range(1000)},
-                         {path: lines for path, lines in frozen["pr_diff"]["anchors"].items()
+                         {path: lines for path, lines in diff["anchors"].items()
                           if path != "Foo.java"})
         self.assertEqual(5, pipeline_limit(frozen))
 
@@ -1196,7 +1276,7 @@ class CIRepairTests(unittest.TestCase):
         store, name = stored(state)
         read.base_tip = "f" * 40
         ready = watch_ci_fix(store, name, state, read, 100)
-        self.assertEqual("source_pending", ready["stage"])
+        self.assertEqual("ready", ready["stage"])
         self.assertEqual(read.base_tip, ready["request"]["base_sha"])
         self.assertEqual(req["frozen_sha"], ready["request"]["frozen_sha"])
         self.assertEqual(req["deadline"], ready["request"]["deadline"])
@@ -1314,7 +1394,7 @@ class CIRepairTests(unittest.TestCase):
         state.update(stage="waiting_ci", report=None)
         store, name = stored(state)
         next_pass = watch_ci_fix(store, name, state, read, 100)
-        self.assertEqual("source_pending", next_pass["stage"])
+        self.assertEqual("ready", next_pass["stage"])
         self.assertEqual(req["workflow_revision"], next_pass["request"]["workflow_revision"])
         self.assertEqual(req["workflow_ref"], next_pass["request"]["workflow_ref"])
         self.assertEqual(state["phase"], next_pass["phase"])

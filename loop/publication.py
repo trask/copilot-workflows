@@ -10,6 +10,7 @@ import subprocess
 import time
 import zipfile
 from pathlib import Path
+from loop.policy import direct_inputs
 
 from loop.api import API
 from loop.policy import (BOT_IDENTITY_PATH, CENTRAL, PROFILE, SHA, digest,
@@ -290,7 +291,10 @@ def evidence(api, state, destination):
     require("sha256:" + hashlib.sha256(payload).hexdigest() == artifact["digest"],
             "Worker artifact server hash differs")
     def fetch_source(directory):
-        if staged_source(request):
+        if direct_inputs(request):
+            from loop.source import acquire_source
+            acquire_source(directory, request)
+        elif staged_source(request):
             from loop.source import import_source
             source_bundle = Path(destination) / "source.bundle"
             source_bundle.write_bytes(package["candidate-package/source.bundle"])
@@ -298,7 +302,10 @@ def evidence(api, state, destination):
         else:
             git(["fetch", "--quiet", "--no-auto-maintenance", "--depth=1", "--no-tags",
                  "https://github.com/" + request["head_repo"] + ".git", request["frozen_sha"]], directory)
-    reconstructed = verify(payload, request, run, artifact, fetch_source)
+    from loop.inputs import acquire
+    from loop.source import target_api
+    acquired = acquire(target_api(api, request["repo"], request["head_repo"]), request, destination)
+    reconstructed = verify(payload, acquired, run, artifact, fetch_source)
     require(all(reconstructed[key] == state["report"][key]
                 for key in reconstructed if key != "candidate"),
             "Fresh worker bindings/dispositions differ from accepted checkpoint")
@@ -330,9 +337,13 @@ def import_candidate(directory, bundle, request, candidate, fetch_source=None):
     if fetch_source is not None:
         fetch_source(directory)
     else:
-        require(not staged_source(request), "Review import requires a bound source bundle")
-        git(["fetch", "--quiet", "--no-auto-maintenance", "--depth=1", "--no-tags",
-             "https://github.com/" + request["head_repo"] + ".git", request["frozen_sha"]], directory)
+        if direct_inputs(request):
+            from loop.source import acquire_source
+            acquire_source(directory, request)
+        else:
+            require(not staged_source(request), "Review import requires a bound source bundle")
+            git(["fetch", "--quiet", "--no-auto-maintenance", "--depth=1", "--no-tags",
+                 "https://github.com/" + request["head_repo"] + ".git", request["frozen_sha"]], directory)
     chain(candidate, request)
     if not candidate["changed"]:
         require(Path(bundle).read_bytes() == b"" and candidate["commit"] == request["frozen_sha"]

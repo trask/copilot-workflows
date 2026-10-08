@@ -75,7 +75,11 @@ def loop_kind(request):
 
 def staged_source(request):
     public_request(request)
-    return diff_scope(request)
+    return diff_scope(request) and not direct_inputs(request)
+
+
+def direct_inputs(request):
+    return isinstance(request, dict) and request.get("input_mode") == "direct"
 
 
 def public_request(request):
@@ -95,7 +99,7 @@ def pipeline_limit(request):
     else:
         public_request(request)
     kind = loop_kind(request)
-    if kind == "pr_description" and request.get("freeze_status") != "not_frozen":
+    if not direct_inputs(request) and kind == "pr_description" and request.get("freeze_status") != "not_frozen":
         from loop.recommendations import description_diff, diff_anchors
         evidence = request.get("pr_diff")
         if isinstance(evidence, dict) and "anchors" in evidence:
@@ -113,7 +117,7 @@ def pipeline_limit(request):
                 and all(isinstance(request.get(key), str) and SHA.fullmatch(request[key])
                         for key in ("base_sha", "merge_base_sha")),
                 "Incomplete frozen self-review scope")
-        if loop_kind(request) != "self_review":
+        if not direct_inputs(request) and loop_kind(request) != "self_review":
             from loop.recommendations import diff_anchors
             evidence = request.get("pr_diff")
             exact(evidence, {"text", "sha256", "anchors"})
@@ -204,6 +208,8 @@ def canonical(value):
 
 
 def digest(value):
+    if direct_inputs(value):
+        value = {key: item for key, item in value.items() if key != "inputs"}
     return hashlib.sha256(canonical(value)).hexdigest()
 
 

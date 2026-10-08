@@ -37,7 +37,7 @@ def guard_task(store, name, state, read, publisher):
     guard(store, name, state, read, int(time.time()))
     publisher.identity(state["request"])
     from loop.recommendations import check_diff
-    check_diff(read, state["request"])
+    check_diff(read, state["request"], state["report"]["dispositions"].get("input_identity"))
 
 
 def publish_task(store, name, state, central, read, publisher, now):
@@ -130,7 +130,7 @@ def confirm_task(store, name, state, read, now):
         require(run["run_attempt"] == intent["attempt"], "Unexpected additional manual/automated retry")
     elif kind == "pr_description":
         from loop.recommendations import check_diff
-        check_diff(read, request)
+        check_diff(read, request, state["report"]["dispositions"].get("input_identity"))
         live = check_target(read, request)
         if {"title": live["title"], "body": live["body"] or ""} == intent["payload"]:
             return cas(store, name, state, stage="complete", reason="exact_metadata_confirmed",
@@ -140,7 +140,7 @@ def confirm_task(store, name, state, read, now):
                 "Metadata drift during effect reconciliation")
     else:
         from loop.recommendations import check_diff
-        check_diff(read, request)
+        check_diff(read, request, state["report"]["dispositions"].get("input_identity"))
         reviews = pending_reviews(read, request)
         matches = [r for r in reviews if r["id"] not in intent["baseline_review_ids"]
                    and ("review_id" not in intent or r["id"] == intent["review_id"])

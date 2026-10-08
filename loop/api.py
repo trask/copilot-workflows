@@ -1,6 +1,7 @@
 """Bounded GitHub API access with a read-only target policy."""
 
 import http.client
+from contextlib import ExitStack
 import json
 import os
 import ssl
@@ -9,6 +10,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 from loop.policy import CENTRAL, Rejected, require
 
@@ -141,10 +143,11 @@ class API:
     def artifact_zip(self, artifact_id, limit):
         return self.signed_download(f"repos/{CENTRAL}/actions/artifacts/{artifact_id}/zip", limit)
 
-    def signed_download(self, path, limit=None, *, log_windows=(), token=None):
+    def signed_download(self, path, limit=None, *, log_windows=(), token=None, destination=None):
         for attempt in range(3):
             try:
-                return self._signed_download(path, limit, log_windows=log_windows, token=token)
+                return self._signed_download(path, limit, log_windows=log_windows, token=token,
+                                             destination=destination)
             except APIError as error:
                 if attempt == 2 or error.status not in {500, 502, 503, 504}:
                     raise
@@ -156,7 +159,7 @@ class API:
                     raise
             self.retry_read(attempt, f"GitHub signed download GET {failure}; endpoint={path}")
 
-    def _signed_download(self, path, limit=None, *, log_windows=(), token=None):
+    def _signed_download(self, path, limit=None, *, log_windows=(), token=None, destination=None):
         self.authorize(path, "GET", None)
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *_args, **_kwargs):
@@ -174,17 +177,22 @@ class API:
             try:
                 if error.code != 302:
                     raise APIError(error.code, f"GitHub download failed with HTTP {error.code}") from error
-                destination = error.headers["Location"]
+                signed_url = error.headers["Location"]
             finally:
                 error.close()
-        parsed = urllib.parse.urlsplit(destination)
+        parsed = urllib.parse.urlsplit(signed_url)
         require(parsed.scheme == "https" and parsed.hostname and not parsed.username
                 and not parsed.password and parsed.port in {None, 443}, "Unsafe artifact redirect")
         # Signed destination came from the authenticated API. Never forward its bearer token.
         try:
-            with urllib.request.urlopen(destination, timeout=self.read_timeout()) as response:
-                if log_windows or limit is None:
-                    payload = bytearray()
+            with ExitStack() as stack:
+                response = stack.enter_context(urllib.request.urlopen(
+                    signed_url, timeout=self.read_timeout()))
+                sink = (stack.enter_context(Path(destination).open("wb"))
+                        if destination is not None else None)
+                if log_windows or limit is None or sink is not None:
+                    payload = bytearray() if sink is None else Path(destination)
+                    size = 0
                     deadline = time.monotonic() + 60
                     if self.deadline is not None:
                         deadline = min(deadline, self.deadline)
@@ -196,15 +204,21 @@ class API:
                         if windows and line_start:
                             selected = any(start <= chunk[:19] <= end for start, end in windows)
                         if selected:
-                            payload.extend(chunk)
+                            size += len(chunk)
+                            if sink is None:
+                                payload.extend(chunk)
+                            else:
+                                sink.write(chunk)
                         line_start = chunk.endswith(b"\n")
                         if time.monotonic() >= deadline:
                             raise DeadlineReached("Log download deadline reached")
-                    payload = bytes(payload)
+                    if sink is None:
+                        payload = bytes(payload)
                 else:
                     payload = response.read(limit + 1)
+                    size = len(payload)
         except urllib.error.HTTPError as error:
             error.close()
             raise APIError(error.code, f"Signed download failed with HTTP {error.code}") from error
-        require(limit is None or len(payload) <= limit, "Artifact download exceeds limit")
+        require(limit is None or size <= limit, "Artifact download exceeds limit")
         return payload

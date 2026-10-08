@@ -3,7 +3,7 @@
 import hashlib
 import re
 
-from loop.policy import check_target, exact, require
+from loop.policy import check_target, direct_inputs, exact, require
 
 def description_diff(text):
     require(isinstance(text, str), "Invalid description diff evidence")
@@ -67,8 +67,14 @@ def collect_diff(api, request):
     return {"text": text, "sha256": hashlib.sha256(raw).hexdigest(), "anchors": anchors}
 
 
-def check_diff(api, request):
-    require(collect_diff(api, request) == request["pr_diff"], "Authoritative PR diff changed")
+def check_diff(api, request, input_identity=None):
+    current = collect_diff(api, request)
+    if direct_inputs(request):
+        require(input_identity is not None and
+                current["sha256"] == input_identity["pr_diff_sha256"],
+                "Authoritative PR diff changed")
+    else:
+        require(current == request["pr_diff"], "Authoritative PR diff changed")
 
 
 def proposal(value):
@@ -88,9 +94,11 @@ def comments(value, request):
     from loop.candidates import prose
     for item in value:
         exact(item, {"path", "line", "side", "body"})
+        diff = request.get("inputs", request).get("pr_diff")
         require(isinstance(item["path"], str) and type(item["line"]) is int
-                and item["side"] == "RIGHT"
-                and item["line"] in request["pr_diff"]["anchors"].get(item["path"], []),
+                and item["side"] == "RIGHT" and item["line"] > 0
+                and (diff is None and direct_inputs(request)
+                     or diff is not None and item["line"] in diff["anchors"].get(item["path"], [])),
                 "Review comment is not anchored on an authoritative changed line")
         prose(item["body"])
         identity = item["path"], item["line"], item["body"]

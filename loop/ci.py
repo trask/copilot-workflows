@@ -1,9 +1,10 @@
 """Attempt-bound CI diagnosis, without relaxing review-loop clearance."""
 
 import re
+from pathlib import Path
 
 from loop.api import APIError
-from loop.policy import check_target, exact, iso, require, timestamp
+from loop.policy import check_target, direct_inputs, exact, iso, require, timestamp
 from loop.reviews import check_decision, ci_items, copilot_check
 
 
@@ -27,7 +28,7 @@ def latest_workflows(repo, sha, runs):
     return latest
 
 
-def collect(api, request, required):
+def collect(api, request, required, *, log_dir=None):
     sha, repo = request["frozen_sha"], request["repo"]
     check_target(api, request)
     checks, statuses = ci_items(api, repo, sha, latest_statuses=True)
@@ -113,6 +114,8 @@ def collect(api, request, required):
     selected = [item for item in selected if current(item)]
     failures = [item for item in failures if current(item)]
     for failure in failures:
+        if direct_inputs(request) and log_dir is None:
+            continue
         text = failure["evidence"]
         identity = failure["actions"]
         if identity:
@@ -122,15 +125,23 @@ def collect(api, request, required):
                        for step in steps]
             require(all(start <= end for start, end in windows), "CI failed-step timestamps differ")
             try:
+                destination = None
+                if log_dir is not None:
+                    Path(log_dir).mkdir(parents=True, exist_ok=True)
+                    destination = Path(log_dir, str(identity["job_id"]) + ".log").resolve()
                 log = api.signed_download(
                     f"repos/{repo}/actions/jobs/{identity['job_id']}/logs",
-                    **({"log_windows": windows} if windows else {}))
+                    **({"log_windows": windows} if windows else {}),
+                    **({"destination": destination} if destination is not None else {}))
             except APIError as error:
                 require(error.status in {403, 404, 410}, "Failed to collect CI logs")
                 failure["availability"] = "logs_unavailable_" + str(error.status)
             else:
-                if log:
-                    text = log.decode("utf-8", errors="replace")
+                if log and (destination is None or destination.stat().st_size):
+                    if destination is None:
+                        text = log.decode("utf-8", errors="replace")
+                    else:
+                        failure["log_path"] = str(destination)
                     failure["availability"] = "failed_step_log_excerpt" if windows else "job_log"
                 else:
                     failure["availability"] = "failed_step_logs_unavailable" if windows else "logs_unavailable_empty"
@@ -157,7 +168,7 @@ def collect(api, request, required):
 
 
 def diagnoses(value, request):
-    evidence = request["ci_evidence"]
+    evidence = request.get("inputs", request)["ci_evidence"]
     require(evidence["decision"] not in {"pending", "missing", "unknown"},
             "Incomplete CI evidence cannot authorize diagnosis")
     items = value["diagnoses"]
@@ -178,7 +189,9 @@ def diagnoses(value, request):
                 "CI diagnosis requires frozen evidence quotations")
         for quote in item["evidence"]:
             prose(quote)
-            require(quote in failure["evidence"], "CI evidence citation is not in the frozen logs")
+            require(quote in failure["evidence"] or
+                    failure.get("log_path") and log_contains(failure["log_path"], quote),
+                    "CI evidence citation is not in the selected logs")
         require(item["decision"] == "unknown" or failure["availability"] != "unavailable",
                 "Missing failure evidence cannot clear CI")
         if item["decision"] == "rerun":
@@ -199,3 +212,14 @@ def same_attempts(api, request):
     current = collect(api, request, request["ci_evidence"]["required"])
     require(current == request["ci_evidence"], "CI checks, runs, attempts or evidence changed")
     return current
+
+
+def log_contains(path, quote):
+    tail = ""
+    with Path(path).open(encoding="utf-8", errors="replace", newline="") as log:
+        while chunk := log.read(65536):
+            text = tail + chunk
+            if quote in text:
+                return True
+            tail = text[-(len(quote) - 1):] if len(quote) > 1 else ""
+    return False

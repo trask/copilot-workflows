@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import runpy
 import tempfile
 import unittest
@@ -112,9 +113,14 @@ class WorkerOutputTests(unittest.TestCase):
 
     def test_worker_prompt_constructs_a_valid_no_change_result_from_frozen_inputs(self):
         req = task_request("pr_description")
+        req.update(input_mode="direct", inputs={
+            "pr_diff": req.pop("pr_diff"),
+            "identity": {"pr_diff_sha256": hashlib.sha256(GOOD_PATCH).hexdigest()},
+        })
         prompt = (Path(__file__).resolve().parents[1] / ".github" /
                   "workflows" / "copilot-worker.md").read_text(encoding="utf-8")
-        example = prompt.split("```python\n", 1)[1].split("\n```", 1)[0]
+        example = prompt.split("For a `pr_description` no-change decision", 1)[1].split(
+            "```python\n", 1)[1].split("\n```", 1)[0]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             output = root / "loop-output"
