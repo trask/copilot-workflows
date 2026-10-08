@@ -72,7 +72,7 @@ class PublisherAPI(API):
                     "Publisher query outside frozen target")
             return
         if method == "GET":
-            require(path in {"user", BOT_IDENTITY_PATH}
+            require(path in {"user", BOT_IDENTITY_PATH, f"user/{self.request['authorized_actor_id']}"}
                     or any(path == f"repos/{repo}" or path.startswith(f"repos/{repo}/")
                            for repo in {self.repo, self.head_repo}),
                     "Publisher read outside frozen target/head")

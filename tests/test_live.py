@@ -1671,6 +1671,34 @@ class ReviewTests(unittest.TestCase):
             watch_review(store, name, state, publisher, 400)
         self.assertEqual(state, store.entries[name])
 
+    def test_publisher_can_revalidate_bot_pr_ownership_before_continuing_review(self):
+        read = Read()
+        owner = dict(read.req["commit_author"])
+        read.pr["user"].update(id=999, type="Bot", login="Copilot")
+        read.req.update(eligible(read.pr, FIXTURE, AUTHOR_ID, "copilot_review", owner))
+        state = live_state(read.req, stage="waiting_review")
+        state["review_request"] = {"baseline_review_ids": [12], "recorded_at": 100, "sha": SHA}
+        read.reviews = [review(id=13, body=NONCLEAN, submitted_at=iso(200))]
+        call, graphql = read.call, read.graphql
+        read.call = Mock(side_effect=lambda path, *args: (
+            owner if path == f"user/{AUTHOR_ID}" else call(path, *args)))
+        read.graphql = Mock(side_effect=lambda query, variables: (
+            {"repository": {"nameWithOwner": FIXTURE},
+             "search": {"pageInfo": {"hasNextPage": False},
+                        "nodes": [{"number": 1, "repository": {"nameWithOwner": FIXTURE}}]}}
+            if "searchQuery" in variables else graphql(query, variables)))
+        publisher = Publisher(read)
+        store, name = stored(state)
+        result = watch_review(store, name, state, publisher, 400)
+        self.assertEqual("ready", result["stage"])
+        self.assertEqual(999, result["request"]["pr_author_id"])
+        self.assertEqual(owner, result["request"]["commit_author"])
+        self.assertEqual(state["request"]["deadline"], result["request"]["deadline"])
+        read.call.assert_any_call(f"user/{AUTHOR_ID}")
+        self.assertEqual([], publisher.posts)
+        with self.assertRaisesRegex(Rejected, "Publisher read outside"):
+            publisher.authorize(f"user/{AUTHOR_ID + 1}", "GET", None)
+
 
 class CredentialAndArchiveTests(unittest.TestCase):
     def test_new_request_archives_uncertain_intent_unchanged_with_nonforce_CAS(self):
