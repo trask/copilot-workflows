@@ -80,7 +80,10 @@ def public_fetch(directory, request, repo=None, sha=None, depth=1):
     require(request["schema"] == 2 and repo in {request["repo"], request["head_repo"]}
             and REPO.fullmatch(repo), "Public source acquisition requires a frozen repository")
     env = {key: value for key, value in os.environ.items()
-           if key in {"PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP"}}
+           if key.upper() in {"PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP",
+                              "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                              "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE",
+                              "GIT_SSL_CAINFO"}}
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
                GIT_TERMINAL_PROMPT="0", GIT_NO_REPLACE_OBJECTS="1",
                GIT_CONFIG_COUNT="0")

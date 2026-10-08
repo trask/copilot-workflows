@@ -185,6 +185,22 @@ class SourceTests(unittest.TestCase):
                 Rejected, FIXTURE + "@" + SHA + r" .*exit 128.*fatal: unable to create pack"):
             public_fetch(Path.cwd(), fixture_request())
 
+    def test_public_fetch_preserves_sandbox_proxy_and_trust_configuration(self):
+        network = {
+            "HTTP_PROXY": "http://127.0.0.1:3128",
+            "HTTPS_PROXY": "http://127.0.0.1:3128",
+            "https_proxy": "http://127.0.0.1:3128",
+            "NO_PROXY": "localhost",
+            "no_proxy": "localhost",
+            "SSL_CERT_FILE": "/tmp/sandbox-ca.pem",
+            "CURL_CA_BUNDLE": "/tmp/sandbox-ca.pem",
+        }
+        with patch.dict(os.environ, network), patch("loop.source.subprocess.run") as child:
+            child.return_value = subprocess.CompletedProcess([], 0)
+            public_fetch(Path.cwd(), fixture_request())
+            env = child.call_args.kwargs["env"]
+            self.assertEqual(network, {key: env[key] for key in network})
+
     def test_public_review_freeze_uses_exact_repo_and_thread_variables(self):
         class Reviews:
             def call(self, path):
