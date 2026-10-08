@@ -178,16 +178,19 @@ export function normalizeEvidence(detail, sha) {
     }
     return {
         sha, conflicts, copilotThreads, copilotBodies, failing, pending,
-        ci: failing ? "failing" : pending ? "pending" : total && !unknown ? "passing" : "unknown",
+        ci: failing ? "failing" : pending ? "pending" : !total ? "none" : unknown ? "unknown" : "passing",
     };
 }
 
 export function actionEvidence(pr, kind) {
     if (!["pr_conflict_resolver", "ci_fix", "copilot_review"].includes(kind)) return null;
     const evidence = pr.evidence?.sha === pr.sha ? pr.evidence : null;
-    const result = (label, detail, tone = "idle", unnecessary = false) => ({ label, detail, tone, unnecessary });
-    if (!evidence || evidence.error) return result("Status unknown",
-        evidence?.error ?? "Live action status is unavailable. Refresh to check whether this task is needed.", "unknown");
+    const result = (label, detail, tone = "idle", disabled = false) => ({ label, detail, tone, disabled });
+    if (!evidence || evidence.error) {
+        const detail = evidence?.error ?? "Live action status is unavailable. Refresh to check whether this task is needed.";
+        return result("Status unknown", kind === "ci_fix" ? `Refresh to check CI. ${detail}` : detail,
+            "unknown", kind === "ci_fix");
+    }
     if (kind === "pr_conflict_resolver") {
         if (evidence.conflicts === "yes") return result("Conflicts", "GitHub confirms file conflicts with the PR base.", "needed");
         if (evidence.conflicts === "no") return result("No conflicts", "GitHub confirms no file conflicts. Conflict resolution is unnecessary.", "idle", true);
@@ -196,8 +199,9 @@ export function actionEvidence(pr, kind) {
     if (kind === "ci_fix") {
         if (evidence.ci === "failing") return result("CI failing", `${evidence.failing} current-head CI check(s) failed.`, "needed");
         if (evidence.ci === "passing") return result("CI passing", "Current-head CI has passed. CI repair is unnecessary.", "idle", true);
-        if (evidence.ci === "pending") return result("CI pending", "Current-head CI is still running. No failed checks are currently detected.");
-        return result("Status unknown", "Current-head CI is absent or has an unknown result.", "unknown");
+        if (evidence.ci === "pending") return result("CI pending", "CI is still running. No failed checks are currently detected.", "idle", true);
+        if (evidence.ci === "none") return result("No CI results", "No CI results yet for the current PR commit.", "idle", true);
+        return result("Status unknown", "Current-head CI has an unknown result. Refresh to check CI before running a repair.", "unknown", true);
     }
     if (evidence.copilotThreads) return result("Open Copilot threads",
         `${evidence.copilotThreads} unresolved Copilot review thread(s).`, "needed");
@@ -248,7 +252,7 @@ export function taskPresentation(pr, kind, workflowReady, actions = []) {
     const dispatch = pr.dispatch && (pr.dispatch.kind === kind ||
         pr.dispatch.operation === "cancel" && phase) ? pr.dispatch : null;
     const evidence = actionEvidence(pr, kind);
-    const disabled = Boolean(!workflowReady || pr.actionBlock || pr.dispatch || evidence?.unnecessary) || !pr.tasks.includes(kind);
+    const disabled = Boolean(!workflowReady || pr.actionBlock || pr.dispatch || evidence?.disabled) || !pr.tasks.includes(kind);
     const result = (label, tone = "idle", busy = false) => ({
         label, tone, busy, disabled,
         detail: dispatch?.message ?? (phase ? completionPresentation(phase)?.detail ?? phase.reason?.replaceAll("_", " ") : null) ??

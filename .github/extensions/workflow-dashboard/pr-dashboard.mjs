@@ -288,7 +288,7 @@ export class PrDashboard extends Dashboard {
                 if (!read?.detail) throw new Error(read?.error ?? "Live action status is unavailable. Refresh before launching.");
                 current.pr.evidence = normalizeEvidence(read.detail, current.pr.sha);
                 const evidence = actionEvidence(current.pr, input.kind);
-                if (evidence.unnecessary) throw new Error(evidence.detail);
+                if (evidence.disabled) throw new Error(evidence.detail);
             }
             return {
                 inputs: { operation: "launch", target: input.target, loop_kind: input.kind, publication_auth: "fine_grained_pat" },

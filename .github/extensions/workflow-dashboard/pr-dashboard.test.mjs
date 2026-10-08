@@ -172,7 +172,7 @@ test("file-conflict evidence ignores aggregate mergeability and other failed mer
 test("CI evidence distinguishes failures, pending and absent checks without counting Copilot checks", () => {
     const evidence = (checks) => normalizeEvidence(detail({ checks }), sha);
     assert.equal(evidence([check()]).ci, "passing");
-    assert.equal(evidence([]).ci, "unknown");
+    assert.equal(evidence([]).ci, "none");
     assert.equal(evidence([check(null, { status: "IN_PROGRESS" })]).ci, "pending");
     assert.equal(evidence([check("FAILURE"), check(null, { name: "Build", status: "IN_PROGRESS" })]).ci, "failing");
     assert.equal(evidence([check(), check("FAILURE", { name: "Copilot code review" })]).ci, "passing");
@@ -208,8 +208,38 @@ test("latest CI results retain new failures and queued reruns", () => {
         const evidence = normalizeEvidence(detail({ checks: [current, check()] }), sha);
         assert.equal(evidence.ci, current.status === "QUEUED" ? "pending" : "failing");
         const pr = { ...normalizePull(pull(), repo, state(), account), tasks: ["ci_fix"], actionBlock: null, evidence };
-        assert.equal(taskPresentation(pr, "ci_fix", true).disabled, false);
+        assert.equal(taskPresentation(pr, "ci_fix", true).disabled, current.status === "QUEUED");
     }
+});
+
+test("Fix CI is enabled only for known failures, including failures while other checks run", () => {
+    const pr = { ...normalizePull(pull(), repo, state(), account), tasks: ["ci_fix"], actionBlock: null };
+    for (const [checks, label, disabled] of [
+        [[check()], "CI passing", true],
+        [[check(null, { status: "IN_PROGRESS" })], "CI pending", true],
+        [[], "No CI results", true],
+        [[check(null)], "Status unknown", true],
+        [[check("FAILURE"), check(null, { name: "Build", status: "IN_PROGRESS" })], "CI failing", false],
+    ]) {
+        pr.evidence = normalizeEvidence(detail({ checks }), sha);
+        const presentation = taskPresentation(pr, "ci_fix", true);
+        assert.equal(presentation.label, label);
+        assert.equal(presentation.disabled, disabled);
+    }
+    for (const evidence of [
+        undefined, { sha, error: "CI read failed." },
+        { ...normalizeEvidence(detail({ checks: [check("FAILURE")] }), sha), sha: "f".repeat(40) },
+    ]) {
+        pr.evidence = evidence;
+        const presentation = taskPresentation(pr, "ci_fix", true);
+        assert.equal(presentation.disabled, true);
+        assert.equal(presentation.label, "Status unknown");
+        assert.match(presentation.detail, /Refresh to check CI/);
+    }
+    const absent = detail();
+    absent.commits.nodes[0].commit.statusCheckRollup = null;
+    assert.equal(normalizeEvidence(absent, sha).ci, "none");
+    assert.equal(normalizeEvidence(detail({ checks: [check("SUCCESS", { name: "Copilot code review" })] }), sha).ci, "none");
 });
 
 test("CI check selection uses workflow sequence and preserves distinct workflows and events", () => {
@@ -316,14 +346,14 @@ test("live action evidence overrides completed results without replacing active 
     assert.equal(taskPresentation(pr, "pr_conflict_resolver", true).label, "Running");
     assert.equal(taskPresentation(pr, "pr_conflict_resolver", true).tone, "active");
     pr.evidence = normalizeEvidence(detail({ conflicts: "PASSED", checks: [check()] }), sha);
-    assert.equal(actionEvidence(pr, "pr_conflict_resolver").unnecessary, true);
+    assert.equal(actionEvidence(pr, "pr_conflict_resolver").disabled, true);
     assert.equal(taskPresentation(pr, "ci_fix", true).disabled, true);
     assert.equal(taskPresentation(pr, "copilot_review", true).disabled, true);
     pr.phase = { kind: "copilot_review", stage: "running", sha };
     assert.equal(taskPresentation(pr, "copilot_review", true).label, "Running");
     assert.equal(taskPresentation(pr, "copilot_review", true).busy, true);
     pr.evidence.sha = "f".repeat(40);
-    assert.equal(taskPresentation(pr, "ci_fix", true).disabled, false);
+    assert.equal(taskPresentation(pr, "ci_fix", true).disabled, true);
     assert.equal(taskPresentation(pr, "ci_fix", true).label, "Status unknown");
 });
 
@@ -369,6 +399,23 @@ test("new review-body feedback can enable a Copilot launch after a no-feedback s
     }]]);
     await c.canvas.launch({ target, kind: "copilot_review", confirmed: true });
     assert.equal(c.calls.find((call) => typeof call === "object").loop_kind, "copilot_review");
+});
+
+test("CI launch rechecks and rejects running, absent and unknown results before dispatch", async () => {
+    for (const [checks, message] of [
+        [[check(null, { status: "IN_PROGRESS" })], /still running/],
+        [[], /No CI results/],
+        [[check(null)], /unknown result/],
+    ]) {
+        const c = controller();
+        c.github.pullEvidence = async () => new Map([[12, { detail: detail({ checks: [check("FAILURE")] }) }]]);
+        const snapshot = await c.canvas.refresh();
+        assert.equal(taskPresentation(snapshot.prs[0], "ci_fix", true).disabled, false);
+        c.github.pullEvidence = async () => new Map([[12, { detail: detail({ checks }) }]]);
+        await assert.rejects(c.canvas.launch({ target, kind: "ci_fix", confirmed: true }), message);
+        assert.equal(c.calls.filter((call) => typeof call === "object").length, 0);
+        assert.equal(c.canvas.state().prs[0].dispatch, null);
+    }
 });
 
 test("live evidence batches PRs and paginates checks, threads and reviews before claiming clear", async () => {
