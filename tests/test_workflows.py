@@ -17,6 +17,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("\nengine:\n  id: copilot\n  version: \"1.0.93\"\n"
                       "  model: gpt-6.1-sol?effort=high\n",
                       frontmatter)
+        self.assertIn("\nsandbox:\n  agent:\n    version: v0.28.49\n"
+                      "    runtime: docker\n", frontmatter)
         compiled = (root / "copilot-worker.lock.yml").read_text(encoding="utf-8")
         metadata = json.loads(compiled.splitlines()[0].split(": ", 1)[1])
         self.assertEqual("1.0.93", metadata["engine_versions"]["copilot"])
@@ -35,6 +37,7 @@ class WorkflowTests(unittest.TestCase):
                     r"^\s+COPILOT_PROVIDER_MODEL_ID: (.+)$", sections[job], re.MULTILINE))
                 self.assertEqual(["responses"], re.findall(
                     r"^\s+COPILOT_PROVIDER_WIRE_API: (.+)$", sections[job], re.MULTILINE))
+        self.assertIn('install_awf_binary.sh" v0.28.49 --rootless', sections["agent"])
 
     def test_custom_secrets_require_the_protected_environment(self):
         root = Path(__file__).resolve().parents[1] / ".github" / "workflows"

@@ -18,7 +18,7 @@ def audit():
     for action in re.findall(r"^\s+uses: (\S+)", text, re.MULTILINE):
         assert re.fullmatch(r"[\w./-]+@[0-9a-f]{40}", action), action
     manifest = json.loads(text.splitlines()[1].split(": ", 1)[1])
-    assert all(re.fullmatch(r"sha256:[0-9a-f]{64}", c["digest"])
+    assert all(re.fullmatch(r"[^@\s]+@sha256:[0-9a-f]{64}", c.get("pinned_image", c["image"]))
                for c in manifest["containers"])
     assert all(s["name"] != "github" for s in manifest["mcp_servers"])
     agent_job = text.split("\n  agent:", 1)[1].split("\n  conclusion:", 1)[0]
@@ -51,7 +51,7 @@ def audit():
     assert "GRADLE_USER_HOME:" not in top_env
     assert "JAVA_TOOL_OPTIONS:" not in top_env
     assert "REVIEW_LOOP_SOURCE_APP_PRIVATE_KEY" not in text
-    assert "install_awf_binary.sh\" v0.28.23 --rootless" in text
+    assert "install_awf_binary.sh\" v0.28.49 --rootless" in text
     controller = Path(".github/workflows/coordinator.yml").read_text()
     assert "\n  validate:" not in controller and "objective-validation" not in controller
     assert not Path("loop/validation.py").exists()
