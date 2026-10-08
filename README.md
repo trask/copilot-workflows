@@ -151,7 +151,7 @@ Automatic refresh runs every 60 seconds while visible, with cached conditional R
 
 ## Worker checks and structural verification
 
-This is the real pinned gh-aw Copilot engine running inside Actions/AWF, not GitHub Agent Tasks. The compiler is gh-aw v0.89.21 at `c35393777e5604a63721d09512263b1383301d4f`. The lock uses Copilot CLI 1.0.87 and rootless AWF 0.28.23, with immutable Action and container pins.
+This is the real pinned gh-aw Copilot engine running inside Actions/AWF, not GitHub Agent Tasks. The compiler is gh-aw v0.89.21 at `c35393777e5604a63721d09512263b1383301d4f`. The worker and threat detector explicitly pin Copilot CLI 1.0.93, which supports GPT-6.1 Sol, rather than relying on the compiler's older CLI default. The lock uses rootless AWF 0.28.23, with immutable Action and container pins.
 
 The worker runs relevant repository checks inside its AWF sandbox and records commands, exit codes and failures in `diagnostics.txt`. It returns exactly `candidate.patch`, `result.json` and `diagnostics.txt`. There is no `validation.json` or command-plan protocol.
 

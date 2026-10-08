@@ -13,7 +13,8 @@ class WorkflowTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
         frontmatter = (root / "copilot-worker.md").read_text(
             encoding="utf-8").split("\n---\n", 1)[0]
-        self.assertIn("\nengine:\n  id: copilot\n  model: gpt-6.1-sol?effort=high\n",
+        self.assertIn("\nengine:\n  id: copilot\n  version: \"1.0.93\"\n"
+                      "  model: gpt-6.1-sol?effort=high\n",
                       frontmatter)
         jobs = (root / "copilot-worker.lock.yml").read_text(
             encoding="utf-8").split("\njobs:\n", 1)[1]
@@ -24,6 +25,9 @@ class WorkflowTests(unittest.TestCase):
             with self.subTest(job=job):
                 self.assertEqual(["gpt-6.1-sol?effort=high"], re.findall(
                     r"^\s+COPILOT_MODEL: (.+)$", sections[job], re.MULTILINE))
+                self.assertIn('install_copilot_cli.sh" 1.0.93', sections[job])
+                self.assertEqual(["1.0.93"], re.findall(
+                    r'^\s+GH_AW_INFO_VERSION: "(.+)"$', sections[job], re.MULTILINE))
 
     def test_custom_secrets_require_the_protected_environment(self):
         root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
