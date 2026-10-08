@@ -1267,7 +1267,7 @@ test("every task dispatches directly on click and locks duplicate and competing 
     }
 });
 
-test("live action hints use amber, explain effects and disable only confirmed unnecessary fixes", async () => {
+test("live action hints use amber, explain effects and disable tasks without actionable evidence", async () => {
     const state = rendererState();
     state.prs[0].evidence = {
         sha: state.prs[0].sha, conflicts: "yes", ci: "failing", failing: 2, copilotThreads: 1, copilotBodies: 0,
@@ -1294,12 +1294,22 @@ test("live action hints use amber, explain effects and disable only confirmed un
     renderer.render();
     assert.equal(button("copilot_review").disabled, false);
     assert.equal(button("copilot_review")["data-tone"], "needed");
+    Object.assign(state.prs[0].evidence, { ci: "pending" });
+    renderer.render();
+    assert.equal(button("ci_fix").disabled, true);
+    assert.match(button("ci_fix").title, /CI is still running/);
+    Object.assign(state.prs[0].evidence, { ci: "none" });
+    renderer.render();
+    assert.equal(button("ci_fix").disabled, true);
+    assert.match(button("ci_fix").title, /No CI results yet/);
     assert.match(button("pr_conflict_resolver").title, /unnecessary/);
     state.prs[0].evidence = { sha: state.prs[0].sha, error: "Status read failed." };
     renderer.render(state);
     assert.equal(button("pr_conflict_resolver").disabled, false);
     assert.equal(button("pr_conflict_resolver")["aria-label"], "Resolve conflicts: Status unknown");
     assert.match(button("pr_conflict_resolver").title, /Status read failed/);
+    assert.equal(button("ci_fix").disabled, true);
+    assert.match(button("ci_fix").title, /Refresh to check CI/);
     const css = await readFile(new URL("styles.css", import.meta.url), "utf8");
     assert.match(css, /data-tone="needed"/);
     assert.match(css, /data-color-mode="dark"/);
