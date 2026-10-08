@@ -39,8 +39,12 @@ code { font: 12px var(--font-mono, Consolas, monospace); overflow-wrap: anywhere
 .run .card { margin-top: 14px; margin-bottom: 0; }
 .run-result { margin-top: 12px; }
 .task-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.task-control { display: flex; flex: 0 1 auto; min-width: min-content; max-width: 100%; border-radius: 6px; }
+.task-tooltip { position: fixed; z-index: 100; display: flex; flex-direction: column; gap: 6px; width: max-content; max-width: min(320px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow: auto; padding: 10px 12px; border: 1px solid var(--border-color-default, #d1d9e0); border-radius: 6px; background: var(--background-color-default, #fff); color: var(--text-color-default, #1f2328); box-shadow: 0 4px 12px #0002; font-size: 12px; line-height: 18px; white-space: normal; overflow-wrap: anywhere; }
+.tooltip-status { font-weight: var(--font-weight-semibold, 600); }
+.tooltip-detail { color: var(--text-color-muted, #59636e); }
 .task-button { display: flex; flex: 0 1 auto; align-items: center; gap: 6px; min-width: min-content; min-height: 40px; max-width: 100%; padding: 8px 10px; text-align: left; white-space: normal; overflow-wrap: normal; }
-.task-button:disabled { cursor: default; opacity: .6; }
+.task-button:disabled { cursor: default; opacity: .6; pointer-events: none; }
 .task-icon { display: flex; align-items: center; justify-content: center; width: 16px; height: 16px; flex: none; color: var(--text-color-muted, #59636e); }
 .task-name { min-width: 0; font-size: 14px; line-height: 20px; font-weight: var(--font-weight-semibold, 600); }
 .task-button[data-tone="active"], .task-button[data-tone="waiting"] { border-color: var(--true-color-blue, #0969da); background: var(--true-color-blue-muted, #ddf4ff); opacity: 1; }

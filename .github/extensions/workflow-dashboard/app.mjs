@@ -9,6 +9,8 @@ let stateVersion = 0;
 let expanded = new Set();
 const histories = new Map();
 let inViewport = true;
+let activeTooltip = null;
+let tooltipId = 0;
 
 function visible() {
     return !document.hidden && inViewport;
@@ -20,6 +22,63 @@ function element(tag, text, className) {
     if (className) node.className = className;
     return node;
 }
+
+function hideTooltip() {
+    if (activeTooltip) activeTooltip.hidden = true;
+    activeTooltip = null;
+}
+
+function taskControl(button, status, detail, action) {
+    const control = element("span", null, "task-control");
+    const tooltip = element("span", null, "task-tooltip");
+    tooltip.id = `task-tooltip-${++tooltipId}`;
+    tooltip.setAttribute("role", "tooltip");
+    tooltip.hidden = true;
+    if (status) tooltip.append(element("span", status, "tooltip-status"));
+    if (detail) tooltip.append(element("span", detail, "tooltip-detail"));
+    if (action) tooltip.append(element("span", action, "tooltip-action"));
+    button.setAttribute("aria-describedby", tooltip.id);
+    if (button.disabled) {
+        control.tabIndex = 0;
+        control.setAttribute("role", "group");
+        control.setAttribute("aria-disabled", "true");
+        control.setAttribute("aria-label", button.getAttribute("aria-label") ?? button.textContent);
+        control.setAttribute("aria-describedby", tooltip.id);
+    }
+    control.append(button, tooltip);
+    let hovered = false;
+    const show = () => {
+        hideTooltip();
+        activeTooltip = tooltip;
+        tooltip.hidden = false;
+        const bounds = control.getBoundingClientRect();
+        tooltip.style.left = "8px";
+        tooltip.style.top = "8px";
+        const { width, height } = tooltip.getBoundingClientRect();
+        const viewport = document.documentElement;
+        tooltip.style.left = `${Math.max(8, Math.min(bounds.left, viewport.clientWidth - width - 8))}px`;
+        tooltip.style.top = `${bounds.bottom + height <= viewport.clientHeight - 8
+            ? bounds.bottom : Math.max(8, bounds.top - height)}px`;
+    };
+    control.addEventListener("pointerenter", () => { hovered = true; show(); });
+    control.addEventListener("pointerleave", () => {
+        hovered = false;
+        if (!control.contains(document.activeElement) && activeTooltip === tooltip) hideTooltip();
+    });
+    control.addEventListener("focusin", show);
+    control.addEventListener("focusout", (event) => {
+        if (!hovered && !control.contains(event.relatedTarget) && activeTooltip === tooltip) hideTooltip();
+    });
+    return control;
+}
+
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") hideTooltip();
+});
+document.addEventListener("scroll", (event) => {
+    if (!activeTooltip?.contains(event.target)) hideTooltip();
+}, true);
+window.addEventListener("resize", hideTooltip);
 
 function link(text, url) {
     if (!url || !/^https:\/\/github\.com\//.test(url)) return element("span", text, "muted");
@@ -81,6 +140,7 @@ function setBusy(value, repository = null) {
 }
 
 function renderPulls() {
+    hideTooltip();
     const cards = $("prs");
     if (loadingRepository) {
         $("pr-count").textContent = "Loading...";
@@ -226,9 +286,6 @@ function prCard(pr) {
         const button = element("button", null, "task-button");
         button.type = "button";
         button.disabled = presentation.disabled;
-        button.title = !pr.tasks.includes(kind) && !presentation.busy
-            ? `${presentation.label}. ${presentation.detail}` : presentation.detail === TASK_EFFECTS[kind]
-                ? presentation.detail : `${presentation.detail} ${TASK_EFFECTS[kind]}`;
         button.setAttribute("data-tone", presentation.tone);
         button.setAttribute("aria-label", `${label}: ${presentation.label}`);
         button.setAttribute("aria-description", presentation.detail);
@@ -241,7 +298,10 @@ function prCard(pr) {
         }
         button.append(element("span", label, "task-name"));
         button.addEventListener("click", () => taskAction(pr, kind));
-        tasks.append(button);
+        const detail = presentation.disabled && !presentation.busy && pr.actionBlock
+            ? pr.actionBlock : presentation.detail === TASK_EFFECTS[kind] ? null : presentation.detail;
+        tasks.append(taskControl(button, presentation.label === "Run" ? null : presentation.label,
+            detail, presentation.disabled ? null : TASK_EFFECTS[kind]));
     }
     const cancelDispatch = pr.dispatch?.operation === "cancel_dispatch" ||
         pr.dispatch?.operation === "launch" && pr.dispatch.status === "accepted";
@@ -251,11 +311,15 @@ function prCard(pr) {
     cancel.disabled = cancelDispatch
         ? !pr.canCancelDispatch || pr.dispatch.operation !== "launch" || pr.dispatch.status !== "accepted"
         : !pr.canCancel || Boolean(pr.dispatch);
-    cancel.title = cancelDispatch && !pr.dispatch.runId
-        ? "This dispatch has no recorded run ID. Inspect its Actions launch or refresh to identify its saved task."
-        : "Cancel the selected launch or task. This does not undo published changes or guarantee termination of an already authorized effect.";
     cancel.addEventListener("click", () => taskAction(pr, pr.dispatch?.kind ?? pr.phase?.kind, true));
-    if (pr.canCancel || cancelDispatch || pr.dispatch?.operation === "cancel") tasks.append(cancel);
+    if (pr.canCancel || cancelDispatch || pr.dispatch?.operation === "cancel") {
+        const cancelling = ["cancel", "cancel_dispatch"].includes(pr.dispatch?.operation);
+        const detail = cancel.disabled ? cancelling ? "Cancellation is awaiting confirmation."
+            : cancelDispatch && !pr.dispatch.runId ? "Refresh to find this launch before cancelling."
+                : "Cancellation is not available yet. Refresh to check its status." : null;
+        tasks.append(taskControl(cancel, cancelling ? "Cancelling" : null, detail, cancel.disabled ? null
+            : "Request cancellation. Published changes stay; changes already underway may still finish."));
+    }
     card.append(tasks);
     if (pr.phase?.pendingReviewUrl && completionPresentation(pr.phase)) {
         const result = element("div", null, "run-result");

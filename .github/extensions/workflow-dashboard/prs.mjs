@@ -11,14 +11,14 @@ const ROUTES = {
 };
 
 export const TASK_EFFECTS = {
-    copilot_review: "Investigate Copilot findings and push warranted fixes. Reply to and resolve eligible bot threads, then request fresh review until clean with passing CI.",
-    self_review: "Review the full PR and push warranted fixes in fresh passes until clean with passing CI.",
-    pr_conflict_resolver: "Merge the launch-time base snapshot into this PR and push the resolved merge. Never land the PR.",
-    ci_fix: "Diagnose CI failures, push warranted repairs, and possibly request one evidence-based failed-jobs rerun.",
-    pr_description: "Update the PR title and description only when needed.",
-    pr_simplify: "Make one pass of major behavior-preserving simplifications and push qualifying changes.",
-    pr_review: "Create a pending review on GitHub for warranted findings. Never submit or approve it.",
-    pr_consistency: "Compare changed code with nearby examples and applicable instructions, and push fixes for avoidable differences.",
+    copilot_review: "Fix valid Copilot findings, push changes, and reply to and resolve bot threads. Repeat review until clean with passing CI.",
+    self_review: "Review this PR and push fixes until review and CI are clean.",
+    pr_conflict_resolver: "Merge the base branch into this PR and push the resolved merge. Does not merge the PR.",
+    ci_fix: "Investigate failing checks and push fixes. May rerun failed jobs.",
+    pr_description: "Update the PR title and description if needed.",
+    pr_simplify: "Simplify this PR's code without changing behavior, then push changes.",
+    pr_review: "Create a private GitHub review for you to inspect and submit.",
+    pr_consistency: "Match this PR's code to nearby patterns and repository instructions, then push fixes.",
 };
 
 export function checkedPull(pr, repo) {
@@ -192,26 +192,27 @@ export function actionEvidence(pr, kind) {
             "unknown", kind === "ci_fix");
     }
     if (kind === "pr_conflict_resolver") {
-        if (evidence.conflicts === "yes") return result("Conflicts", "GitHub confirms file conflicts with the PR base.", "needed");
-        if (evidence.conflicts === "no") return result("No conflicts", "GitHub confirms no file conflicts. Conflict resolution is unnecessary.", "idle", true);
+        if (evidence.conflicts === "yes") return result("Conflicts", "This PR has merge conflicts with its base branch.", "needed");
+        if (evidence.conflicts === "no") return result("No conflicts", "No merge conflicts to resolve.", "idle", true);
         return result("Status unknown", "GitHub has not determined whether this PR has file conflicts.", "unknown");
     }
     if (kind === "ci_fix") {
-        if (evidence.ci === "failing") return result("CI failing", `${evidence.failing} current-head CI check(s) failed.`, "needed");
-        if (evidence.ci === "passing") return result("CI passing", "Current-head CI has passed. CI repair is unnecessary.", "idle", true);
-        if (evidence.ci === "pending") return result("CI pending", "CI is still running. No failed checks are currently detected.", "idle", true);
-        if (evidence.ci === "none") return result("No CI results", "No CI results yet for the current PR commit.", "idle", true);
-        return result("Status unknown", "Current-head CI has an unknown result. Refresh to check CI before running a repair.", "unknown", true);
+        if (evidence.ci === "failing") return result("CI failing",
+            `${evidence.failing} failing ${evidence.failing === 1 ? "check" : "checks"} on the latest PR commit.`, "needed");
+        if (evidence.ci === "passing") return result("CI passing", "CI passed for the latest PR commit. Nothing to fix.", "idle", true);
+        if (evidence.ci === "pending") return result("CI pending", "CI is still running. No failing checks yet.", "idle", true);
+        if (evidence.ci === "none") return result("No CI results", "No CI results yet for the latest PR commit.", "idle", true);
+        return result("Status unknown", "CI has an unknown result. Refresh to check CI before running a repair.", "unknown", true);
     }
     if (evidence.copilotThreads) return result("Open Copilot threads",
-        `${evidence.copilotThreads} unresolved Copilot review thread(s).`, "needed");
+        `${evidence.copilotThreads} unresolved Copilot ${evidence.copilotThreads === 1 ? "thread" : "threads"}.`, "needed");
     if (!Number.isSafeInteger(evidence.copilotBodies) || evidence.copilotBodies < 0) {
         return result("Status unknown", "Live Copilot review-body status is unavailable. Refresh before deciding whether feedback needs attention.", "unknown");
     }
     if (evidence.copilotBodies) return result("Copilot review-body feedback",
-        `${evidence.copilotBodies} current-head Copilot review ${evidence.copilotBodies === 1 ? "body" : "bodies"} may require attention.`, "needed");
+        `${evidence.copilotBodies} Copilot ${evidence.copilotBodies === 1 ? "review" : "reviews"} with feedback on the latest PR commit.`, "needed");
     return result("No Copilot feedback",
-        "No unresolved Copilot threads or current-head review-body feedback. Addressing feedback is unnecessary; this is not proof of review clearance.", "idle", true);
+        "No Copilot feedback to address. This does not mean the PR is approved.", "idle", true);
 }
 
 export function actionBlock(pr, viewer, phase, ready, dispatch) {

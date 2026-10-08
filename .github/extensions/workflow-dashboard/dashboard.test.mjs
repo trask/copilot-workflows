@@ -1028,12 +1028,23 @@ test("loopback serves assets and read-only endpoints; cross-origin data reads an
 
 async function rendererFixture(fetch) {
     class Node {
-        constructor(tag = "") { this.tag = tag; this.children = []; this.events = {}; this.value = ""; this.isConnected = true; }
-        append(...nodes) { this.children.push(...nodes); }
+        constructor(tag = "") {
+            this.tag = tag; this.children = []; this.events = {}; this.style = {}; this.value = ""; this.isConnected = true;
+        }
+        append(...nodes) {
+            for (const node of nodes) node.parentElement = this;
+            this.children.push(...nodes);
+        }
         replaceChildren(...nodes) { this.children = nodes; }
         get firstChild() { return this.children[0]; }
         addEventListener(name, action) { this.events[name] = action; }
         setAttribute(name, value) { this[name] = value; }
+        getAttribute(name) { return this[name] ?? null; }
+        contains(node) { return this === node || this.children.some((child) => child.contains(node)); }
+        getBoundingClientRect() {
+            return this.className === "task-tooltip" ? { width: 320, height: 100 }
+                : { left: 20, top: 100, bottom: 140 };
+        }
     }
     const html = await readFile(new URL("index.html", import.meta.url), "utf8");
     assert.doesNotMatch(html, /<dialog\b|method="dialog"/);
@@ -1044,13 +1055,24 @@ async function rendererFixture(fetch) {
     }
     const document = {
         hidden: false, getElementById: (id) => nodes.get(id), createElement: (tag) => new Node(tag),
-        createTextNode: (text) => Object.assign(new Node("#text"), { textContent: text }), addEventListener() {},
+        activeElement: null, documentElement: { clientWidth: 800, clientHeight: 600 }, events: {},
+        createTextNode: (text) => Object.assign(new Node("#text"), { textContent: text }),
+        addEventListener(name, action) { this.events[name] = action; },
     };
+    const window = { events: {}, addEventListener(name, action) { this.events[name] = action; } };
     const script = await readFile(new URL("app.mjs", import.meta.url), "utf8");
     const renderer = await runInNewContext(`(async () => { ${script.replace(/^import .+;\r?$/gm, "")} return { render, heartbeat, refresh }; })()`, {
-        KIND_LABELS, filterPulls, taskPresentation, completionPresentation, TASK_EFFECTS, document, setInterval() {}, fetch,
+        KIND_LABELS, filterPulls, taskPresentation, completionPresentation, TASK_EFFECTS, document, window, setInterval() {}, fetch,
     });
-    return { renderer, nodes, document, html };
+    return { renderer, nodes, document, window, html };
+}
+
+function taskButtons(card) {
+    return card.children.find((node) => node.className === "task-grid").children.map((control) => control.firstChild);
+}
+
+function tooltipFor(button) {
+    return button.parentElement.children[1];
 }
 
 function rendererState(repository = "example/project") {
@@ -1068,6 +1090,120 @@ function rendererState(repository = "example/project") {
         }],
     };
 }
+
+test("task tooltips separate status from effects and explain disabled controls without an action", async () => {
+    const state = rendererState();
+    const pr = state.prs[0];
+    pr.evidence = { sha: pr.sha, conflicts: "no", ci: "failing", failing: 2, copilotThreads: 0, copilotBodies: 0 };
+    const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
+    const button = (kind) => taskButtons(nodes.get("prs").firstChild)
+        .find((node) => node["aria-label"].startsWith(`${KIND_LABELS[kind]}:`));
+    const ci = button("ci_fix");
+    assert.deepEqual(tooltipFor(ci).children.map((node) => [node.className, node.textContent]), [
+        ["tooltip-status", "CI failing"],
+        ["tooltip-detail", "2 failing checks on the latest PR commit."],
+        ["tooltip-action", TASK_EFFECTS.ci_fix],
+    ]);
+    const description = button("pr_description");
+    assert.deepEqual(tooltipFor(description).children.map((node) => node.textContent), [TASK_EFFECTS.pr_description]);
+    assert.equal(description.parentElement.tabIndex, undefined);
+    for (const kind of ["pr_conflict_resolver", "copilot_review"]) {
+        const disabled = button(kind);
+        assert.equal(disabled.disabled, true);
+        assert.equal(disabled.parentElement.tabIndex, 0);
+        assert.equal(disabled.parentElement.role, "group");
+        assert.equal(disabled.parentElement["aria-disabled"], "true");
+        assert.equal(disabled.parentElement["aria-label"], disabled["aria-label"]);
+        assert.equal(tooltipFor(disabled).children.some((node) => node.className === "tooltip-action"), false);
+    }
+    for (const control of nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid").children) {
+        const [button, tooltip] = control.children;
+        assert.equal(button.title, undefined);
+        assert.equal(tooltip.role, "tooltip");
+        assert.equal(tooltip.hidden, true);
+        assert.equal(button["aria-describedby"], tooltip.id);
+        if (button.disabled) assert.equal(control["aria-describedby"], tooltip.id);
+    }
+    assert.equal(new Set(taskButtons(nodes.get("prs").firstChild).map((button) => tooltipFor(button).id)).size, 8);
+    Object.assign(pr, { actionBlock: "Another task is running.", phase: { kind: "pr_review", stage: "complete", outcome: "no_change" } });
+    renderer.render();
+    assert.deepEqual(tooltipFor(button("pr_review")).children.map((node) => node.textContent), [
+        "No findings", "Another task is running.",
+    ]);
+});
+
+test("tooltips support hover and keyboard focus, dismissal and refresh without dispatching", async () => {
+    const state = rendererState();
+    state.prs[0].evidence = { sha: state.prs[0].sha, conflicts: "no", ci: "passing", copilotThreads: 0, copilotBodies: 0 };
+    const requests = [];
+    const { renderer, nodes, document, window } = await rendererFixture(async (path) => {
+        requests.push(path);
+        return { ok: true, json: async () => state };
+    });
+    const controls = nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid").children;
+    const first = controls[0];
+    const tooltip = first.children[1];
+    first.events.pointerenter();
+    assert.equal(tooltip.hidden, false);
+    first.events.focusin();
+    document.activeElement = first;
+    first.events.pointerleave();
+    assert.equal(tooltip.hidden, false);
+    document.events.keydown({ key: "Escape" });
+    assert.equal(tooltip.hidden, true);
+    first.events.focusin();
+    document.activeElement = null;
+    first.events.focusout({ relatedTarget: null });
+    assert.equal(tooltip.hidden, true);
+    first.events.pointerenter();
+    first.events.focusout({ relatedTarget: null });
+    assert.equal(tooltip.hidden, false);
+    first.events.pointerleave();
+    assert.equal(tooltip.hidden, true);
+    first.events.pointerenter();
+    controls[1].events.focusin();
+    assert.equal(tooltip.hidden, true);
+    assert.equal(controls[1].children[1].hidden, false);
+    document.events.scroll({ target: controls[1].children[1] });
+    assert.equal(controls[1].children[1].hidden, false);
+    document.events.scroll({ target: document });
+    assert.equal(controls[1].children[1].hidden, true);
+    first.events.pointerenter();
+    window.events.resize();
+    assert.equal(tooltip.hidden, true);
+    first.events.pointerenter();
+    renderer.render();
+    assert.equal(tooltip.hidden, true);
+    assert.ok(requests.every((path) => !["/api/launch", "/api/cancel"].includes(path)));
+});
+
+test("tooltips stay within the viewport and flip above buttons near the bottom", async () => {
+    const state = rendererState();
+    const { nodes, document } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
+    const control = nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid").firstChild;
+    const tooltip = control.children[1];
+    control.events.pointerenter();
+    assert.equal(tooltip.style.left, "20px");
+    assert.equal(tooltip.style.top, "140px");
+    control.getBoundingClientRect = () => ({ left: 700, top: 520, bottom: 560 });
+    control.events.pointerenter();
+    assert.equal(tooltip.style.left, "472px");
+    assert.equal(tooltip.style.top, "420px");
+    Object.assign(document.documentElement, { clientWidth: 240, clientHeight: 160 });
+    tooltip.getBoundingClientRect = () => ({ width: 224, height: 144 });
+    control.getBoundingClientRect = () => ({ left: 20, top: 80, bottom: 120 });
+    control.events.pointerenter();
+    assert.equal(tooltip.style.left, "8px");
+    assert.equal(tooltip.style.top, "8px");
+    const css = await readFile(new URL("styles.css", import.meta.url), "utf8");
+    const rule = css.match(/^\.task-tooltip \{([^}]+)\}/m)?.[1];
+    assert.match(rule, /max-width: min\(320px, calc\(100vw - 16px\)\);/);
+    assert.match(rule, /max-height: calc\(100vh - 16px\);/);
+    assert.match(rule, /overflow: auto;/);
+    assert.match(rule, /background: var\(--background-color-default,/);
+    assert.match(rule, /white-space: normal;/);
+    assert.match(css.match(/^\.task-button:disabled \{([^}]+)\}/m)?.[1], /pointer-events: none;/);
+});
 
 test("ownership toggle defaults to My PRs and shows only Draft review on other authors' PRs", async () => {
     const state = rendererState();
@@ -1090,7 +1226,7 @@ test("ownership toggle defaults to My PRs and shows only Draft review on other a
         return { ok: true, json: async () => state };
     });
     const cards = () => nodes.get("prs").children;
-    const buttons = (card) => card.children.find((node) => node.className === "task-grid").children;
+    const buttons = taskButtons;
     assert.match(html, /id="mine" type="radio" name="ownership" checked/);
     assert.match(html, /id="others" type="radio" name="ownership"/);
     assert.equal(nodes.get("mine").checked, true);
@@ -1194,7 +1330,7 @@ test("renderer preserves safe history and shows per-task buttons with direct dis
     assert.ok(all.some((node) => node.textContent === '<img src=x onerror="throw Error()">'));
     assert.equal(all.filter((node) => node.tag === "img" || node.tag === "script").length, 0);
     assert.ok(all.some((node) => node.href === `https://github.com/example/fork/commit/${sha("b")}` && node.rel === "noopener noreferrer"));
-    const buttons = () => nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid").children;
+    const buttons = () => taskButtons(nodes.get("prs").firstChild);
     assert.equal(buttons().length, Object.keys(KIND_LABELS).length);
     assert.ok(buttons().every((button) => button.disabled && button.firstChild.className === "task-name"));
     assert.deepEqual(buttons().map((button) => button.firstChild.textContent), [
@@ -1224,7 +1360,7 @@ test("renderer preserves safe history and shows per-task buttons with direct dis
     renderer.render();
     assert.ok(buttons().every((button) => button.children.length === 1 && button.firstChild.className === "task-name"));
     const description = buttons().find((button) => button["aria-label"] === "Update title & description: Run");
-    assert.equal(description.title, TASK_EFFECTS.pr_description);
+    assert.equal(tooltipFor(description).firstChild.textContent, TASK_EFFECTS.pr_description);
     const accept = description.events.click();
     assert.deepEqual(launches, [{ target, kind: "pr_description", confirmed: true }]);
     assert.ok(buttons().every((button) => button.disabled));
@@ -1249,11 +1385,11 @@ test("every task dispatches directly on click and locks duplicate and competing 
             }
             return { ok: true, json: async () => state };
         });
-        const buttons = () => nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid").children;
+        const buttons = () => taskButtons(nodes.get("prs").firstChild);
         const original = [...buttons()];
         const presentation = taskPresentation(state.prs[0], kind, state.workflowReady);
         const button = original.find((node) => node["aria-label"] === `${label}: ${presentation.label}`);
-        assert.ok(button.title.includes(TASK_EFFECTS[kind]));
+        if (!button.disabled) assert.equal(tooltipFor(button).children.at(-1).textContent, TASK_EFFECTS[kind]);
         const pending = button.events.click();
         assert.deepEqual(launches, [{ target, kind, confirmed: true }]);
         assert.ok(buttons().every((node) => node.disabled));
@@ -1273,12 +1409,12 @@ test("live action hints use amber, explain effects and disable tasks without act
         sha: state.prs[0].sha, conflicts: "yes", ci: "failing", failing: 2, copilotThreads: 1, copilotBodies: 0,
     };
     const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
-    const buttons = () => nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid").children;
+    const buttons = () => taskButtons(nodes.get("prs").firstChild);
     const button = (kind) => buttons().find((node) => node["aria-label"].startsWith(`${KIND_LABELS[kind]}:`));
     for (const kind of ["pr_conflict_resolver", "ci_fix", "copilot_review"]) {
         assert.equal(button(kind)["data-tone"], "needed");
         assert.equal(button(kind).disabled, false);
-        assert.ok(button(kind).title.includes(TASK_EFFECTS[kind]));
+        assert.equal(tooltipFor(button(kind)).children.at(-1).textContent, TASK_EFFECTS[kind]);
         assert.equal(button(kind)["aria-description"], taskPresentation(state.prs[0], kind, true).detail);
     }
     assert.equal(button("pr_conflict_resolver")["aria-label"], "Resolve conflicts: Conflicts");
@@ -1297,19 +1433,19 @@ test("live action hints use amber, explain effects and disable tasks without act
     Object.assign(state.prs[0].evidence, { ci: "pending" });
     renderer.render();
     assert.equal(button("ci_fix").disabled, true);
-    assert.match(button("ci_fix").title, /CI is still running/);
+    assert.match(tooltipFor(button("ci_fix")).children[1].textContent, /CI is still running/);
     Object.assign(state.prs[0].evidence, { ci: "none" });
     renderer.render();
     assert.equal(button("ci_fix").disabled, true);
-    assert.match(button("ci_fix").title, /No CI results yet/);
-    assert.match(button("pr_conflict_resolver").title, /unnecessary/);
+    assert.match(tooltipFor(button("ci_fix")).children[1].textContent, /No CI results yet/);
+    assert.equal(tooltipFor(button("pr_conflict_resolver")).children[1].textContent, "No merge conflicts to resolve.");
     state.prs[0].evidence = { sha: state.prs[0].sha, error: "Status read failed." };
     renderer.render(state);
     assert.equal(button("pr_conflict_resolver").disabled, false);
     assert.equal(button("pr_conflict_resolver")["aria-label"], "Resolve conflicts: Status unknown");
-    assert.match(button("pr_conflict_resolver").title, /Status read failed/);
+    assert.match(tooltipFor(button("pr_conflict_resolver")).children[1].textContent, /Status read failed/);
     assert.equal(button("ci_fix").disabled, true);
-    assert.match(button("ci_fix").title, /Refresh to check CI/);
+    assert.match(tooltipFor(button("ci_fix")).children[1].textContent, /Refresh to check CI/);
     const css = await readFile(new URL("styles.css", import.meta.url), "utf8");
     assert.match(css, /data-tone="needed"/);
     assert.match(css, /data-color-mode="dark"/);
@@ -1377,7 +1513,7 @@ test("PR cards put status in task buttons and keep saved metadata in bottom trou
     state.prs[0].phase = phase;
     renderer.render();
     assert.doesNotMatch(texts(), /yours|Head |Waiting since|CI:|Conflicts:|Reviewers:|Address Copilot feedback: clean/);
-    const buttons = row().children.find((node) => node.className === "task-grid").children;
+    const buttons = taskButtons(row());
     assert.equal(buttons.length, Object.keys(KIND_LABELS).length);
     assert.ok(buttons.some((node) => node["aria-label"] === "Address Copilot feedback: Clean"));
     assert.equal(row().children.find((node) => node.tag === "details"), undefined);
@@ -1409,8 +1545,7 @@ test("review cards keep only pending-review links inline and put outcomes in Run
     const details = () => nodes.get("troubleshooting-runs").firstChild.children.find((node) => node.tag === "details");
     const detailTexts = () => details().children[1].children.filter((node) => node.tag === "p")
         .map((node) => node.textContent);
-    const status = () => card().children.find((node) => node.className === "task-grid")
-        .children.find((node) => node["aria-label"]?.startsWith("Draft review:"));
+    const status = () => taskButtons(card()).find((node) => node["aria-label"]?.startsWith("Draft review:"));
     assert.equal(status()["aria-label"], "Draft review: No findings");
     assert.equal(result(), undefined);
     assert.deepEqual(detailTexts(), ["No new findings. No pending review was created."]);
@@ -1555,11 +1690,10 @@ test("Cancel dispatches the exact displayed identity directly and stays locked p
         }
         return { ok: true, json: async () => state };
     });
-    const cancelButton = () => nodes.get("prs").firstChild.children.find((node) =>
-        node.className === "task-grid").children.find((node) => node.textContent === "Cancel task");
+    const cancelButton = () => taskButtons(nodes.get("prs").firstChild).find((node) => node.textContent === "Cancel task");
     const button = cancelButton();
     assert.equal(button.disabled, false);
-    assert.match(button.title, /does not undo published changes/);
+    assert.match(tooltipFor(button).firstChild.textContent, /Published changes stay/);
     const pending = button.events.click();
     assert.deepEqual(cancellations, [{ target, requestId: phase.requestId, generation: phase.generation, confirmed: true }]);
     assert.equal(cancelButton().disabled, true);
@@ -1568,8 +1702,8 @@ test("Cancel dispatches the exact displayed identity directly and stays locked p
     release();
     await pending;
     assert.equal(cancelButton().disabled, true);
-    assert.ok(nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid")
-        .children.some((node) => node["aria-label"] === "Address Copilot feedback: Cancelling"));
+    assert.ok(taskButtons(nodes.get("prs").firstChild)
+        .some((node) => node["aria-label"] === "Address Copilot feedback: Cancelling"));
     Object.assign(state.prs[0], { phase: { ...phase, stage: "cancelled" },
         canCancel: false, actionBlock: null, dispatch: null });
     renderer.render();
@@ -1597,8 +1731,8 @@ test("Cancel launch uses the exact accepted run receipt and locks duplicate clic
         }
         return { ok: true, json: async () => state };
     });
-    const grid = () => nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid");
-    const cancelButton = () => grid().children.find((node) => node.textContent === "Cancel launch");
+    const buttons = () => taskButtons(nodes.get("prs").firstChild);
+    const cancelButton = () => buttons().find((node) => node.textContent === "Cancel launch");
     const button = cancelButton();
     assert.equal(button.disabled, false);
     const pending = button.events.click();
@@ -1609,7 +1743,7 @@ test("Cancel launch uses the exact accepted run receipt and locks duplicate clic
     release();
     await pending;
     assert.equal(cancelButton().disabled, true);
-    assert.ok(grid().children.some((node) => node["aria-label"] === `${KIND_LABELS.self_review}: Cancelling`));
+    assert.ok(buttons().some((node) => node["aria-label"] === `${KIND_LABELS.self_review}: Cancelling`));
     const notice = nodes.get("troubleshooting-runs").firstChild.children.find((node) => node.className === "notice");
     assert.equal(notice.children.find((node) => node.tag === "a").href, pr.dispatch.runUrl);
     Object.assign(pr, { dispatch: null, actionBlock: null });
@@ -1798,7 +1932,6 @@ test("renderer omits routine header metadata but retains read errors and refresh
             `Open PRs are ${loaded ? "stale" : "unavailable"}. PR read unavailable Workflow status is ${loaded ? "stale" : "unavailable"}. Workflow read unavailable`);
         assert.equal(nodes.get("pause").hidden, false);
         assert.equal(nodes.get("pause").textContent, state.pauseReason);
-        assert.ok(nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid")
-            .children.every((button) => button.disabled));
+        assert.ok(taskButtons(nodes.get("prs").firstChild).every((button) => button.disabled));
     }
 });

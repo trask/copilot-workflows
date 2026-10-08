@@ -371,7 +371,11 @@ test("failed live evidence remains unknown rather than falling back to saved no-
 });
 
 test("fresh conflict, CI and Copilot preflight rejects unnecessary tasks after an enabled snapshot", async () => {
-    for (const kind of ["pr_conflict_resolver", "ci_fix", "copilot_review"]) {
+    for (const [kind, message] of [
+        ["pr_conflict_resolver", /No merge conflicts to resolve/],
+        ["ci_fix", /Nothing to fix/],
+        ["copilot_review", /No Copilot feedback to address/],
+    ]) {
         const c = controller();
         c.github.pullEvidence = async () => new Map([[12, {
             detail: detail({ checks: [check("FAILURE")], threads: [thread()] }),
@@ -379,7 +383,7 @@ test("fresh conflict, CI and Copilot preflight rejects unnecessary tasks after a
         const snapshot = await c.canvas.refresh();
         assert.equal(taskPresentation(snapshot.prs[0], kind, true).disabled, false);
         c.github.pullEvidence = async () => new Map([[12, { detail: detail({ conflicts: "PASSED", checks: [check()] }) }]]);
-        await assert.rejects(c.canvas.launch({ target, kind, confirmed: true }), /unnecessary/);
+        await assert.rejects(c.canvas.launch({ target, kind, confirmed: true }), message);
         assert.equal(c.calls.filter((call) => typeof call === "object").length, 0);
         assert.equal(c.canvas.state().prs[0].dispatch, null);
     }
