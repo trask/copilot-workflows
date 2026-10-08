@@ -334,6 +334,25 @@ test("only submitted verified current-head review bodies count, and unknown text
     ]) assert.equal(normalizeEvidence(detail({ reviews: [reviewBody] }), sha).copilotBodies, 1);
 });
 
+test("the code-review skill footer does not turn a zero-finding review into feedback", () => {
+    const changed = "\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nRetains invalid span links with metadata.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| SdkSpan.java | Retains qualifying runtime links. |\n</details>";
+    const footer = '\n\n---\n\n\u{1f4a1} <a href="/open-telemetry/opentelemetry-java/new/main?filename=.github/skills/code-review/SKILL.md" class="Link--inTextBlock" target="_blank" rel="noopener noreferrer">Add a `code-review` agent skill</a> or configure MCP servers for context-aware, tailored reviews. <a href="https://docs.github.com/copilot/how-tos/use-copilot-agents/request-a-code-review/use-code-review?tool=webui#mcp-servers-and-agent-skills" class="Link--inTextBlock" target="_blank" rel="noopener noreferrer">Learn more in the docs.</a>';
+    const body = cleanBody.replace("\n\n\u{1f9e0}", changed + "\n\n\u{1f9e0}") + footer;
+    const evidence = normalizeEvidence(detail({ reviews: [review({ body })] }), sha);
+    assert.equal(evidence.copilotThreads, 0);
+    assert.equal(evidence.copilotBodies, 0);
+    const pr = { ...normalizePull(pull(), repo, state(), account), tasks: ["copilot_review"], evidence };
+    assert.equal(actionEvidence(pr, "copilot_review").label, "No Copilot feedback");
+    assert.equal(taskPresentation(pr, "copilot_review", true).disabled, true);
+    assert.equal(normalizeEvidence(detail({ reviews: [review({ body })], threads: [thread()] }), sha).copilotThreads, 1);
+    assert.equal(normalizeEvidence(detail({
+        reviews: [review({ body: body.replace("**0 open findings**", "**1 open finding**") })],
+    }), sha).copilotBodies, 1);
+    assert.equal(normalizeEvidence(detail({
+        reviews: [review({ body: body + "\nUnexpected finding" })],
+    }), sha).copilotBodies, 1);
+});
+
 test("incomplete Copilot review-body evidence stays unknown rather than disabling the task", () => {
     const raw = detail();
     raw.reviews.pageInfo.hasNextPage = true;

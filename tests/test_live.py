@@ -1332,6 +1332,31 @@ class ReviewTests(unittest.TestCase):
         read.resolved = True
         self.assertEqual("clean", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
 
+    def test_code_review_skill_footer_and_change_summary_preserve_review_findings(self):
+        changed = ("\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\n"
+                   "Retains invalid span links with metadata.\n\n"
+                   "| File | Description |\r\n| ---- | ----------- |\r\n"
+                   "| SdkSpan.java | Retains qualifying runtime links. |\n</details>")
+        footer = (
+            '\n\n---\n\n\U0001f4a1 <a href="/open-telemetry/opentelemetry-java/new/main'
+            '?filename=.github/skills/code-review/SKILL.md" class="Link--inTextBlock"'
+            ' target="_blank" rel="noopener noreferrer">Add a `code-review` agent skill</a>'
+            ' or configure MCP servers for context-aware, tailored reviews. '
+            '<a href="https://docs.github.com/copilot/how-tos/use-copilot-agents/request-a-code-review/'
+            'use-code-review?tool=webui#mcp-servers-and-agent-skills" class="Link--inTextBlock"'
+            ' target="_blank" rel="noopener noreferrer">Learn more in the docs.</a>')
+        body = CURRENT_CLEAN_RESOLVED.replace(
+            "\n\n\U0001f9e0", changed + "\n\n\U0001f9e0") + footer
+        self.assertEqual("clean", body_classification(body))
+        self.assertEqual("findings", body_classification(
+            body.replace("**0 open findings**", "**1 open finding**")))
+        self.assertNotEqual("clean", body_classification(body + "\nUnexpected finding"))
+        read, req = Read(), personal_request()
+        read.reviews.append(review(id=13, body=body, submitted_at=iso(200)))
+        self.assertEqual("findings", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
+        read.resolved = True
+        self.assertEqual("clean", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
+
     def test_resolved_summary_keeps_missed_findings_before_native_footers(self):
         body = CURRENT_CLEAN_RESOLVED.replace(
             "\n\n\U0001f9e0", "\n" + MISSED.rstrip("\n") + "\n\n\U0001f9e0")

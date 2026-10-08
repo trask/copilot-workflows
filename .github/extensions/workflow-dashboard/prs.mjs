@@ -87,6 +87,7 @@ function hasCopilotBodyFeedback(body) {
     if (!body.trim()) return false;
     const summary = body.replaceAll("\r\n", "\n")
         .replace(/\n\n---\n\nGive feedback about Copilot approvals in \[this survey\]\(https:\/\/[^\s()<>]+\) to enter a drawing for a \$[0-9]+ gift card\.\n?$/, "")
+        .replace(/\n\n---\n\n\u{1f4a1} <a [^<>\n]+>Add a `code-review` agent skill<\/a> or configure MCP servers for context-aware, tailored reviews\. <a [^<>\n]+>Learn more in the docs\.<\/a>\n?$/u, "")
         .replace(/\n\n\u{1f9e0} \*\*Review effort:\*\* Balanced\n?$/u, "")
         .replace(/\n\n<details>\n<summary><strong>What changed in this PR<\/strong><\/summary>\n\n(?:(?!<\/?details[>\s])[\s\S])+\n<\/details>(?=\n|$)/, "")
         .replace(/\n\n<details>\n<summary><strong>(?:Resolved since last review \([1-9][0-9]*\)|[1-9][0-9]* resolved since last review)<\/strong><\/summary>\n\n(?:- (?:<picture>(?:<source [^<>\n]+>)+<img [^<>\n]+><\/picture> )?\[[^\[\]<>\n]+\]\(#discussion_r[1-9][0-9]*\)\n)+<\/details>\n?$/, "");

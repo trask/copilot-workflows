@@ -16,6 +16,10 @@ def _without_review_footer(body):
         r"\n\n---\n\nGive feedback about Copilot approvals in \[this survey\]"
         r"\(https://[^\s()<>]+\) to enter a drawing for a \$[0-9]+ gift card\.\n?\Z",
         "", body)
+    body = re.sub(
+        r"\n\n---\n\n\U0001f4a1 <a [^<>\n]+>Add a `code-review` agent skill</a>"
+        r" or configure MCP servers for context-aware, tailored reviews\. "
+        r"<a [^<>\n]+>Learn more in the docs\.</a>\n?\Z", "", body)
     effort = re.search(r"\n\n\U0001f9e0 \*\*Review effort:\*\* Balanced\n?\Z", body)
     return (body[:effort.start()], True) if effort is not None else (body, False)
 
@@ -25,7 +29,10 @@ def _body_classification(body):
         return "unknown", []
     if body.count("<!-- ccr-overview-v2 -->") != 1:
         return "unknown", []
-    body, effort = _without_review_footer(body)
+    body, effort = _without_review_footer(body.replace("\r\n", "\n"))
+    body = re.sub(
+        r"\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\n"
+        r"(?:(?!</?details[>\s]).)+\n</details>(?=\n|\Z)", "", body, count=1, flags=re.DOTALL)
     counts = re.findall(r"\*\*Findings:\*\*\s*(None|[0-9]+)\b", body)
     counts += re.findall(r"(?:\*\*|<strong>)([0-9]+) open findings?(?:\*\*|</strong>)", body)
     if len(counts) != 1:
