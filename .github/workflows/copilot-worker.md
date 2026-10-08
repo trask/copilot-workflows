@@ -195,6 +195,7 @@ the selected head, merge-base and conflict history. From the central workspace:
 ```python
 import json
 from pathlib import Path
+from loop.policy import diff_scope
 from loop.source import acquire_source, git
 
 request = json.loads(Path("frozen-request.json").read_text(encoding="utf-8"))
@@ -202,6 +203,9 @@ Path("/tmp/target").mkdir()
 git(["init", "--quiet"], "/tmp/target")
 acquire_source("/tmp/target", request)
 git(["checkout", "--quiet", "--detach", request["frozen_sha"]], "/tmp/target")
+assert git(["rev-parse", "HEAD"], "/tmp/target").decode().strip() == request["frozen_sha"]
+if diff_scope(request):
+    assert git(["rev-parse", "review-base"], "/tmp/target").decode().strip() == request["merge_base_sha"]
 ```
 
 The helper creates `refs/heads/review-base` at `merge_base_sha` for diff-based tasks,
