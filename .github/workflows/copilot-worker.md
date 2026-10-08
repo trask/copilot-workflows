@@ -40,6 +40,7 @@ permissions:
   actions: read
 engine:
   id: copilot
+  model: gpt-6.1-sol?effort=high
   bare: true
   env:
     AWF_CHROOT_IDENTITY_HOME: /tmp/review-loop-worker-home

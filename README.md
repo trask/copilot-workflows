@@ -8,6 +8,8 @@ The scope stays personal and opt-in. Only a fresh owner dispatch can launch work
 
 All eight kinds share `coordinator.yml`, one artifact-only worker per pass, structural verification, credential routing, durable intents, checkpoint storage and the shared waiter. Select one `loop_kind` per launch. They do not form a combined pipeline.
 
+The shared Copilot worker and its threat detector use `gpt-6.1-sol` with high reasoning effort, configured as `engine.model: gpt-6.1-sol?effort=high` in `.github/workflows/copilot-worker.md`. GitHub's external Copilot PR reviews use GitHub-managed settings, not this worker configuration.
+
 | Display name | `loop_kind` | Completion |
 | --- | --- | --- |
 | Address Copilot feedback | `copilot_review` | Existing findings, warranted fixes, mandatory bot-thread handling and fresh external review until clean with passing exact-head CI |

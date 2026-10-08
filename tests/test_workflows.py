@@ -9,6 +9,22 @@ from loop.policy import Rejected
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_worker_and_threat_detection_share_explicit_model_and_effort(self):
+        root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+        frontmatter = (root / "copilot-worker.md").read_text(
+            encoding="utf-8").split("\n---\n", 1)[0]
+        self.assertIn("\nengine:\n  id: copilot\n  model: gpt-6.1-sol?effort=high\n",
+                      frontmatter)
+        jobs = (root / "copilot-worker.lock.yml").read_text(
+            encoding="utf-8").split("\njobs:\n", 1)[1]
+        sections = dict(re.findall(
+            r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
+            jobs, re.MULTILINE | re.DOTALL))
+        for job in ("agent", "detection"):
+            with self.subTest(job=job):
+                self.assertEqual(["gpt-6.1-sol?effort=high"], re.findall(
+                    r"^\s+COPILOT_MODEL: (.+)$", sections[job], re.MULTILINE))
+
     def test_custom_secrets_require_the_protected_environment(self):
         root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
         expected = {
