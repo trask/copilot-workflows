@@ -239,14 +239,14 @@ def exact_ci(api, repo, sha, required):
             if not contexts:
                 identities = independent_actions_checks(api, repo, sha, runs, executions)
             if identities:
-                selected = [check_decision(check, sha) for check in runs]
-                decision = next((d for d in ("failed", "unknown", "pending") if d in selected), "passed")
+                selected = [check_decision(check, sha, accept_nonblocking=True) for check in runs]
+                decision = next((d for d in ("failed", "pending", "unknown") if d in selected), "passed")
             else:
                 decision = "unknown"
         elif not runs and not contexts:
             decision = "missing"
         elif runs:
-            decision = check_decision(runs[0], sha)
+            decision = check_decision(runs[0], sha, accept_nonblocking=True)
         else:
             decision = {"success": "passed", "pending": "pending",
                         "failure": "failed", "error": "failed"}.get(contexts[0]["state"], "unknown")
@@ -257,6 +257,6 @@ def exact_ci(api, repo, sha, required):
         elif len(runs) + len(contexts) > 1:
             entry["reason"] = "duplicate_or_unbound_CI_identity"
         result["checks"].append(entry)
-    result["decision"] = next((d for d in ("failed", "unknown", "missing", "pending")
+    result["decision"] = next((d for d in ("failed", "pending", "unknown", "missing")
                                if d in decisions), "passed")
     return result

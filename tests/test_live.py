@@ -1565,6 +1565,43 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual("passed", exact_ci(api, FIXTURE, SHA, [CI_CHECK])["decision"])
         self.assertTrue(any("page=2" in path for path in api.paths))
 
+    def test_review_watcher_continues_after_nonblocking_ci_results(self):
+        for conclusion in ("skipped", "neutral"):
+            with self.subTest(conclusion=conclusion):
+                state = live_state(stage="waiting_review")
+                state["review_request"] = {"baseline_review_ids": [12], "recorded_at": 100, "sha": SHA}
+                read = Read()
+                read.reviews = [review(id=13, body=NONCLEAN, submitted_at=iso(200))]
+                read.checks[0]["conclusion"] = conclusion
+                self.assertEqual("passed", exact_ci(read, FIXTURE, SHA, [CI_CHECK])["decision"])
+                store, name = stored(state)
+                result = watch_review(store, name, state, read, 400)
+                self.assertEqual("ready", result["stage"])
+                self.assertEqual(1, result["iteration"])
+
+    def test_review_watcher_waits_for_active_ci_before_missing_or_unknown_results(self):
+        state = live_state(stage="waiting_review")
+        state["review_request"] = {"baseline_review_ids": [12], "recorded_at": 100, "sha": SHA}
+        state["request"]["publication"]["required_checks"] += ["optional job", "dependent job"]
+        read = Read()
+        read.reviews = [review(id=13, body=NONCLEAN, submitted_at=iso(200))]
+        read.checks[0].update(status="in_progress", conclusion=None)
+        read.checks.append(dict(read.checks[0], id=334, name="optional job",
+                                status="completed", conclusion=None))
+        store, name = stored(state)
+        result = watch_review(store, name, state, read, 400)
+        self.assertEqual("waiting_ci", result["stage"])
+        self.assertEqual("pending", result["ci"]["decision"])
+        self.assertEqual(["pending", "unknown", "missing"],
+                         [check["decision"] for check in result["ci"]["checks"]])
+        read.checks[0].update(status="completed", conclusion="success")
+        self.assertEqual("unknown", exact_ci(
+            read, FIXTURE, SHA, state["request"]["publication"]["required_checks"])["decision"])
+        read.checks[0].update(status="in_progress", conclusion=None)
+        read.checks[1]["conclusion"] = "failure"
+        self.assertEqual("failed", exact_ci(
+            read, FIXTURE, SHA, state["request"]["publication"]["required_checks"])["decision"])
+
     def test_clean_requires_postpush_ci_nonclean_advances_only_remaining_bounded_pipeline(self):
         state = live_state(stage="waiting_review")
         state["review_request"] = {"baseline_review_ids": [12], "recorded_at": 100, "sha": SHA}

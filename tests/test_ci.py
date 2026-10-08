@@ -39,8 +39,8 @@ class IndependentWorkflowCITests(unittest.TestCase):
             ("completed", "success", "passed"),
             ("in_progress", None, "pending"),
             ("completed", "failure", "failed"),
-            ("completed", "skipped", "unknown"),
-            ("completed", "neutral", "unknown"),
+            ("completed", "skipped", "passed"),
+            ("completed", "neutral", "passed"),
         ]:
             read, _, _ = self.context()
             read.checks[1].update(status=status, conclusion=conclusion)

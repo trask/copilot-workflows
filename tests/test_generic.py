@@ -236,7 +236,7 @@ new file mode 100644
         read = Read()
         self.assertEqual([CI_CHECK], select_checks(read, read.req))
         self.assertEqual("none", exact_ci(read, FIXTURE, SHA, [])["decision"])
-        for conclusion, expected in (("neutral", "unknown"), ("skipped", "unknown"),
+        for conclusion, expected in (("neutral", "passed"), ("skipped", "passed"),
                                      ("cancelled", "failed"), ("timed_out", "failed"),
                                      (None, "unknown")):
             read.checks[0]["conclusion"] = conclusion
