@@ -1300,7 +1300,7 @@ test("live action hints use amber, explain effects and disable only confirmed un
     assert.match(css, /data-color-mode="dark"/);
 });
 
-test("PR headings show the author only in Not my PRs without routing, dashboard or draft pills", async () => {
+test("PR headings put Draft and Approved after the title and the other author's username last", async () => {
     const state = rendererState();
     const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
     for (const mine of [true, false]) {
@@ -1309,28 +1309,40 @@ test("PR headings show the author only in Not my PRs without routing, dashboard 
         Object.assign(state.prs[0], {
             mine, author: mine ? "trask" : "renovate[bot]", tasks: mine ? Object.keys(KIND_LABELS) : ["pr_review"],
         });
-        for (const draft of [true, false]) {
-            for (const routeLabel of ["Dashboard stale", "Dashboard missing", "Waiting on authors",
-                "Waiting on reviewers", "Waiting on maintainers", "Draft"]) {
-                Object.assign(state.prs[0], { draft, routeLabel });
-                renderer.render();
-                const card = nodes.get("prs").firstChild;
-                const heading = card.firstChild;
-                assert.equal(heading.children.length, mine ? 1 : 2);
-                assert.equal(heading.className, "row pr-heading");
-                assert.equal(heading.firstChild.tag, "a");
-                assert.equal(heading.firstChild.textContent, "#12 PR in example/project");
-                assert.equal(heading.firstChild.href, state.prs[0].url);
-                if (!mine) {
-                    assert.equal(heading.children[1].tag, "span");
-                    assert.equal(heading.children[1].className, "pr-author muted");
-                    assert.equal(heading.children[1].textContent, "@renovate[bot]");
-                }
-                assert.equal(card.children.find((node) => node.className === "task-grid").children.length,
-                    mine ? 8 : 1);
+        for (const [draft, approved, labels] of [
+            [false, false, []], [false, true, ["Approved"]], [true, false, ["Draft"]], [true, true, ["Draft", "Approved"]],
+        ]) {
+            Object.assign(state.prs[0], { draft, approved });
+            renderer.render();
+            const card = nodes.get("prs").firstChild;
+            const heading = card.firstChild;
+            assert.equal(heading.children.length, 1 + labels.length + Number(!mine));
+            assert.equal(heading.className, "row pr-heading");
+            assert.equal(heading.firstChild.tag, "a");
+            assert.equal(heading.firstChild.textContent, "#12 PR in example/project");
+            assert.equal(heading.firstChild.href, state.prs[0].url);
+            for (const [index, label] of labels.entries()) {
+                const badge = heading.children[index + 1];
+                assert.equal(badge.tag, "span");
+                assert.equal(badge.textContent, label);
+                assert.equal(badge.className, label === "Draft" ? "badge muted" : "badge approved");
+                if (label === "Approved") assert.match(badge.title, /approver-team approval/);
             }
+            if (!mine) {
+                const author = heading.children.at(-1);
+                assert.equal(author.tag, "span");
+                assert.equal(author.className, "pr-author muted");
+                assert.equal(author.textContent, "@renovate[bot]");
+            }
+            assert.equal(card.children.find((node) => node.className === "task-grid").children.length,
+                mine ? 8 : 1);
         }
     }
+    const css = await readFile(new URL("styles.css", import.meta.url), "utf8");
+    assert.doesNotMatch(css.match(/^\.pr-heading > a \{([^}]+)\}/m)?.[1] ?? "", /flex:\s*1/);
+    assert.match(css, /\.pr-heading > \.badge \{ flex: none; \}/);
+    assert.match(css, /\.pr-author \{ margin-left: auto;/);
+    assert.match(css, /\.badge\.approved \{ color: var\(--true-color-green,/);
 });
 
 test("PR cards put status in task buttons and keep saved metadata in bottom troubleshooting details", async () => {

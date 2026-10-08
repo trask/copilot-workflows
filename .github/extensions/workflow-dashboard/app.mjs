@@ -208,6 +208,12 @@ function prCard(pr) {
     const card = element("article", null, "pr-card");
     const heading = element("div", null, "row pr-heading");
     heading.append(link(`#${pr.number} ${pr.title}`, pr.url));
+    if (pr.draft) heading.append(element("span", "Draft", "badge muted"));
+    if (pr.approved) {
+        const badge = element("span", "Approved", "badge approved");
+        badge.title = "At least one approver-team approval in the latest saved dashboard.";
+        heading.append(badge);
+    }
     if (!pr.mine) heading.append(element("span", `@${pr.author}`, "pr-author muted"));
     card.append(heading);
     const tasks = element("div", null, "task-grid");

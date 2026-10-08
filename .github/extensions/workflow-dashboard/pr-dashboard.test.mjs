@@ -444,11 +444,23 @@ test("all open rows include drafts, bots and missing dashboard data; routing use
     assert.throws(() => normalizePull(pull({ state: "closed" }), repo, state(), account), /invalid/);
 });
 
+test("approval labels use the dashboard's approver-team count, not other reviewers' approvals", () => {
+    const approved = cached({ facts: facts({ approval_count: 1 }) });
+    assert.equal(normalizePull(pull(), repo, state(approved), account).approved, true);
+    const nonTeam = cached({ facts: facts({
+        approval_count: 0, reviewers: [{ login: "outsider", approved_non_team: true }],
+    }) });
+    assert.equal(normalizePull(pull(), repo, state(nonTeam), account).approved, false);
+    assert.equal(normalizePull(pull(), repo, state(cached()), account).approved, false);
+    assert.equal(normalizePull(pull(), repo, state({ ...approved, failed: true }), account).approved, false);
+});
+
 test("refresh uses the latest saved routing and facts while ownership and tasks use the live author", async () => {
     const c = controller({
         pulls: [pull({ user: { login: "renovate[bot]", id: 21, type: "Bot" } })],
         dashboardState: state(cached({ facts: facts({
             head_sha: "d".repeat(40), author: "app/renovate", is_draft: true, ci_pending_count: 2,
+            approval_count: 1,
         }) })),
     });
     const first = await c.canvas.refresh();
@@ -459,6 +471,7 @@ test("refresh uses the latest saved routing and facts while ownership and tasks 
     assert.equal(pr.author, "renovate[bot]");
     assert.equal(pr.sha, sha);
     assert.equal(pr.draft, false);
+    assert.equal(pr.approved, true);
     assert.equal(pr.mine, false);
     assert.deepEqual(pr.tasks, ["pr_review"]);
     assert.deepEqual(filterPulls(first.prs, { mine: false, reviewers: true }), [pr]);
@@ -467,6 +480,7 @@ test("refresh uses the latest saved routing and facts while ownership and tasks 
     assert.deepEqual(next.prWarnings, []);
     assert.equal(next.prs[0].routeLabel, "Waiting on authors");
     assert.equal(next.prs[0].ciPending, 0);
+    assert.equal(next.prs[0].approved, false);
     assert.deepEqual(filterPulls(next.prs, { mine: false, reviewers: true }), []);
 });
 
