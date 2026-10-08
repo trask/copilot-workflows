@@ -6,6 +6,7 @@ export const REPOSITORIES = [
     "open-telemetry/semantic-conventions",
     "open-telemetry/github-threat-detection",
     "open-telemetry/admin",
+    "open-telemetry/opentelemetry-java",
 ];
 export const DEFAULT_REPOSITORY = REPOSITORIES[0];
 export const LAUNCH_OWNER_ID = 218610;

@@ -147,6 +147,7 @@ test("repository config is small, has the requested default, and bounds reads an
         "open-telemetry/semantic-conventions",
         "open-telemetry/github-threat-detection",
         "open-telemetry/admin",
+        "open-telemetry/opentelemetry-java",
     ]);
     assert.equal(DEFAULT_REPOSITORY, "open-telemetry/opentelemetry-java-instrumentation");
     for (const selected of REPOSITORIES) {
