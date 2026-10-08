@@ -7,6 +7,26 @@ from loop.policy import check_target, exact, iso, require, timestamp
 from loop.reviews import check_decision, ci_items, copilot_check
 
 
+def latest_workflows(repo, sha, runs):
+    latest = {}
+    for run in runs:
+        if (run["head_sha"] != sha or run["repository"]["full_name"] != repo
+                or re.fullmatch(r"\.github/workflows/[^/\\@?#]+\.ya?ml",
+                                run["path"].split("@")[0]) is None):
+            continue
+        require(type(run["workflow_id"]) is int and run["workflow_id"] > 0
+                and type(run["run_number"]) is int and run["run_number"] > 0
+                and isinstance(run["event"], str) and run["event"],
+                "CI workflow execution sequence is invalid")
+        key = run["workflow_id"], run["event"]
+        prior = latest.get(key)
+        require(prior is None or prior["run_number"] != run["run_number"]
+                or prior["id"] == run["id"], "CI workflow execution sequence is ambiguous")
+        if prior is None or run["run_number"] > prior["run_number"]:
+            latest[key] = run
+    return latest
+
+
 def collect(api, request, required):
     sha, repo = request["frozen_sha"], request["repo"]
     check_target(api, request)
@@ -83,23 +103,13 @@ def collect(api, request, required):
                              "evidence": text})
     active_runs = api.pages(f"repos/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
     require(len(active_runs) <= 100, "CI run collection exceeds limit")
-    latest = {}
-    for run in [*active_runs, *(r for r, _ in executions.values())]:
-        if (run["head_sha"] != sha or run["repository"]["full_name"] != repo
-                or re.fullmatch(r"\.github/workflows/[^/\\@?#]+\.ya?ml",
-                                run["path"].split("@")[0]) is None):
-            continue
-        require(type(run["workflow_id"]) is int and run["workflow_id"] > 0
-                and type(run["run_number"]) is int and run["run_number"] > 0,
-                "CI workflow execution sequence is invalid")
-        prior = latest.get(run["workflow_id"])
-        require(prior is None or prior["run_number"] != run["run_number"]
-                or prior["id"] == run["id"], "CI workflow execution sequence is ambiguous")
-        if prior is None or run["run_number"] > prior["run_number"]:
-            latest[run["workflow_id"]] = run
+    latest = latest_workflows(repo, sha, [*active_runs, *(r for r, _ in executions.values())])
     def current(item):
         identity = item["actions"]
-        return not identity or latest[identity["workflow_id"]]["id"] == identity["run_id"]
+        if not identity:
+            return True
+        run = executions[identity["run_id"]][0]
+        return latest[run["workflow_id"], run["event"]]["id"] == identity["run_id"]
     selected = [item for item in selected if current(item)]
     failures = [item for item in failures if current(item)]
     for failure in failures:
@@ -131,7 +141,8 @@ def collect(api, request, required):
                  for r in latest.values())
     duplicate = any(names.count(n) > 1 and (
         any(not s["actions"] for s in selected if s["name"] == n)
-        or len({s["actions"]["workflow_id"] for s in selected if s["name"] == n}) != names.count(n))
+        or len({(s["actions"]["workflow_id"], executions[s["actions"]["run_id"]][0]["event"])
+                for s in selected if s["name"] == n}) != names.count(n))
                     for n in set(names))
     decision = ("pending" if active or "pending" in decisions else "unknown" if duplicate
                 else "missing" if set(required) - set(names) else "failed" if failures
@@ -139,7 +150,7 @@ def collect(api, request, required):
     result = {"sha": sha, "required": required, "checks": selected, "failures": failures,
               "runs": [{"id": r["id"], "attempt": r["run_attempt"], "status": r["status"],
                         "conclusion": r["conclusion"]} for r, _ in executions.values()
-                       if latest[r["workflow_id"]]["id"] == r["id"]],
+                       if latest[r["workflow_id"], r["event"]]["id"] == r["id"]],
               "decision": decision}
     check_target(api, request)
     return result

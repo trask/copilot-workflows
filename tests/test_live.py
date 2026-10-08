@@ -178,7 +178,7 @@ class Read:
         self.runs = [{
             "id": 200, "head_sha": self.pr["head"]["sha"], "event": "push",
             "path": CI_WORKFLOW_PATH, "run_attempt": 1,
-            "workflow_id": CI_WORKFLOW_ID,
+            "workflow_id": CI_WORKFLOW_ID, "run_number": 1,
             "repository": {"id": REPOSITORIES[FIXTURE], "full_name": FIXTURE},
             "head_repository": {"id": REPOSITORIES[FIXTURE], "full_name": FIXTURE},
             "actor": {"id": AUTHOR_ID, "type": "User"}, "status": "completed", "conclusion": "success",
@@ -225,6 +225,8 @@ class Read:
             return copy.deepcopy(self.comments)
         if "/check-runs" in path:
             return copy.deepcopy(self.checks)
+        if path.endswith("/status"):
+            return copy.deepcopy(list({s["context"]: s for s in reversed(self.statuses)}.values()))
         if path.endswith("/statuses"):
             return copy.deepcopy(self.statuses)
         raise AssertionError(path)
@@ -1316,6 +1318,20 @@ class ReviewTests(unittest.TestCase):
             "1 resolved since last review", "2 resolved since last review")))
         self.assertEqual("unknown", body_classification(CURRENT_CLEAN + "\nUnexpected finding"))
 
+    def test_native_approval_feedback_footer_does_not_hide_review_findings(self):
+        footer = ("\n\n---\n\nGive feedback about Copilot approvals in [this survey]"
+                  "(https://survey.alchemer.com/s3/9011660/CCR-Public-Preview-Autoapprove-feedback-survey)"
+                  " to enter a drawing for a $150 gift card.")
+        self.assertEqual("clean", body_classification(CURRENT_CLEAN + footer))
+        self.assertEqual("clean", body_classification(CURRENT_CLEAN_RESOLVED + footer))
+        self.assertEqual("findings", body_classification(CURRENT_NONCLEAN + footer))
+        self.assertEqual("unknown", body_classification(CURRENT_CLEAN + footer + "\nUnexpected finding"))
+        read, req = Read(), personal_request()
+        read.reviews.append(review(id=13, body=CURRENT_CLEAN_RESOLVED + footer, submitted_at=iso(200)))
+        self.assertEqual("findings", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
+        read.resolved = True
+        self.assertEqual("clean", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
+
     def test_current_resolved_summary_requires_closed_verified_roots(self):
         read, req = Read(), personal_request()
         read.reviews.append(review(id=13, body=CURRENT_CLEAN_RESOLVED, submitted_at=iso(200)))
@@ -1552,8 +1568,8 @@ class ReviewTests(unittest.TestCase):
                 self.paths.append(path)
                 if "/git/trees/" in path:
                     return Read().call(path)
-                if "/statuses" in path:
-                    return []
+                if "/status" in path:
+                    return {"statuses": []}
                 if path.split("?", 1)[0].endswith("/jobs"):
                     return {"jobs": Read().pages(path, "jobs")}
                 if "/actions/runs" in path:

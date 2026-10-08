@@ -25,6 +25,7 @@ class IndependentWorkflowCITests(unittest.TestCase):
             jobs[run_id] = [{"id": check_id, "run_id": run_id, "run_attempt": 1, "name": CI_CHECK,
                              "check_run_url": f"https://api.github.com/repos/{FIXTURE}/check-runs/{check_id}"}]
         read.checks = checks
+        read.runs = list(executions.values())
         call, pages = read.call, read.pages
         read.call = Mock(side_effect=lambda path: (
             executions[int(path.rsplit("/", 1)[1])]
@@ -33,6 +34,44 @@ class IndependentWorkflowCITests(unittest.TestCase):
             jobs[int(path.split("/actions/runs/", 1)[1].split("/", 1)[0])]
             if path.endswith("/attempts/1/jobs") else pages(path, key)))
         return read, executions, jobs
+
+    def test_newer_execution_supersedes_cancelled_checks_without_hiding_new_failures(self):
+        read, executions, _ = self.context()
+        executions[201].update(workflow_id=600, path=executions[200]["path"], run_number=2)
+        read.checks[0]["conclusion"] = "cancelled"
+        result = exact_ci(read, FIXTURE, SHA, [CI_CHECK])
+        self.assertEqual("passed", result["decision"])
+        self.assertEqual([334], result["checks"][0]["ids"])
+        self.assertEqual(201, result["checks"][0]["workflows"][0]["run_id"])
+        read.checks[1]["conclusion"] = "failure"
+        self.assertEqual("failed", exact_ci(read, FIXTURE, SHA, [CI_CHECK])["decision"])
+
+    def test_newer_queued_execution_waits_even_before_its_checks_exist(self):
+        read, executions, _ = self.context()
+        executions[201].update(workflow_id=600, path=executions[200]["path"], run_number=2)
+        read.runs.append(dict(executions[201], id=202, run_number=3,
+                              status="queued", conclusion=None))
+        result = exact_ci(read, FIXTURE, SHA, [CI_CHECK])
+        self.assertEqual("pending", result["decision"])
+        self.assertEqual([], result["checks"][0]["ids"])
+
+    def test_different_events_of_one_workflow_remain_independent(self):
+        read, executions, _ = self.context()
+        executions[201].update(workflow_id=600, path=executions[200]["path"],
+                               run_number=2, event="pull_request")
+        read.checks[0]["conclusion"] = "failure"
+        result = exact_ci(read, FIXTURE, SHA, [CI_CHECK])
+        self.assertEqual("failed", result["decision"])
+        self.assertEqual([333, 334], result["checks"][0]["ids"])
+
+    def test_latest_commit_status_supersedes_older_updates(self):
+        read = Read()
+        read.checks = []
+        read.statuses = [{"id": 2, "context": "external CI", "state": "success"},
+                         {"id": 1, "context": "external CI", "state": "failure"}]
+        result = exact_ci(read, FIXTURE, SHA, ["external CI"])
+        self.assertEqual("passed", result["decision"])
+        self.assertEqual([2], result["checks"][0]["ids"])
 
     def test_distinct_verified_workflows_with_matching_names_all_must_pass(self):
         for status, conclusion, expected in [

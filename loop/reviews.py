@@ -16,6 +16,10 @@ def _body_classification(body):
         return "unknown", []
     if body.count("<!-- ccr-overview-v2 -->") != 1:
         return "unknown", []
+    body = re.sub(
+        r"\n\n---\n\nGive feedback about Copilot approvals in \[this survey\]"
+        r"\(https://[^\s()<>]+\) to enter a drawing for a \$[0-9]+ gift card\.\n?\Z",
+        "", body)
     counts = re.findall(r"\*\*Findings:\*\*\s*(None|[0-9]+)\b", body)
     counts += re.findall(r"(?:\*\*|<strong>)([0-9]+) open findings?(?:\*\*|</strong>)", body)
     if len(counts) != 1:
@@ -175,9 +179,9 @@ def check_decision(check, sha, *, accept_nonblocking=False):
     return "unknown"
 
 
-def independent_actions_checks(api, repo, sha, checks, cache):
-    identities = []
-    workflow_ids, workflow_paths, check_ids = set(), set(), set()
+def current_actions_checks(api, repo, sha, checks, cache, workflow_runs):
+    from loop.ci import latest_workflows
+    verified, sequences, check_ids = [], {}, set()
     for check in checks:
         app = check.get("app", {})
         link = check.get("details_url")
@@ -201,7 +205,6 @@ def independent_actions_checks(api, repo, sha, checks, cache):
         if (run["id"] != run_id or run["head_sha"] != sha or run["run_attempt"] != 1
                 or run["repository"]["full_name"] != repo
                 or type(run.get("workflow_id")) is not int or run["workflow_id"] <= 0
-                or run["workflow_id"] in workflow_ids or path in workflow_paths
                 or re.fullmatch(r"\.github/workflows/[^/\\@?#]+\.ya?ml", path) is None
                 or run.get("check_suite_id") != check.get("check_suite", {}).get("id")
                 or type(run.get("check_suite_id")) is not int
@@ -211,12 +214,34 @@ def independent_actions_checks(api, repo, sha, checks, cache):
         if (job["run_id"] != run_id or job["run_attempt"] != 1 or job["name"] != check["name"]
                 or job["check_run_url"] != f"https://api.github.com/repos/{repo}/check-runs/{check['id']}"):
             return None
-        workflow_ids.add(run["workflow_id"])
-        workflow_paths.add(path)
+        require(type(run.get("run_number")) is int and run["run_number"] > 0
+                and isinstance(run.get("event"), str) and run["event"],
+                "CI workflow execution sequence is invalid")
+        key = run["workflow_id"], run["event"]
+        prior = sequences.get(key)
+        if prior and prior["run_number"] == run["run_number"] and prior["id"] != run_id:
+            return None
+        sequences[key] = run
         check_ids.add(check["id"])
-        identities.append({"workflow_id": run["workflow_id"], "path": path,
-                           "run_id": run_id, "attempt": 1, "job_id": job_id})
-    return identities
+        verified.append((check, {"workflow_id": run["workflow_id"], "path": path,
+                                "event": run["event"], "run_id": run_id,
+                                "attempt": 1, "job_id": job_id}))
+    latest = latest_workflows(repo, sha, [*workflow_runs, *(r for r, _ in cache.values())])
+    selected, identities, workflow_ids, workflow_paths = [], [], set(), set()
+    for check, identity in verified:
+        key = identity["workflow_id"], identity["event"]
+        if latest[key]["id"] != identity["run_id"]:
+            continue
+        path_key = identity["path"], identity["event"]
+        if key in workflow_ids or path_key in workflow_paths:
+            return None
+        workflow_ids.add(key)
+        workflow_paths.add(path_key)
+        selected.append(check)
+        identities.append(identity)
+    pending = any(latest[key]["status"] in {"queued", "in_progress", "waiting", "pending", "requested"}
+                  for key in sequences)
+    return selected, identities, pending
 
 
 def exact_ci(api, repo, sha, required):
@@ -224,23 +249,32 @@ def exact_ci(api, repo, sha, required):
             and len(set(required)) == len(required)
             and all(isinstance(name, str) and 0 < len(name) <= 200 for name in required),
             "Invalid frozen target CI selection")
-    checks, statuses = ci_items(api, repo, sha)
+    checks, statuses = ci_items(api, repo, sha, latest_statuses=True)
     result = {"sha": sha, "required": required, "checks": []}
     if not required:
         return dict(result, decision="none")
     decisions = []
     executions = {}
+    workflow_runs = None
     for name in required:
         runs = [c for c in checks if c["name"] == name and not copilot_check(c)]
         contexts = [s for s in statuses if s["context"] == name
                     and "copilot" not in name.casefold()]
         identities = None
         if len(runs) + len(contexts) > 1:
+            selection = None
             if not contexts:
-                identities = independent_actions_checks(api, repo, sha, runs, executions)
-            if identities:
+                if workflow_runs is None:
+                    workflow_runs = api.pages(f"repos/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
+                    require(len(workflow_runs) <= 100, "CI run collection exceeds limit")
+                selection = current_actions_checks(api, repo, sha, runs, executions, workflow_runs)
+            if selection is not None:
+                runs, identities, pending = selection
                 selected = [check_decision(check, sha, accept_nonblocking=True) for check in runs]
-                decision = next((d for d in ("failed", "pending", "unknown") if d in selected), "passed")
+                if pending:
+                    selected.append("pending")
+                decision = next((d for d in ("failed", "pending", "unknown") if d in selected),
+                                "passed" if selected else "missing")
             else:
                 decision = "unknown"
         elif not runs and not contexts:
