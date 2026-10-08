@@ -799,6 +799,60 @@ class MergeGitTests(unittest.TestCase):
                                      "candidate.patch": patch_bytes}, req, self.copy_source(directory))
             self.assertEqual(2, len(candidate["commits"][0]["parents"]))
 
+    def test_conflict_resolution_can_move_incoming_content_into_new_files(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as package, \
+                tempfile.TemporaryDirectory() as imported:
+            req = self.context(directory, conflicting=True)
+            incoming = objects(directory, {"Foo.java": "base\n", "Incoming.txt": "incoming\n"},
+                               [req["merge_base_sha"]])
+            req["base_sha"] = incoming
+            git(["update-ref", "refs/heads/incoming", incoming], directory)
+            proposed = objects(directory, {"Foo.java": "head\n", "Incoming.txt": "incoming\n",
+                                           "Fragment.txt": "base\n"})
+            git(["read-tree", proposed], directory)
+            patch_bytes = git(["diff", "--cached", req["frozen_sha"]], directory)
+            value = result(req, "merge")
+            candidate = reconstruct({"result.json": canonical(value), "candidate.patch": patch_bytes},
+                                    req, self.copy_source(directory), package)
+            candidate_outcome(value, req, candidate)
+            self.assertEqual(["Fragment.txt", "Incoming.txt"], candidate["changed_paths"])
+            import_candidate(imported, Path(package, "candidate.bundle"), req, candidate,
+                             self.copy_source(directory))
+            self.assertEqual([req["frozen_sha"], incoming], candidate["commits"][0]["parents"])
+            for path, text in (("Foo.java", b"head\n"), ("Incoming.txt", b"incoming\n"),
+                               ("Fragment.txt", b"base\n")):
+                self.assertEqual(text, git(["show", candidate["commit"] + ":" + path], imported))
+
+    def test_companion_files_do_not_allow_changes_to_clean_paths_or_conflict_free_merges(self):
+        for mutation in ("alter", "omit", "restore_deleted", "conflict_free"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                req = self.context(directory, conflicting=mutation != "conflict_free")
+                ancestor = objects(directory, {"Foo.java": "old\n", "Deleted.txt": "deleted\n"})
+                head = objects(directory, {"Foo.java": "head\n", "Deleted.txt": "deleted\n"},
+                               [ancestor])
+                incoming = objects(directory, {"Foo.java": "old\n" if mutation == "conflict_free"
+                                              else "base\n", "Incoming.txt": "incoming\n"}, [ancestor])
+                req.update(frozen_sha=head, base_sha=incoming, merge_base_sha=ancestor)
+                pr_diff = git(["diff", ancestor, head], directory).decode()
+                req["pr_diff"] = {"text": pr_diff,
+                                  "sha256": hashlib.sha256(pr_diff.encode()).hexdigest(),
+                                  "anchors": diff_anchors(pr_diff)[0]}
+                for name, sha in (("snapshot", head), ("incoming", incoming), ("review-base", ancestor)):
+                    git(["update-ref", "refs/heads/" + name, sha], directory)
+                proposed = {"Foo.java": "head\n", "Incoming.txt": "incoming\n",
+                            "Fragment.txt": "base\n"}
+                if mutation == "alter":
+                    proposed["Incoming.txt"] = "altered\n"
+                elif mutation == "omit":
+                    del proposed["Incoming.txt"]
+                elif mutation == "restore_deleted":
+                    proposed["Deleted.txt"] = "deleted\n"
+                git(["read-tree", objects(directory, proposed)], directory)
+                patch_bytes = git(["diff", "--cached", head], directory)
+                with self.assertRaisesRegex(Rejected, "cleanly merged|Conflict-free merge"):
+                    reconstruct({"result.json": canonical(result(req, "merge")),
+                                 "candidate.patch": patch_bytes}, req, self.copy_source(directory))
+
     def test_large_incoming_merge_survives_worker_staging_verification_and_import(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as root, \
                 tempfile.TemporaryDirectory() as package, tempfile.TemporaryDirectory() as imported:

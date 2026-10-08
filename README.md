@@ -33,6 +33,8 @@ Tasks other than Copilot Review and PR Description freeze the live base and comp
 
 Upstream commits do not invalidate a frozen task. PR-head changes and retargeting to a different base branch still stop it. Conflict resolution merges the launch-time base snapshot; newer upstream commits are not included in that merge. Later review/fix and CI-repair passes freeze the current base without resetting their deadline or worker budget. Description and pending-review publication still recheck the actual GitHub PR diff.
 
+Conflict resolution can add new files when needed to preserve both sides' intent, such as moving incoming release notes into changelog fragments. Existing nonconflicting paths must match Git's automatic merge exactly, including deletions. A conflict-free merge cannot include extra changes.
+
 PR Description freezes the original title/body, PR head and GitHub diff directly. Binary-file markers are retained as input. It needs no separate changed-file inventory, added-line anchors, base-tip freeze, source bundle, repository checkout or Git-tree reconstruction. The source-task diff limits do not apply; the shared API response and checkpoint storage bounds still do. Before editing metadata, the publisher rechecks the exact PR head, diff and original title/body. A changed base tip alone does not stop it when the actual diff is unchanged. Worker artifacts and title/body-only publication still require trusted verification.
 
 ## Launch

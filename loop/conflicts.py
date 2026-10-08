@@ -25,11 +25,12 @@ def resolved_tree(directory, request, tree):
     automatic = records[0].decode().strip()
     conflicts = {p.decode("utf-8") for p in records[1:] if p}
     proposed, clean = entries(directory, tree), entries(directory, automatic)
-    require(all(proposed.get(p) == clean.get(p)
-                for p in proposed.keys() | clean.keys() if p not in conflicts),
-            "Merge altered or omitted a cleanly merged incoming change")
     before = entries(directory, request["frozen_sha"])
     incoming = entries(directory, request["base_sha"])
+    require(conflicts or proposed == clean, "Conflict-free merge differs from the automatic tree")
+    require(all(proposed.get(p) == clean.get(p)
+                for p in before.keys() | incoming.keys() | clean.keys() if p not in conflicts),
+            "Merge altered or omitted a cleanly merged incoming change")
     original_blobs = {oid for side in (before, incoming) for _, kind, oid in side.values()
                       if kind == "blob"}
     paths = sorted(p for p in before.keys() | proposed.keys() if before.get(p) != proposed.get(p))

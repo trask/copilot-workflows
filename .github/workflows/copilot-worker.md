@@ -249,7 +249,11 @@ Read relevant surrounding code and applicable instructions from the complete sna
 `frozen_sha`, never a rebase or landing. Read the frozen history with `git log`,
 `git show` and `git diff` before resolving each conflict. Keep both sides' intent.
 Contradictory intent or incomplete history is blocked. Preserve every cleanly merged
-incoming change. Return the complete resolved head-to-merge-tree patch in
+incoming change. Conflict resolution may add new files, for example to move incoming
+release notes into changelog fragments. Explain these additions in the merge analysis.
+Existing nonconflicting paths must match the automatic merge, including deletions.
+A conflict-free merge must match the automatic tree exactly.
+Return the complete resolved head-to-merge-tree patch in
 `candidate.patch`, empty `batches`, and `merge` containing `summary`, `analysis`,
 `upsides`, `downsides`. Outcome is `merge`, `no_change` only if base is already an
 ancestor, or `blocked`. A merge may have an empty patch but still change the graph.
