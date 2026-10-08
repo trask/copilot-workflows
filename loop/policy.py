@@ -349,7 +349,7 @@ def unchanged(request, pr):
                 for k in live), "Target changed after freeze")
     if diff_scope(request):
         require(pr["base"]["ref"] == request["base_ref"],
-                "Self-review base changed after freeze")
+                "PR base branch changed after freeze")
 
 
 def check_target(api, request):
@@ -360,10 +360,6 @@ def check_target(api, request):
         require(attributed_owner(api, pr, request["repo"], request["authorized_actor_id"],
                                  request["commit_author"]) == request["commit_author"],
                 "GitHub PR ownership changed after freeze")
-    if diff_scope(request):
-        ref = api.call(f"repos/{request['repo']}/git/ref/heads/{request['base_ref']}")
-        require(ref["object"]["sha"] == request["base_sha"],
-                    "Self-review base tip changed after freeze")
     return pr
 
 

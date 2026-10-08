@@ -131,7 +131,7 @@ New freezes bind `commit_author`, the launch owner's verified GitHub numeric ID 
 
 Requests without this frozen author cannot publish or have their candidates reconstructed under the current runtime. Historical evidence stays unchanged. After the prior phase is verified quiescent, start a fresh phase to freeze an attributed candidate; do not reuse or rewrite a saved candidate acceptance.
 
-Self-review freezes base ref/tip and the merge-base SHA instead of review IDs/findings. The tip is read from the live base branch ref, not the PR's base SHA metadata, which can lag behind that branch. Head and base identity are rechecked before accepting results, publication, refreezing and recording clean. A changed base stops self-review without merging or rebasing. This stricter base policy does not apply to the external-review loop.
+Self-review freezes base ref/tip and the merge-base SHA instead of review IDs/findings. The tip is read from the live base branch ref, not the PR's base SHA metadata, which can lag behind that branch. The exact PR head and base branch identity are rechecked before accepting results, publication, refreezing and recording clean. New upstream commits do not invalidate a frozen pass. Each later review/fix or CI-repair pass freezes the current base while preserving its existing deadline and worker budget. Conflict resolution merges its launch-time base snapshot even if upstream advances; it does not include newer upstream commits or land the PR. Description and pending-review effects still require the actual GitHub PR diff to match their frozen input.
 
 Git retrieval is unauthenticated and limited to the frozen public base/head repositories, with no hooks, helpers or target scripts. External review retrieves the frozen public head directly. Every self-review pass packages complete head and merge-base trees as two shallow snapshots, or one when their SHAs coincide, with exact source/run/attempt/workflow/artifact bindings. The Git bundle, not a paginated or truncated API file list, defines the full review input. Missing or invalid source fails rather than narrowing review. Workers and verifiers receive the bundle, never a source credential. Base permissions do not imply fork push access.
 
@@ -169,7 +169,7 @@ Both loops return exactly `candidate.patch`, `result.json` and `diagnostics.txt`
 
 An accepted changed pass publishes its exact structurally verified candidate, refreezes the new head and starts a fresh full-PR worker with the same phase, consumed count, deadline and publication history. It does not wait for Copilot or attempt CI repair between passes.
 
-A clean no-change pass still runs worker-side repository checks and undergoes structural acceptance. It then observes exact-head target CI. Pending CI waits in the shared waiter; missing, failed, absent or unknown CI stops. Clean additionally requires unchanged head/base. Fifth-pass fixes retain their publication but end exhausted because no later clean pass fits the budget. A fifth no-change clean pass can finish.
+A clean no-change pass still runs worker-side repository checks and undergoes structural acceptance. It then observes exact-head target CI. Pending CI waits in the shared waiter; missing, failed, absent or unknown CI stops. Clean additionally requires an unchanged PR head and base branch, not an unchanged upstream tip. Fifth-pass fixes retain their publication but end exhausted because no later clean pass fits the budget. A fifth no-change clean pass can finish.
 
 ## PR Description inputs
 

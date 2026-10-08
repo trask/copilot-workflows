@@ -11,7 +11,7 @@ const ROUTES = {
 export const TASK_EFFECTS = {
     copilot_review: "Investigate Copilot findings and push warranted fixes. Reply to and resolve eligible bot threads, then request fresh review until clean with passing CI.",
     self_review: "Review the full PR and push warranted fixes in fresh passes until clean with passing CI.",
-    pr_conflict_resolver: "Merge the live base into this PR and push the resolved merge. Never land the PR.",
+    pr_conflict_resolver: "Merge the launch-time base snapshot into this PR and push the resolved merge. Never land the PR.",
     ci_fix: "Diagnose CI failures, push warranted repairs, and possibly request one evidence-based failed-jobs rerun.",
     pr_description: "Update the PR title and description only when needed.",
     pr_simplify: "Make one pass of major behavior-preserving simplifications and push qualifying changes.",

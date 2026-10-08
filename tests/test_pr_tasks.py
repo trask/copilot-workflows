@@ -285,6 +285,22 @@ class TaskContractsTests(unittest.TestCase):
         with self.assertRaisesRegex(Rejected, "Incomplete"):
             collect_diff(read, req)
 
+    def test_target_checks_keep_frozen_scope_when_the_base_tip_advances(self):
+        req = task_request("pr_conflict_resolver")
+        frozen = copy.deepcopy(req)
+        read = TaskRead(req)
+        read.base_tip = "f" * 40
+        read.pr["base"]["sha"] = read.base_tip
+        self.assertEqual(read.pr, check_target(read, req))
+        self.assertEqual(frozen, req)
+        read.pr["head"]["sha"] = "e" * 40
+        with self.assertRaisesRegex(Rejected, "Target changed after freeze"):
+            check_target(read, req)
+        read.pr["head"]["sha"] = req["frozen_sha"]
+        read.pr["base"]["ref"] = "release"
+        with self.assertRaisesRegex(Rejected, "PR base branch changed after freeze"):
+            check_target(read, req)
+
     def test_description_accepts_binary_diff_without_file_inventory_or_source_access(self):
         req = task_request("pr_description")
         read = TaskRead(req)
@@ -1118,6 +1134,21 @@ class CIRepairTests(unittest.TestCase):
         evidence = collect(read, req, [CI_CHECK])
         self.assertEqual("failed", evidence["decision"])
         self.assertEqual([333], [f["id"] for f in evidence["failures"]])
+
+    def test_next_ci_pass_freezes_the_new_base_without_resetting_its_budget(self):
+        req, read = self.context()
+        state = checkpoint(req)
+        state.update(stage="waiting_ci", iteration=1, publications=[], effects=[])
+        store, name = stored(state)
+        read.base_tip = "f" * 40
+        ready = watch_ci_fix(store, name, state, read, 100)
+        self.assertEqual("source_pending", ready["stage"])
+        self.assertEqual(read.base_tip, ready["request"]["base_sha"])
+        self.assertEqual(req["frozen_sha"], ready["request"]["frozen_sha"])
+        self.assertEqual(req["deadline"], ready["request"]["deadline"])
+        self.assertEqual(req["budgets"], ready["request"]["budgets"])
+        self.assertEqual(1, ready["iteration"])
+        self.assertEqual(state["phase"], ready["phase"])
 
     def test_failed_checks_allow_diagnosis_and_nonblocking_checks_allow_clearance(self):
         req, read = self.context()

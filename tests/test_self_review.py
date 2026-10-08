@@ -170,8 +170,8 @@ class SelfReviewTests(unittest.TestCase):
             with self.subTest(tip=tip), self.assertRaises(Rejected):
                 freeze(read, 1, REVISION, 100, FIXTURE, loop_kind="self_review")
 
-    def test_missing_merge_base_wrong_comparison_or_changed_base_rejects_freeze(self):
-        for mutation in ("missing", "wrong_base", "base_tip"):
+    def test_missing_merge_base_or_wrong_comparison_rejects_freeze(self):
+        for mutation in ("missing", "wrong_base"):
             read = SelfRead()
             call = read.call
             def altered(path):
@@ -179,14 +179,26 @@ class SelfReviewTests(unittest.TestCase):
                 if "/compare/" in path:
                     if mutation == "missing":
                         value["merge_base_commit"]["sha"] = ""
-                    elif mutation == "wrong_base":
-                        value["base_commit"]["sha"] = "f" * 40
                     else:
-                        read.base_tip = "f" * 40
+                        value["base_commit"]["sha"] = "f" * 40
                 return value
             read.call = altered
             with self.subTest(mutation=mutation), self.assertRaises(Rejected):
                 freeze(read, 1, REVISION, 100, FIXTURE, loop_kind="self_review")
+
+    def test_upstream_commits_during_freeze_keep_the_bound_base_and_merge_base(self):
+        read = SelfRead()
+        call = read.call
+        def advancing(path):
+            value = call(path)
+            if "/compare/" in path:
+                read.base_tip = "f" * 40
+            return value
+        read.call = advancing
+        req = freeze(read, 1, REVISION, 100, FIXTURE, loop_kind="self_review")
+        self.assertEqual(BASE, req["base_sha"])
+        self.assertEqual(MERGE_BASE, req["merge_base_sha"])
+        self.assertEqual(SHA, req["frozen_sha"])
 
     def test_cli_routes_explicit_kind_and_uses_existing_worker_and_source(self):
         env = {"GITHUB_REPOSITORY": CENTRAL, "GITHUB_REF": "refs/heads/main",
@@ -362,48 +374,62 @@ class SelfReviewTests(unittest.TestCase):
         self.assertEqual(BASE, result["request"]["base_sha"])
         self.assertEqual(MERGE_BASE, result["request"]["merge_base_sha"])
 
-    def test_head_base_ref_and_actual_tip_drift_prevent_clearance(self):
-        for mutation in ("head", "base_ref", "tip"):
+    def test_head_and_base_branch_drift_prevent_clearance(self):
+        for mutation in ("head", "base_ref"):
             state, read = published_state()
             store, name = stored(state)
             if mutation == "head":
                 read.pr["head"]["sha"] = "f" * 40
-            elif mutation == "base_ref":
-                read.pr["base"]["ref"] = "release"
             else:
-                read.base_tip = "f" * 40
+                read.pr["base"]["ref"] = "release"
             with self.subTest(mutation=mutation), self.assertRaises(Rejected):
                 advance(store, name, state, Mock(), read, Publisher(read), 100)
             self.assertEqual(state, store.entries[name])
 
-    def test_base_drift_after_ci_collection_cannot_declare_clean(self):
+    def test_base_tip_advancing_after_ci_collection_keeps_exact_head_clearance(self):
         state, read = published_state()
         store, name = stored(state)
         def ci(*_args):
             read.base_tip = "f" * 40
             return {"decision": "passed"}
-        with patch("loop.live.exact_ci", side_effect=ci), self.assertRaises(Rejected):
-            advance(store, name, state, Mock(), read, Publisher(read), 100)
-        self.assertEqual("published", store.entries[name]["stage"])
+        with patch("loop.live.exact_ci", side_effect=ci):
+            result = advance(store, name, state, Mock(), read, Publisher(read), 100)
+        self.assertEqual("clean", result["stage"])
+        self.assertEqual(state["expected_sha"], result["expected_sha"])
+        self.assertEqual(state["request"], result["request"])
 
-    def test_base_drift_during_refreeze_prevents_next_pass(self):
+    def test_next_full_pr_pass_freezes_the_new_base_without_resetting_its_budget(self):
         state, read = published_state(True)
         store, name = stored(state)
-        fresh = dict(self_request(False), frozen_sha=state["expected_sha"], base_sha="f" * 40)
-        with patch("loop.live.freeze", return_value=fresh), self.assertRaises(Rejected):
-            advance(store, name, state, Mock(), read, Publisher(read), 100)
-        self.assertEqual(state, store.entries[name])
+        read.base_tip = "f" * 40
+        result = advance(store, name, state, Mock(), read, Publisher(read), 100)
+        self.assertEqual("source_pending", result["stage"])
+        self.assertEqual(read.base_tip, result["request"]["base_sha"])
+        self.assertEqual(state["expected_sha"], result["request"]["frozen_sha"])
+        self.assertEqual(state["request"]["deadline"], result["request"]["deadline"])
+        self.assertEqual(state["request"]["budgets"], result["request"]["budgets"])
+        self.assertEqual(state["iteration"], result["iteration"])
+        self.assertEqual(state["phase"], result["phase"])
 
-    def test_base_drift_prevents_publication_before_push(self):
+    def test_base_tip_advancing_does_not_change_the_accepted_candidate(self):
         state, manifest = accepted_state(True)
         accepted = acceptance(state, manifest)
         read = SelfRead(state["request"])
         read.base_tip = "f" * 40
         store, name = stored(state)
+        candidate = state["report"]["candidate"]
+        def pushed(_directory, req, sha, token):
+            self.assertEqual(state["request"], req)
+            self.assertEqual(candidate["commit"], sha)
+            read.pr["head"]["sha"] = sha
         with patch("loop.live.evidence", return_value=(accepted, state["report"]["candidate"])), \
-                patch("loop.live.authenticated_push") as push, self.assertRaises(Rejected):
-            publish(store, name, state, Mock(), read, Publisher(read), 100)
-        push.assert_not_called()
+                patch("loop.live.authenticated_push", side_effect=pushed) as push, \
+                patch("loop.live.time.time", return_value=100):
+            result = publish(store, name, state, Mock(), read, Publisher(read), 100)
+        push.assert_called_once()
+        self.assertEqual("published", result["stage"])
+        self.assertEqual(candidate["commit"], result["expected_sha"])
+        self.assertEqual(state["request"], result["request"])
 
     def test_self_publisher_cannot_request_copilot_review(self):
         publisher = PublisherAPI(TEST_TOKEN, self_request(), "fine_grained_pat")
@@ -765,7 +791,7 @@ class MixedWaiterTests(unittest.TestCase):
             poll(api, store, 460, REVISION, {})
         self.assertEqual(FIXTURE + "#11", api.calls[-1][2]["inputs"]["target"])
 
-    def test_self_base_failure_does_not_stop_external_or_other_self_work(self):
+    def test_self_base_branch_change_does_not_stop_external_or_other_self_work(self):
         store, reads = phases(3, "verify_pending")
         first = next(name for name, state in store.entries.items() if state["request"]["pr"] == 1)
         store.entries[first]["stage"] = "waiting_ci"
@@ -773,7 +799,7 @@ class MixedWaiterTests(unittest.TestCase):
         req.update(loop_kind="self_review", base_ref="main", base_sha=BASE, merge_base_sha=MERGE_BASE)
         reads[1] = SelfRead(req)
         reads[1].pr["head"]["ref"] = req["head_ref"]
-        reads[1].base_tip = "f" * 40
+        reads[1].pr["base"]["ref"] = "release"
         third = next(name for name, state in store.entries.items() if state["request"]["pr"] == 3)
         store.entries[third]["request"].update(loop_kind="self_review", base_ref="main",
                                              base_sha=BASE, merge_base_sha=MERGE_BASE)

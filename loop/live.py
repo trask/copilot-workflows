@@ -548,9 +548,9 @@ def watch_self(store, name, state, read, now):
         fresh = freeze(read, request["pr"], execution_revision(state), now, request["repo"],
                        request["authorized_actor_id"], loop_kind="self_review")
         inherit_pin(fresh, state)
-        require(all(fresh[key] == request[key] for key in ("base_ref", "base_sha"))
+        require(fresh["base_ref"] == request["base_ref"]
                 and fresh["frozen_sha"] == state["expected_sha"],
-                "Self-review head/base changed before next pass")
+                "Self-review head/base branch changed before next pass")
         publication = dict(request["publication"], generation=state["generation"] + 1)
         fresh.update(mode="publish", budgets=request["budgets"].copy(),
                      publication=publication, deadline=request["deadline"])
@@ -622,8 +622,8 @@ def watch_ci_fix(store, name, state, read, now):
     fresh = freeze(read, request["pr"], execution_revision(state), now, request["repo"],
                    request["authorized_actor_id"], loop_kind="ci_fix")
     inherit_pin(fresh, state)
-    require(all(fresh[key] == request[key] for key in ("base_ref", "base_sha"))
-            and fresh["frozen_sha"] == state["expected_sha"], "CI repair source/base drift")
+    require(fresh["base_ref"] == request["base_ref"]
+            and fresh["frozen_sha"] == state["expected_sha"], "CI repair source/base branch drift")
     fresh["ci_evidence"] = collect(read, fresh, request["publication"]["required_checks"])
     require(fresh["ci_evidence"]["decision"] == "failed", "CI changed before diagnosis freeze")
     publication = dict(request["publication"], generation=state["generation"] + 1)
