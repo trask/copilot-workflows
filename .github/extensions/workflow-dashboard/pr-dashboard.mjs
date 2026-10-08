@@ -237,6 +237,14 @@ export class PrDashboard extends Dashboard {
                 if (entry.status !== "accepted" || this.dispatches.get(target) !== entry) return;
                 delete entry.reconcileError;
                 if (run.status !== "completed") return;
+                if (entry.operation === "launch" && run.conclusion === "failure") {
+                    const current = await this.current(target);
+                    if (entry.status !== "accepted" || this.dispatches.get(target) !== entry) return;
+                    if (!actionBlock(current.pr, current.viewer, current.phase, true, null)) {
+                        this.dispatches.delete(target);
+                        return;
+                    }
+                }
                 if (entry.operation === "cancel_dispatch" && run.conclusion === "cancelled") {
                     const current = await this.current(target);
                     if (current.phase?.launchId === entry.runId && !TERMINAL.has(current.phase.stage)) {

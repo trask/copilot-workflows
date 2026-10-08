@@ -1086,20 +1086,63 @@ test("uncertain accepted-launch cancellation stays locked and is never automatic
     assert.equal(calls, 1);
 });
 
-test("a failed launch stops spinning but retains its unconfirmed-task lock and run link", async () => {
+test("a confirmed failed launch unlocks a fresh explicit launch and retains its failure link", async () => {
+    const c = controller();
+    await c.canvas.refresh();
+    await c.canvas.launch({ target, kind: "self_review", confirmed: true });
+    const failed = launchRun({ status: "completed", conclusion: "failure",
+        created_at: "1970-01-01T00:33:20Z" });
+    c.setRun(failed);
+    c.github.failedCoordinators = async () => [failed];
+    const snapshot = await c.canvas.refresh();
+    const pr = snapshot.prs[0];
+    assert.equal(pr.dispatch, null);
+    assert.equal(pr.actionBlock, null);
+    assert.equal(pr.canCancelDispatch, false);
+    assert.match(snapshot.failures[0].url, /\/actions\/runs\/20\/attempts\/1$/);
+    assert.equal(taskPresentation(pr, "self_review", true).label, "Run");
+    assert.equal(taskPresentation(pr, "self_review", true).busy, false);
+    assert.equal(taskPresentation(pr, "self_review", true).disabled, false);
+    assert.equal(c.calls.filter((call) => typeof call === "object").length, 1);
+    await c.canvas.launch({ target, kind: "self_review", confirmed: true });
+    assert.equal(c.calls.filter((call) => typeof call === "object").length, 2);
+});
+
+test("failed launch reconciliation rechecks checkpoints after the run finishes before unlocking", async () => {
+    const c = controller();
+    await c.canvas.refresh();
+    await c.canvas.launch({ target, kind: "self_review", confirmed: true });
+    const get = c.github.get;
+    c.github.get = async (path) => {
+        if (path !== `repos/${CENTRAL}/actions/runs/20`) return get(path);
+        c.setRecords([checkpoint({}, { launch_run: { id: 21 } })]);
+        return { data: launchRun({ status: "completed", conclusion: "failure" }) };
+    };
+    const pr = (await c.canvas.refresh()).prs[0];
+    assert.equal(pr.dispatch.status, "finished");
+    assert.equal(taskPresentation(pr, "self_review", true).disabled, true);
+    await assert.rejects(c.canvas.launch({ target, kind: "self_review", confirmed: true }), /finished/);
+    assert.equal(c.calls.filter((call) => typeof call === "object").length, 1);
+});
+
+test("a failed checkpoint confirmation keeps the launch locked until a successful read", async () => {
     const c = controller();
     await c.canvas.refresh();
     await c.canvas.launch({ target, kind: "self_review", confirmed: true });
     c.setRun(launchRun({ status: "completed", conclusion: "failure" }));
+    const load = c.canvas.checkpoints.load;
+    let reads = 0;
+    c.canvas.checkpoints.load = async () => {
+        if (++reads === 2) throw new Error("Checkpoint read failed");
+        return load();
+    };
     const snapshot = await c.canvas.refresh();
-    const pr = snapshot.prs[0];
-    assert.equal(pr.dispatch.status, "finished");
-    assert.equal(pr.dispatch.runUrl, receipt().runUrl);
-    assert.equal(pr.canCancelDispatch, false);
-    assert.match(pr.dispatch.message, /failure/);
-    assert.equal(taskPresentation(pr, "self_review", true).label, "Launch failed");
-    assert.equal(taskPresentation(pr, "self_review", true).busy, false);
-    await assert.rejects(c.canvas.launch({ target, kind: "self_review", confirmed: true }), /finished/);
+    assert.equal(snapshot.prs[0].dispatch.status, "accepted");
+    assert.match(snapshot.prs[0].dispatch.reconcileError, /Checkpoint read failed/);
+    assert.ok(snapshot.prWarnings.some((warning) => warning.includes("Checkpoint read failed")));
+    await assert.rejects(c.canvas.launch({ target, kind: "self_review", confirmed: true }), /Checkpoint read failed/);
+    assert.equal((await c.canvas.refresh()).prs[0].dispatch, null);
+    assert.equal(c.calls.filter((call) => typeof call === "object").length, 1);
 });
 
 test("a newer owner-authorized task supersedes a failed launch without adopting an older task", async () => {
@@ -1107,7 +1150,6 @@ test("a newer owner-authorized task supersedes a failed launch without adopting 
     await c.canvas.refresh();
     await c.canvas.launch({ target, kind: "self_review", confirmed: true });
     c.setRun(launchRun({ status: "completed", conclusion: "failure", updated_at: "1970-01-01T00:33:20Z" }));
-    await c.canvas.refresh();
     c.setRecords([checkpoint({ stage: "waiting_ci" }, { launch_run: { id: 21 } })]);
     assert.equal((await c.canvas.refresh()).prs[0].dispatch.runId, 20);
     c.setRecords([checkpoint({ stage: "waiting_ci" }, { launch_run: { id: 21 }, frozen_at: 2100 })]);
