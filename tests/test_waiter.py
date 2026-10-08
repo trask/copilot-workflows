@@ -392,6 +392,93 @@ class ControlTests(unittest.TestCase):
 
 
 class StateCacheTests(unittest.TestCase):
+    def test_acknowledged_write_retries_stale_ref_before_returning_checkpoint(self):
+        before = live_state(stage="publication_intent")
+        after = dict(before, stage="published")
+        name = checkpoint_name(before["request"]["repo"], before["request"]["pr"],
+                               before["request"]["repo_id"])
+        old_head, new_head, tree = "c" * 40, "f" * 40, "e" * 40
+        payload = canonical(after)
+        blob = hashlib.sha1(b"blob " + str(len(payload)).encode() + b"\0" + payload).hexdigest()
+        api = Mock()
+        api.call.return_value = {"sha": new_head}
+        store = State(api)
+        with patch.object(store, "snapshot", return_value=(old_head, tree, {name: before})):
+            store.write(name, after, before)
+        store.cached = (old_head, tree, {name: before})
+        api.call.reset_mock()
+        api.call.side_effect = [
+            {"object": {"sha": old_head}},
+            {"status": "behind", "base_commit": {"sha": new_head},
+             "merge_base_commit": {"sha": old_head}},
+            {"object": {"sha": new_head}},
+            {"tree": {"sha": tree}},
+            {"truncated": False, "tree": [
+                {"path": name, "mode": "100644", "type": "blob", "sha": blob, "size": len(payload)}]},
+        ]
+        api.graphql.return_value = {"repository": {"blob0": {
+            "oid": blob, "text": payload.decode(), "isTruncated": False}}}
+        with patch("loop.state.time.sleep") as sleep:
+            self.assertEqual({name: after}, store.snapshot()[2])
+        sleep.assert_called_once_with(1)
+        self.assertEqual(f"repos/{CENTRAL}/compare/{new_head}...{old_head}?per_page=1",
+                         api.call.call_args_list[1].args[0])
+        self.assertEqual(new_head, store.written_head)
+
+    def test_newer_checkpoint_is_not_hidden_by_an_acknowledged_write(self):
+        value = {"stage": "cancelled"}
+        payload = canonical(value)
+        blob = hashlib.sha1(b"blob " + str(len(payload)).encode() + b"\0" + payload).hexdigest()
+        api = Mock()
+        api.call.side_effect = [
+            {"object": {"sha": "f" * 40}},
+            {"status": "ahead", "base_commit": {"sha": REVISION},
+             "merge_base_commit": {"sha": REVISION}},
+            {"tree": {"sha": "e" * 40}},
+            {"truncated": False, "tree": [
+                {"path": "pr-v2-1-1.json", "mode": "100644", "type": "blob",
+                 "sha": blob, "size": len(payload)}]},
+        ]
+        api.graphql.return_value = {"repository": {"blob0": {
+            "oid": blob, "text": payload.decode(), "isTruncated": False}}}
+        store = State(api)
+        store.written_head = REVISION
+        with patch("loop.state.time.sleep") as sleep:
+            self.assertEqual({"pr-v2-1-1.json": value}, store.snapshot()[2])
+        sleep.assert_not_called()
+
+    def test_missing_or_stale_ref_cannot_outlive_the_visibility_retry_budget(self):
+        for missing in (False, True):
+            api = Mock()
+            api.call.side_effect = lambda path: (
+                {"object": {"sha": "c" * 40}} if "/ref/" in path else
+                {"status": "behind", "base_commit": {"sha": REVISION},
+                 "merge_base_commit": {"sha": "c" * 40}})
+            if missing:
+                api.call.side_effect = APIError(404, "Not visible")
+            store = State(api)
+            store.written_head = REVISION
+            with self.subTest(missing=missing), patch("loop.state.time.sleep") as sleep, \
+                    self.assertRaisesRegex(Rejected, "Acknowledged state write is not yet visible"):
+                store.snapshot()
+            self.assertEqual([1, 2, 3, 4], [call.args[0] for call in sleep.call_args_list])
+            api.graphql.assert_not_called()
+
+    def test_diverged_state_ref_is_not_accepted_as_a_newer_checkpoint(self):
+        api = Mock()
+        api.call.side_effect = [
+            {"object": {"sha": "f" * 40}},
+            {"status": "diverged", "base_commit": {"sha": REVISION},
+             "merge_base_commit": {"sha": "c" * 40}},
+        ]
+        store = State(api)
+        store.written_head = REVISION
+        with patch("loop.state.time.sleep") as sleep, \
+                self.assertRaisesRegex(Rejected, "State ref diverged"):
+            store.snapshot()
+        sleep.assert_not_called()
+        api.graphql.assert_not_called()
+
     def test_immutable_state_cache_avoids_refetching_archives_and_never_shares_mutable_values(self):
         value = {"schema": 2, "request": {"pr": 1}}
         payload = canonical(value)

@@ -28,15 +28,35 @@ class State:
         self.sizes = {}
         self.blobs = {}
         self.cached = None
+        self.written_head = None
 
     def snapshot(self):
-        try:
-            ref = self.api.call(PREFIX + "ref/heads/" + STATE_BRANCH)
-        except APIError as error:
-            if error.status == 404:
-                return None, None, {}
-            raise
-        head = ref["object"]["sha"]
+        for attempt in range(5):
+            try:
+                ref = self.api.call(PREFIX + "ref/heads/" + STATE_BRANCH)
+            except APIError as error:
+                if error.status != 404:
+                    raise
+                if self.written_head is None:
+                    return None, None, {}
+            else:
+                head = ref["object"]["sha"]
+                if self.written_head is None or head == self.written_head:
+                    break
+                comparison = self.api.call(
+                    f"repos/{CENTRAL}/compare/{self.written_head}...{head}?per_page=1")
+                require(comparison["base_commit"]["sha"] == self.written_head,
+                        "State comparison identity differs")
+                if comparison["status"] == "ahead":
+                    require(comparison["merge_base_commit"]["sha"] == self.written_head,
+                            "State ref does not descend from the acknowledged write")
+                    break
+                require(comparison["status"] == "behind"
+                        and comparison["merge_base_commit"]["sha"] == head,
+                        "State ref diverged from the acknowledged write")
+            require(attempt < 4, "Acknowledged state write is not yet visible")
+            print("[state] Waiting for the acknowledged state write to become visible")
+            time.sleep(attempt + 1)
         if self.cached is not None and self.cached[0] == head:
             return head, self.cached[1], copy.deepcopy(self.cached[2])
         commit = self.api.call(PREFIX + "commits/" + head)
@@ -152,6 +172,7 @@ class State:
             if error.status in {409, 422}:
                 raise Conflict("State ref transaction lost a race") from error
             raise
+        self.written_head = commit["sha"]
 
     def update(self, name, operation):
         for attempt in range(20):

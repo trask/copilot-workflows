@@ -197,6 +197,8 @@ One workflow kind can be active per PR. All kinds share the worker, coordinator,
 
 State is compact JSON only, capped before writes at 1,000 files, 1 MiB per file and 16 MiB total. Large candidate bundles and logs stay in bound Actions artifacts. See [setup and recovery](docs/setup.md) for credentials and operation details.
 
+After an acknowledged state write, reads wait up to five attempts for that commit or a descendant to become visible. Older API ref results cannot invalidate the saved transition; newer cancellation or concurrent updates still take effect. Persistent lag or divergent history stops explicitly.
+
 ## Development
 
 Use the tools-only Linux Docker runner on Windows. It runs real Git/Python unit tests in non-root tmpfs with no network, mounts, secrets or target repository dependency.
