@@ -145,7 +145,7 @@ function renderTroubleshooting() {
             if (pr.dispatch.runUrl) message.append(document.createTextNode(" "), link("View launch", pr.dispatch.runUrl));
             row.append(message);
         } else if (pr.actionBlock) row.append(element("p", pr.actionBlock, "muted"));
-        if (pr.phase) row.append(phaseCard(pr.phase));
+        if (pr.phase) row.append(phaseCard(pr.phase, pr.sha));
         runs.append(row);
     }
     if (!runs.children.length) runs.append(element("p", state.loadedAt
@@ -257,20 +257,15 @@ function prCard(pr) {
     cancel.addEventListener("click", () => taskAction(pr, pr.dispatch?.kind ?? pr.phase?.kind, true));
     if (pr.canCancel || cancelDispatch || pr.dispatch?.operation === "cancel") tasks.append(cancel);
     card.append(tasks);
-    if (pr.phase) {
-        const completion = completionPresentation(pr.phase);
-        if (completion) {
-            const result = element("div", null, "run-result");
-            if (pr.phase.sha && pr.phase.sha !== pr.sha) result.append(element("p", "Result from a previous PR commit.", "muted"));
-            result.append(element("p", completion.detail));
-            if (pr.phase.pendingReviewUrl) result.append(link("Open pending review", pr.phase.pendingReviewUrl));
-            card.append(result);
-        }
+    if (pr.phase?.pendingReviewUrl && completionPresentation(pr.phase)) {
+        const result = element("div", null, "run-result");
+        result.append(link("Open pending review", pr.phase.pendingReviewUrl));
+        card.append(result);
     }
     return card;
 }
 
-function phaseCard(phase) {
+function phaseCard(phase, currentSha) {
     const card = element("details", null, "card");
     const summary = element("summary", "Run details");
     const detail = element("div", null, "detail");
@@ -283,6 +278,13 @@ function phaseCard(phase) {
         ] : []),
     ]) meta.append(element("span", value));
     detail.append(meta);
+    const completion = completionPresentation(phase);
+    if (completion) {
+        if (currentSha && phase.sha && phase.sha !== currentSha) {
+            detail.append(element("p", "Result from a previous PR commit.", "muted"));
+        }
+        detail.append(element("p", completion.detail));
+    }
     if (phase.historical) detail.append(element("p", "Historical protocol evidence. Not an active generic phase.", "reason"));
     if (phase.unknownStage) detail.append(element("p", "Unknown controller stage. Inspect its recorded evidence.", "reason"));
     if (phase.error) detail.append(element("p", phase.error, "error"));

@@ -1377,7 +1377,7 @@ test("PR cards put status in task buttons and keep saved metadata in bottom trou
     assert.equal(all.some((node) => node.textContent === "Central Actions"), false);
 });
 
-test("review cards keep outcomes and pending-review links inline with technical details at the bottom", async () => {
+test("review cards keep only pending-review links inline and put outcomes in Run details", async () => {
     const state = rendererState();
     const s = fixture({
         stage: "complete", reason: "verified_no_change",
@@ -1392,10 +1392,13 @@ test("review cards keep outcomes and pending-review links inline with technical 
     const card = () => nodes.get("prs").firstChild;
     const result = () => card().children.find((node) => node.className === "run-result");
     const details = () => nodes.get("troubleshooting-runs").firstChild.children.find((node) => node.tag === "details");
+    const detailTexts = () => details().children[1].children.filter((node) => node.tag === "p")
+        .map((node) => node.textContent);
     const status = () => card().children.find((node) => node.className === "task-grid")
         .children.find((node) => node["aria-label"]?.startsWith("Draft review:"));
     assert.equal(status()["aria-label"], "Draft review: No findings");
-    assert.equal(result().firstChild.textContent, "No new findings. No pending review was created.");
+    assert.equal(result(), undefined);
+    assert.deepEqual(detailTexts(), ["No new findings. No pending review was created."]);
     assert.equal(details().firstChild.textContent, "Run details");
     assert.equal(details().open, undefined);
 
@@ -1407,9 +1410,12 @@ test("review cards keep outcomes and pending-review links inline with technical 
     state.prs[0].phase = phaseSummary(record(s));
     renderer.render();
     assert.equal(status()["aria-label"], "Draft review: Review ready");
-    assert.equal(result().firstChild.textContent,
-        "1 review comment in a pending GitHub review. Only you can see it until you submit it.");
-    assert.equal(result().children[1].href, "https://github.com/example/project/pull/12#pullrequestreview-42");
+    assert.equal(result().children.length, 1);
+    assert.equal(result().firstChild.textContent, "Open pending review");
+    assert.equal(result().firstChild.href, "https://github.com/example/project/pull/12#pullrequestreview-42");
+    assert.deepEqual(detailTexts(), [
+        "1 review comment in a pending GitHub review. Only you can see it until you submit it.",
+    ]);
     const expanded = details();
     nodes.get("troubleshooting").open = true;
     expanded.open = true;
@@ -1425,11 +1431,36 @@ test("review cards keep outcomes and pending-review links inline with technical 
     state.prs[0].sha = sha("b");
     renderer.render();
     assert.equal(status()["aria-label"], "Draft review: Previous head");
-    assert.equal(result().firstChild.textContent, "Result from a previous PR commit.");
+    assert.equal(result().firstChild.textContent, "Open pending review");
+    assert.deepEqual(detailTexts(), [
+        "Result from a previous PR commit.",
+        "1 review comment in a pending GitHub review. Only you can see it until you submit it.",
+    ]);
     Object.assign(state.prs[0], { sha: sha("a"), phase: { ...phaseSummary(record(s)), stage: "blocked" } });
     renderer.render();
     assert.equal(status()["aria-label"], "Draft review: Blocked");
     assert.equal(result(), undefined);
+});
+
+test("CI completion explanations and commit-age warnings appear only in Run details", async () => {
+    const state = rendererState();
+    const phase = phaseSummary(record(fixture({
+        stage: "complete", task_completion: { outcome: "warnings_not_CI_clearance" },
+    }, { loop_kind: "ci_fix" })));
+    Object.assign(state.prs[0], { phase, sha: sha("b") });
+    const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
+    assert.equal(nodes.get("prs").firstChild.children.length, 2);
+    const texts = () => nodes.get("troubleshooting-runs").firstChild.children
+        .find((node) => node.tag === "details").children[1].children
+        .filter((node) => node.tag === "p").map((node) => node.textContent);
+    assert.deepEqual(texts(), [
+        "Result from a previous PR commit.",
+        "The remaining CI failures were classified as unrelated to this PR.",
+    ]);
+    state.prs = [];
+    state.phases = [phase];
+    renderer.render();
+    assert.deepEqual(texts(), ["The remaining CI failures were classified as unrelated to this PR."]);
 });
 
 test("collapsed bottom troubleshooting retains launch links and active or recent runs outside PR filters", async () => {
