@@ -99,7 +99,7 @@ External-review publication freezes every unresolved original comment from submi
 
 API errors report the failed endpoint and numeric rate-limit headers without printing response bodies or credentials. A rate-limited HTTP 403 is distinct from a permission denial. `X-RateLimit-Remaining=0` identifies an exhausted primary quota, and `X-RateLimit-Reset` gives its UTC epoch reset time. The central Actions token shares a 1,000-request hourly quota across jobs in this repository.
 
-Checkpoint snapshots batch uncached Git blobs in one native GraphQL query and verify the text against each Git object hash. Truncated or altered text requires a complete read through the bound REST blob endpoint; source and archive evidence are never shortened. The shared waiter treats confirmed rate-limit errors as transient and waits for the reported reset within its existing execution deadline. If the reset is later, it exits without another dispatch and the scheduled waiter resumes polling.
+Checkpoint snapshots read uncached Git blobs in native GraphQL batches sized for the shared API response bound and verify the text against each Git object hash. Truncated or altered text requires a complete read through the bound REST blob endpoint; source and archive evidence are never shortened. The shared waiter treats confirmed rate-limit errors as transient and waits for the reported reset within its existing execution deadline. If the reset is later, it exits without another dispatch and the scheduled waiter resumes polling.
 
 Dispatch `coordinator.yml` from central `main`. Only the existing personal owner can launch work. The target must be open and authored by that user or be a Copilot PR GitHub attributes to them, except for PR Reviewer.
 
@@ -183,7 +183,7 @@ A clean no-change pass still runs worker-side repository checks and undergoes st
 
 ## PR Description inputs
 
-PR Description reads frozen title/body and the GitHub PR diff without fetching a separate changed-file list or packaging source. Binary-file markers are supported input, not candidate patches. It does not require diff anchors, matching per-file line counts, a frozen base tip or reconstruction of the PR's Git tree. API response and checkpoint storage bounds still apply. The verifier requires an empty source patch, binds the proposal to the request and writes an empty candidate bundle with no source tree. Before PATCH, the publisher independently revalidates artifact provenance, exact PR head, unchanged GitHub diff and original title/body. Other task source and publication checks remain unchanged.
+PR Description reads frozen title/body and the GitHub PR diff without fetching a separate changed-file list or packaging source. Binary-file markers are supported input, not candidate patches. It does not require diff anchors, matching per-file line counts, a frozen base tip or reconstruction of the PR's Git tree. API response bounds still apply. The verifier requires an empty source patch, binds the proposal to the request and writes an empty candidate bundle with no source tree. Before PATCH, the publisher independently revalidates artifact provenance, exact PR head, unchanged GitHub diff and original title/body. Other task source and publication checks remain unchanged.
 
 ## Fresh review and CI
 
@@ -211,7 +211,7 @@ Landing PRs, changing draft state, force pushes, top-level comments and human-ro
 
 The only executable protocol is `reviewable-v1`, frozen by the trusted runtime. All worker results use schema 2. `candidate.patch` concatenates ordered batch patches against consecutive trees, including encoded Git binary patches and mode changes; `result.json` describes complete contiguous byte spans with SHA-256 hashes. Up to 100 batches are supported. Every intermediate change must satisfy path-safety, Git integrity checks and trusted-runtime protections.
 
-Both kinds supply single-line summaries and concise analysis, upsides and downsides without custom prose length caps. Every unresolved verified finding and complete conversation is retained without count or body-length caps. Empty batches, omitted bytes, duplicate/foreign findings and incomplete mappings reject rather than truncate. Checkpoint, artifact, process-resource and runtime limits still apply.
+Both kinds supply single-line summaries and concise analysis, upsides and downsides without custom prose length caps. Every unresolved verified finding and complete conversation is retained without count or body-length caps. Empty batches, omitted bytes, duplicate/foreign findings and incomplete mappings reject rather than truncate. API response, artifact, process-resource and runtime limits still apply.
 
 External results additionally include every frozen finding exactly once, with `key`, `disposition`, `analysis`, `upsides` and `downsides`. Dispositions are `fixed`, `not_warranted` or `blocked`. Every fixed finding belongs to exactly one batch's `findings` array. Supported no-code findings belong to no code batch. Any blocked finding prevents publication of partial work.
 
@@ -237,7 +237,7 @@ The waiter has central state/Actions access and optional target source-read acce
 
 ## Checkpoints and uncertain operations
 
-Version-2 checkpoints use `pr-v2-<actual-base-repository-ID>-<PR>.json`. An unfrozen access gate uses the first 32 hex characters of the case-folded repository name's SHA-256 instead of inventing an ID. The JSON-only branch checks projected limits before writes: 1,000 files, 1 MiB per file, 16 MiB total. Large logs/bundles stay in bound Actions artifacts.
+Version-2 checkpoints use `pr-v2-<actual-base-repository-ID>-<PR>.json`. An unfrozen access gate uses the first 32 hex characters of the case-folded repository name's SHA-256 instead of inventing an ID. The JSON-only branch retains checkpoints and archived history without file-count, per-checkpoint size or total storage caps. API response bounds still apply to individual reads, and incomplete trees or corrupted blobs reject explicitly. Source bundles and worker outputs stay in bound Actions artifacts.
 
 Writes create a child of the observed state ref and update it with `force:false`. Competing children cannot both fast-forward. Conflicts reload/retry at most twenty times with bounded randomized backoff; replacement archives exact prior state. Finalization/mutations require the same complete request/generation/state in CAS checks. The waiter serializes globally; short coordinator jobs and workers serialize per request/PR. Durable run ownership permits different PRs' verification pipelines to overlap.
 
@@ -312,7 +312,7 @@ Connection resets, unexpected EOFs and network timeouts before an HTTP response 
 
 Steady-state refreshes taking more than 10 seconds disable automatic refresh. Request count alone does not pause refresh. Less than 10 percent remaining REST or GraphQL capacity, authentication/read errors, and rate-limit responses also pause it. The canvas displays read errors and automatic pause reasons; choosing manual refresh does not add a notice. Load timestamps, refresh cost and rate-limit metadata remain in refresh state, not in the header. Retry-After and reset headers prevent premature reads. Refresh manually after resolving the problem, and explicitly enable automatic refresh to resume polling. Hidden or closed canvases do not keep polling, and panels within the same extension provider share a refresh.
 
-Requests stop at 10,000 open PRs or 16 MiB of listing data, 1 MiB per reviewer dashboard file, 1,000 entries per Actions status, 1,000 central state files, 1 MiB per central file and 16 MiB total central state. Pagination follows trusted next-page links; Actions `total_count` is advisory because active runs can start or finish during a read. Unfinished page chains or malformed data produce an explicit error or per-checkpoint warning, not a partial success claim. Mutating loopback requests require the canvas's exact origin and a validated JSON body of at most 4 KiB. Last successful data remains visible and marked stale when a refresh fails.
+Requests stop at 10,000 open PRs or 16 MiB of listing data, 1 MiB per reviewer dashboard file and 1,000 entries per Actions status. Central checkpoint storage has no file-count, per-file size or aggregate size cap; individual API responses remain bounded. Pagination follows trusted next-page links; Actions `total_count` is advisory because active runs can start or finish during a read. Unfinished page chains or malformed data produce an explicit error or per-checkpoint warning, not a partial success claim. Mutating loopback requests require the canvas's exact origin and a validated JSON body of at most 4 KiB. Last successful data remains visible and marked stale when a refresh fails.
 
 ## Local development
 

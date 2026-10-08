@@ -252,7 +252,7 @@ class ProtocolTests(unittest.TestCase):
 
 
 
-    def test_replacement_archive_transaction_preserves_provenance_and_caps(self):
+    def test_replacement_archive_transaction_preserves_provenance(self):
         _, _, old, new, name = self.replacement_context()
         value = dict(checkpoint(new), generation=4)
         api = FakeAPI()
@@ -504,30 +504,6 @@ class ProtocolTests(unittest.TestCase):
         read.assert_called_once()
         self.assertEqual("publish_pending", store.entries[name]["stage"])
         self.assertEqual("pending_fresh_trusted_personal_acceptance", store.entries[name]["reason"])
-
-    def test_projected_unicode_checkpoint_and_archive_limits_precede_writes(self):
-        api = FakeAPI()
-        store = State(api)
-        value = checkpoint(request())
-        value["request"]["findings"][0]["body"] = "\u4e00" * 200000
-        with patch.object(store, "snapshot", return_value=(SHA, REVISION, {})):
-            with self.assertRaises(Rejected):
-                store.write("pr-v2-210933087-1.json", value, None)
-        self.assertEqual([], api.calls)
-        before = checkpoint(request())
-        after = copy.deepcopy(before)
-        after["request"]["request_id"] = "e" * 32
-        entries = {f"pr-v2-210933087-{i + 1}.json": before for i in range(1000)}
-        with patch.object(store, "snapshot", return_value=(SHA, REVISION, entries)):
-            with self.assertRaises(Rejected):
-                store.write("pr-v2-210933087-1.json", after, before)
-        self.assertEqual([], api.calls)
-        store.sizes = {key: 20000 for key in entries}
-        with patch.object(store, "snapshot", return_value=(SHA, REVISION, entries)):
-            with self.assertRaises(Rejected):
-                store.write("pr-v2-210933087-1.json", before, before)
-        self.assertEqual([], api.calls)
-
 
 class PublisherTests(unittest.TestCase):
     def context(self):

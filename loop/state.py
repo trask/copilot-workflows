@@ -8,7 +8,7 @@ import random
 import re
 import time
 
-from loop.api import APIError
+from loop.api import APIError, MAX_RESPONSE
 from loop.policy import CENTRAL, STATE_BRANCH, Rejected, canonical, checkpoint_name, require
 
 PREFIX = f"repos/{CENTRAL}/git/"
@@ -25,7 +25,6 @@ class Conflict(RuntimeError):
 class State:
     def __init__(self, api):
         self.api = api
-        self.sizes = {}
         self.blobs = {}
         self.cached = None
         self.written_head = None
@@ -61,35 +60,40 @@ class State:
             return head, self.cached[1], copy.deepcopy(self.cached[2])
         commit = self.api.call(PREFIX + "commits/" + head)
         tree = self.api.call(PREFIX + "trees/" + commit["tree"]["sha"])
-        require(not tree["truncated"] and len(tree["tree"]) <= 1000, "State tree exceeds limits")
-        require(sum(e.get("size", 0) for e in tree["tree"]) <= 16 * 1024 * 1024,
-                "State branch exceeds total size limit")
+        require(not tree["truncated"], "State tree is incomplete")
         entries = {}
-        self.sizes = {}
         blobs = {}
         missing = []
         for entry in tree["tree"]:
             require(entry["type"] == "blob" and entry["mode"] == "100644"
                     and entry["path"].endswith(".json") and "/" not in entry["path"],
                     "State branch must contain JSON data only")
-            require(entry.get("size", 0) <= 1024 * 1024, "Checkpoint too large")
             cached = self.blobs.get(entry["path"])
             if cached is None or cached[0] != entry["sha"]:
                 missing.append(entry)
             else:
                 blobs[entry["path"]] = cached
-        if missing:
+        batches = []
+        size = 0
+        for entry in missing:
+            # Reserve response space for JSON escaping and GraphQL metadata.
+            if not batches or len(batches[-1]) == 100 or size + entry.get("size", 0) > MAX_RESPONSE // 8:
+                batches.append([])
+                size = 0
+            batches[-1].append(entry)
+            size += entry.get("size", 0)
+        for group in batches:
             variables = dict(zip(("owner", "repo"), CENTRAL.split("/")))
-            variables.update({f"blob{i}": entry["sha"] for i, entry in enumerate(missing)})
-            arguments = ", ".join(f"$blob{i}: GitObjectID!" for i in range(len(missing)))
+            variables.update({f"blob{i}": entry["sha"] for i, entry in enumerate(group)})
+            arguments = ", ".join(f"$blob{i}: GitObjectID!" for i in range(len(group)))
             fields = " ".join(
                 f"blob{i}: object(oid: $blob{i}) {{ ... on Blob {{ oid text isTruncated }} }}"
-                for i in range(len(missing)))
+                for i in range(len(group)))
             batch = self.api.graphql(
                 "query($owner: String!, $repo: String!, " + arguments + ") { "
                 "repository(owner: $owner, name: $repo) { " + fields + " } }",
                 variables)["repository"]
-            for i, entry in enumerate(missing):
+            for i, entry in enumerate(group):
                 blob = batch[f"blob{i}"]
                 require(isinstance(blob, dict) and blob.get("oid") == entry["sha"]
                         and type(blob.get("isTruncated")) is bool,
@@ -100,13 +104,11 @@ class State:
                     print("[state] Reading complete Git blob; GraphQL text is truncated or differs")
                     complete = self.api.call(PREFIX + "blobs/" + entry["sha"])
                     payload = base64.b64decode(complete["content"])
-                require(len(payload) <= 1024 * 1024, "Checkpoint too large")
                 require(blob_oid(payload) == entry["sha"], "Checkpoint blob bytes differ from Git identity")
                 blobs[entry["path"]] = (entry["sha"], json.loads(payload))
         for entry in tree["tree"]:
             cached = blobs[entry["path"]]
             entries[entry["path"]] = copy.deepcopy(cached[1])
-            self.sizes[entry["path"]] = entry.get("size", len(canonical(entries[entry["path"]])))
         self.blobs = blobs
         self.cached = (head, commit["tree"]["sha"], copy.deepcopy(entries))
         return head, commit["tree"]["sha"], entries
@@ -141,12 +143,6 @@ class State:
             require(archive_name not in entries or entries[archive_name] == expected,
                     "Existing stopped publication evidence differs")
             pending[archive_name] = canonical(expected)
-        require(all(len(data) <= 1024 * 1024 for data in pending.values()),
-                "Projected checkpoint exceeds byte limit")
-        projected = {key: self.sizes.get(key, len(canonical(item))) for key, item in entries.items()}
-        projected.update({key: len(data) for key, data in pending.items()})
-        require(len(projected) <= 1000 and sum(projected.values()) <= 16 * 1024 * 1024,
-                "Projected state branch exceeds limits")
         body = {"tree": []}
         for path, payload in pending.items():
             blob = self.api.call(PREFIX + "blobs", "POST",

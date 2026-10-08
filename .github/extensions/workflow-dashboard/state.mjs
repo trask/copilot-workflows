@@ -42,19 +42,16 @@ export class Checkpoints {
         check(commit.sha === sha && SHA.test(commit.tree?.sha), "State commit does not match its pinned identity.");
         const tree = (await this.github.get(PREFIX + "trees/" + commit.tree.sha)).data;
         check(tree.sha === commit.tree.sha && tree.truncated === false &&
-            Array.isArray(tree.tree) && tree.tree.length <= 1000, "State tree is incomplete or oversized.");
-        let total = 0;
+            Array.isArray(tree.tree), "State tree is incomplete.");
         const entries = new Map();
         for (const item of tree.tree) {
             check(item.type === "blob" && item.mode === "100644" &&
                 typeof item.path === "string" && /^[A-Za-z0-9-]+\.json$/.test(item.path) &&
-                SHA.test(item.sha) && Number.isInteger(item.size) && item.size >= 0 && item.size <= 1024 * 1024,
-            "State tree contains an unsafe or oversized entry.");
+                SHA.test(item.sha) && Number.isInteger(item.size) && item.size >= 0,
+            "State tree contains an unsafe entry.");
             check(!entries.has(item.path), "State tree contains duplicate checkpoint paths.");
             entries.set(item.path, item);
-            total += item.size;
         }
-        check(total <= 16 * 1024 * 1024, "State branch exceeds the total size limit.");
         const current = [];
         for (const entry of entries.values()) {
             if (entry.path.startsWith("pr-")) current.push({ name: entry.path, state: await this.blob(entry) });

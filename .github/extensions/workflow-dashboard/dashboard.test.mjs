@@ -526,15 +526,13 @@ test("state rejects malformed, duplicate, unpinned and incomplete reference list
     await assert.rejects(new Checkpoints(incomplete).load(), /incomplete/);
 });
 
-test("state rejects truncation, oversized trees, unsafe paths, and corrupted objects", async () => {
+test("state rejects truncation, unsafe paths, duplicate entries, and corrupted objects", async () => {
     for (const mutation of [
         (c) => c.objects.get("trees/" + sha("d")).truncated = true,
-        (c) => c.objects.get("trees/" + sha("d")).tree[0].size = 1024 * 1024 + 1,
         (c) => c.objects.get("trees/" + sha("d")).tree[0].path = "../secrets.json",
         (c) => c.objects.get("commits/" + sha("c")).sha = sha("e"),
         (c) => { const entry = c.objects.get("trees/" + sha("d")).tree[0]; c.objects.get("blobs/" + entry.sha).content = "e30="; },
-        (c) => { const tree = c.objects.get("trees/" + sha("d")); tree.tree = Array.from({ length: 1001 }, () => tree.tree[0]); },
-        (c) => { const tree = c.objects.get("trees/" + sha("d")); tree.tree = Array.from({ length: 17 }, (_, index) => ({ ...tree.tree[0], path: `pr-${index}.json`, size: 1024 * 1024 })); },
+        (c) => { const tree = c.objects.get("trees/" + sha("d")); tree.tree.push(tree.tree[0]); },
     ]) {
         const client = stateClient();
         mutation(client);

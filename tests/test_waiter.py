@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from loop.api import API, APIError, DeadlineReached
+from loop.api import API, APIError, DeadlineReached, MAX_RESPONSE
 from loop.cli import choose_verification, finalize, main as cli_main, verify_pending
 from loop.control import busy, claim, owned
 from loop.policy import CENTRAL, Rejected, canonical, checkpoint_name, iso
@@ -528,6 +528,63 @@ class StateCacheTests(unittest.TestCase):
         self.assertEqual({f"blob{i}": entry["sha"] for i, entry in enumerate(entries)},
                          {key: value for key, value in api.graphql.call_args.args[1].items()
                           if key.startswith("blob")})
+
+    def test_snapshot_preserves_all_records_across_count_and_byte_sized_batches(self):
+        for count, text in ((101, "small"), (3, "\u4e00" * (MAX_RESPONSE // 96))):
+            with self.subTest(count=count):
+                values, entries, blobs = {}, [], {}
+                for number in range(count):
+                    path = f"pr-v2-1-{number + 1}.json"
+                    value = {"pr": number + 1, "text": text}
+                    payload = canonical(value)
+                    oid = hashlib.sha1(b"blob " + str(len(payload)).encode() + b"\0" + payload).hexdigest()
+                    values[path] = value
+                    entries.append({"path": path, "type": "blob", "mode": "100644",
+                                    "sha": oid, "size": len(payload)})
+                    blobs[oid] = {"oid": oid, "text": payload.decode(), "isTruncated": False}
+                api = Mock()
+                api.call.side_effect = lambda path: (
+                    {"object": {"sha": REVISION}} if "/ref/" in path else
+                    {"tree": {"sha": "e" * 40}} if "/commits/" in path else
+                    {"truncated": False, "tree": entries})
+                api.graphql.side_effect = lambda query, variables: {"repository": {
+                    key: blobs[oid] for key, oid in variables.items() if key.startswith("blob")}}
+                store = State(api)
+                self.assertEqual(values, store.snapshot()[2])
+                self.assertGreater(api.graphql.call_count, 1)
+                fetched = []
+                for call in api.graphql.call_args_list:
+                    batch = [oid for key, oid in call.args[1].items() if key.startswith("blob")]
+                    self.assertLessEqual(len(batch), 100)
+                    self.assertLessEqual(
+                        sum(entry["size"] for entry in entries if entry["sha"] in batch),
+                        MAX_RESPONSE // 8)
+                    fetched.extend(batch)
+                self.assertEqual([entry["sha"] for entry in entries], fetched)
+                api.graphql.reset_mock()
+                self.assertEqual(values, store.snapshot()[2])
+                api.graphql.assert_not_called()
+
+    def test_later_batch_read_failure_does_not_cache_a_partial_snapshot(self):
+        payload = b'{"pr":1}'
+        oid = hashlib.sha1(b'blob 8\0' + payload).hexdigest()
+        entries = [{"path": f"pr-v2-1-{number + 1}.json", "type": "blob", "mode": "100644",
+                    "sha": oid, "size": len(payload)} for number in range(101)]
+        api = Mock()
+        api.call.side_effect = lambda path: (
+            {"object": {"sha": REVISION}} if "/ref/" in path else
+            {"tree": {"sha": "e" * 40}} if "/commits/" in path else
+            {"truncated": False, "tree": entries})
+        api.graphql.side_effect = [
+            {"repository": {f"blob{i}": {"oid": oid, "text": payload.decode(), "isTruncated": False}
+                            for i in range(100)}},
+            APIError(403, "Batch read denied"),
+        ]
+        store = State(api)
+        with self.assertRaisesRegex(APIError, "Batch read denied"):
+            store.snapshot()
+        self.assertIsNone(store.cached)
+        self.assertEqual({}, store.blobs)
 
     def test_truncated_graphql_checkpoint_fetches_the_complete_bound_rest_blob(self):
         entry = {"path": "pr-v2-1-1.json", "type": "blob", "mode": "100644",
