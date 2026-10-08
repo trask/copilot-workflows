@@ -513,6 +513,12 @@ class ProtocolTests(unittest.TestCase):
                  "created_at": iso(100), "status": "in_progress"}
         read.runs = [valid]
         self.assertEqual(77, observed_review_request(read, state, intent)["run_id"])
+        read.pr["head"]["sha"] = REVISION
+        with self.assertRaises(Rejected):
+            observed_review_request(read, state, intent)
+        self.assertEqual(77, observed_review_request(
+            read, state, intent, allow_head_change=True)["run_id"])
+        read.pr["head"]["sha"] = SHA
         for key, value in [("head_sha", REVISION), ("event", "workflow_dispatch"),
                            ("path", ".github/workflows/fake.yml"),
                            ("actor", dict(BOT, id=999)), ("created_at", iso(99))]:

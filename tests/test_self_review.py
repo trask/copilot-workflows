@@ -23,7 +23,7 @@ from loop.revisions import revision_ref
 from tests import test_live as live_fixtures
 from tests.test_live import (CI_CHECK, FIXTURE, Publisher, Read, TEST_TOKEN,
                             personal_request, stored, zipped)
-from tests.test_loop import (FakeAPI, GOOD_PATCH, MemoryState, REVISION, SHA, baseline, run)
+from tests.test_loop import (BOT, FakeAPI, GOOD_PATCH, MemoryState, REVISION, SHA, baseline, review, run)
 from tests.test_waiter import Controls, Reads, controller, phases
 
 BASE = "9" * 40
@@ -700,6 +700,56 @@ class ManualPhaseTests(unittest.TestCase):
                     start(store, FakeAPI(), fresh, "", 0, True, "fine_grained_pat", [], True, 100)
                 self.assertEqual(state, store.entries[name])
 
+    def test_new_phase_reconciles_an_observed_old_head_review_and_preserves_previous_evidence(self):
+        old = checkpoint(personal_request())
+        old.update(stage="blocked", reason="waiter_operation_rejected", iteration=1,
+                   effects=[], publications=[{"sha": SHA}],
+                   publication_intent={"status": "confirmed"},
+                   review_request={"status": "uncertain", "sha": SHA, "recorded_at": 100,
+                                   "baseline_review_ids": [12], "baseline_run_ids": [200]})
+        read = Read(old["request"])
+        read.pr["head"]["sha"] = REVISION
+        read.reviews.append(review(id=13, commit_id=SHA, submitted_at=iso(200)))
+        fresh = dict(self_request(False), request_id="e" * 32, frozen_sha=REVISION,
+                     frozen_at=8000, deadline=15200)
+        before = copy.deepcopy(old)
+        store, name = stored(old)
+        _, result = start(store, FakeAPI(), fresh, "", 0, True,
+                          "fine_grained_pat", [CI_CHECK], True, 8000, read=read)
+        self.assertEqual("source_pending", result["stage"])
+        self.assertEqual(REVISION, result["expected_sha"])
+        self.assertEqual({
+            "kind": "confirmed_review_request", "previous_request_id": old["request"]["request_id"],
+            "previous_generation": old["generation"], "authorized_at": 8000,
+            "confirmation": {"kind": "submitted_review", "review_ids": [13]},
+        }, result["restart"])
+        self.assertEqual(before, old)
+        self.assertEqual(result, store.entries[name])
+        self.assertEqual("uncertain", old["review_request"]["status"])
+        for key, intent in (
+                ("publication_intent", {"status": "uncertain"}),
+                ("effects", [{"resolution": {"status": "uncertain"}}])):
+            uncertain = dict(old, **{key: intent})
+            store, name = stored(uncertain)
+            with self.subTest(effect=key), self.assertRaises(Rejected):
+                start(store, FakeAPI(), fresh, "", 0, True,
+                      "fine_grained_pat", [], True, 8000, read=read)
+            self.assertEqual(uncertain, store.entries[name])
+
+    def test_new_head_requested_reviewer_cannot_confirm_an_old_head_request(self):
+        old = checkpoint(personal_request())
+        old.update(stage="blocked", effects=[], publications=[],
+                   review_request={"status": "uncertain", "sha": SHA, "recorded_at": 100,
+                                   "baseline_review_ids": [12], "baseline_run_ids": [200]})
+        read = Read(old["request"])
+        read.pr["head"]["sha"] = REVISION
+        read.pr["requested_reviewers"] = [BOT.copy()]
+        fresh = dict(self_request(False), request_id="e" * 32, frozen_sha=REVISION)
+        store, name = stored(old)
+        with self.assertRaisesRegex(Rejected, "Uncertain effects require reconciliation"):
+            start(store, FakeAPI(), fresh, "", 0, True,
+                  "fine_grained_pat", [], True, 100, read=read)
+        self.assertEqual(old, store.entries[name])
 
     def test_previous_worker_launch_and_coordinator_must_all_be_completed(self):
         state = checkpoint(self_request())

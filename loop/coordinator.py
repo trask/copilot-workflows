@@ -21,7 +21,7 @@ def checkpoint(request):
             "artifacts": [], "report": None, "reason": None, "cancelled_at": None}
 
 
-def quiescent(api, state):
+def quiescent(api, state, read=None):
     require(not state.get("capability") and not state.get("capability_probe")
             and "reviewable_retry" not in state["request"].get("publication", {})
             and not state["request"].get("publication", {}).get("reply_bot_threads"),
@@ -32,7 +32,7 @@ def quiescent(api, state):
     require(state["reason"] not in {"source_acquisition_uncertain_no_retry",
                                    "duplicate_run_identity"},
             "Uncertain effects require reconciliation, not a new phase")
-    for key in ("publication_intent", "review_request", "task_intent"):
+    for key in ("publication_intent", "task_intent"):
         intent = state.get(key)
         require(not intent or intent.get("status") == "confirmed",
                 "Uncertain effects require reconciliation, not a new phase")
@@ -41,6 +41,17 @@ def quiescent(api, state):
     require(not state.get("effects") or state["request"].get("protocol") == "reviewable-v1",
             "Retired effect-bearing checkpoints require manual inspection")
     executions_quiescent(api, state)
+    confirmation = None
+    review = state.get("review_request")
+    if review and review.get("status") != "confirmed":
+        require(read is not None and loop_kind(state["request"]) == "copilot_review"
+                and review.get("sha") == state["expected_sha"],
+                "Uncertain effects require reconciliation, not a new phase")
+        from loop.live import observed_review_request
+        confirmation = observed_review_request(read, state, review, allow_head_change=True)
+        require(confirmation is not None,
+                "Uncertain effects require reconciliation, not a new phase")
+    return confirmation
 
 
 def executions_quiescent(api, state):

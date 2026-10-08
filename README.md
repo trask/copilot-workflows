@@ -50,6 +50,8 @@ Launch requires the isolated `COPILOT_GITHUB_TOKEN` inference credential and exp
 
 Once a run finishes, use Run again with the same inputs. A terminal, verified quiescent run permits a new phase of any kind, even at the same head. The coordinator verifies prior executions have stopped and archives their evidence. Review and CI loops allow five workers; single-pass tasks allow one. All have a two-hour deadline. Ordinary reruns need no copied checkpoint IDs. Active phases cannot reset budgets or switch kinds; uncertain effects require reconciliation.
 
+A fresh launch can reconcile an unconfirmed Copilot review request from a submitted review or exact Copilot workflow on its saved head, even after the PR head advances. The new phase records that confirmation and archives the previous evidence without issuing another review request. A requested reviewer on a different head is not proof, and unknown pushes or thread effects still block restart.
+
 New phases pin the automation commit their launch ran on. Workers and coordinator continuations use a verified `review-loop-revisions/<commit-sha>` branch, and verification/publication check out that same commit. Updating central `main` does not stop these phases or change their code. New launches use the revision selected by their Actions dispatch. To pick up an automation fix in an active phase, cancel it and launch again after it stops.
 
 Revision branches are shared by phases on the same commit, retained for continuation and provenance, and never updated by the automation. A missing or changed revision branch stops affected work without falling back to `main`. Older phases without a saved pin retain their existing revision-change guard; blocked historical phases are not resumed automatically.

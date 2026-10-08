@@ -147,7 +147,14 @@ def start(store, api, request, previous_id, previous_generation, publisher_avail
         if restart_unpublished:
             restart = unpublished_restart(api, read, prior, request, now)
         else:
-            quiescent(api, prior)
+            confirmation = quiescent(api, prior, read)
+            if confirmation is not None:
+                restart = {
+                    "kind": "confirmed_review_request",
+                    "previous_request_id": prior["request"]["request_id"],
+                    "previous_generation": prior["generation"],
+                    "confirmation": confirmation, "authorized_at": now,
+                }
         require(request["request_id"] != prior["request"]["request_id"],
                 "A fresh phase requires a new request identity")
     require(pipeline_limit(request) == DEFAULTS["max_iterations"],
@@ -321,9 +328,10 @@ def guard(store, name, state, read, now, sha=None):
             "Actual head ref changed or disagrees with the PR")
 
 
-def observed_review_request(read, state, intent):
+def observed_review_request(read, state, intent, *, allow_head_change=False):
     pr = read.call(f"repos/{state['request']['repo']}/pulls/{state['request']['pr']}")
-    unchanged(dict(state["request"], frozen_sha=intent["sha"]), pr)
+    sha = pr["head"]["sha"] if allow_head_change else intent["sha"]
+    unchanged(dict(state["request"], frozen_sha=sha), pr)
     reviews = read.pages(f"repos/{state['request']['repo']}/pulls/{state['request']['pr']}/reviews")
     fresh = [r for r in reviews if bot(r.get("user")) and r.get("submitted_at")
              and r["id"] not in intent["baseline_review_ids"]
@@ -342,7 +350,8 @@ def observed_review_request(read, state, intent):
         return {"kind": "copilot_workflow", "run_id": fresh[0]["id"], "sha": intent["sha"],
                 "status": fresh[0]["status"], "conclusion": fresh[0].get("conclusion")}
     require(len(fresh) <= 1, "Ambiguous Copilot review-request workflows")
-    if any(bot(user) for user in pr.get("requested_reviewers", [])):
+    if pr["head"]["sha"] == intent["sha"] and any(
+            bot(user) for user in pr.get("requested_reviewers", [])):
         return {"kind": "requested_reviewer", "bot_id": 175728472, "sha": intent["sha"]}
     return None
 
