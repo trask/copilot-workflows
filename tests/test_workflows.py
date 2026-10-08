@@ -10,12 +10,13 @@ from loop.policy import Rejected
 
 
 class WorkflowTests(unittest.TestCase):
-    def test_worker_and_threat_detection_share_explicit_model_and_effort(self):
+    def test_worker_and_threat_detection_use_canonical_model_and_transport(self):
         root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
         frontmatter = (root / "copilot-worker.md").read_text(
             encoding="utf-8").split("\n---\n", 1)[0]
         self.assertIn("\nengine:\n  id: copilot\n  version: \"1.0.93\"\n"
-                      "  model: gpt-6.1-sol?effort=high\n",
+                      "  model: gpt-6.1-sol\n"
+                      "  args: [\"--reasoning-effort\", \"high\"]\n",
                       frontmatter)
         self.assertIn("\nsandbox:\n  agent:\n    version: v0.28.49\n"
                       "    runtime: docker\n", frontmatter)
@@ -28,7 +29,7 @@ class WorkflowTests(unittest.TestCase):
             jobs, re.MULTILINE | re.DOTALL))
         for job in ("agent", "detection"):
             with self.subTest(job=job):
-                self.assertEqual(["gpt-6.1-sol?effort=high"], re.findall(
+                self.assertEqual(["gpt-6.1-sol"], re.findall(
                     r"^\s+COPILOT_MODEL: (.+)$", sections[job], re.MULTILINE))
                 self.assertIn('install_copilot_cli.sh" 1.0.93', sections[job])
                 self.assertEqual(["1.0.93"], re.findall(
@@ -38,6 +39,7 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(["responses"], re.findall(
                     r"^\s+COPILOT_PROVIDER_WIRE_API: (.+)$", sections[job], re.MULTILINE))
         self.assertIn('install_awf_binary.sh" v0.28.49 --rootless', sections["agent"])
+        self.assertIn("--reasoning-effort high", sections["agent"])
 
     def test_custom_secrets_require_the_protected_environment(self):
         root = Path(__file__).resolve().parents[1] / ".github" / "workflows"

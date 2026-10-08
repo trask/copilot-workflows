@@ -8,7 +8,7 @@ The scope stays personal and opt-in. Only a fresh owner dispatch can launch work
 
 All eight kinds share `coordinator.yml`, one artifact-only worker per pass, structural verification, credential routing, durable intents, checkpoint storage and the shared waiter. Select one `loop_kind` per launch. They do not form a combined pipeline.
 
-The shared Copilot worker and its threat detector use `gpt-6.1-sol` with high reasoning effort, configured as `engine.model: gpt-6.1-sol?effort=high` in `.github/workflows/copilot-worker.md`. Both pin Copilot CLI `1.0.93` and use the Responses wire API. `COPILOT_PROVIDER_MODEL_ID: gpt-6.1-sol` selects the CLI's built-in model configuration while the qualified model name carries effort to the AWF inference proxy. GitHub's external Copilot PR reviews use GitHub-managed settings, not this worker configuration.
+The shared Copilot worker uses `gpt-6.1-sol` with high reasoning effort. `.github/workflows/copilot-worker.md` sets the canonical `engine.model: gpt-6.1-sol` and passes `--reasoning-effort high` through `engine.args`. The gh-aw threat detector inherits the model and transport settings but keeps its default launcher and reasoning effort. Both pin Copilot CLI `1.0.93` and use the Responses wire API. `COPILOT_PROVIDER_MODEL_ID: gpt-6.1-sol` selects the CLI's built-in model configuration. GitHub's external Copilot PR reviews use GitHub-managed settings, not this worker configuration.
 
 | Display name | `loop_kind` | Completion |
 | --- | --- | --- |

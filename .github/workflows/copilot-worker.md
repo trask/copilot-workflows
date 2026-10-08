@@ -41,7 +41,8 @@ permissions:
 engine:
   id: copilot
   version: "1.0.93"
-  model: gpt-6.1-sol?effort=high
+  model: gpt-6.1-sol
+  args: ["--reasoning-effort", "high"]
   bare: true
   env:
     AWF_CHROOT_IDENTITY_HOME: /tmp/review-loop-worker-home
