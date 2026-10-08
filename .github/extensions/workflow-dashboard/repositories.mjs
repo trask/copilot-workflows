@@ -2,6 +2,10 @@ export const REPOSITORIES = [
     "open-telemetry/opentelemetry-java-instrumentation",
     "open-telemetry/semantic-conventions-conformance",
     "open-telemetry/shared-workflows",
+    "open-telemetry/semantic-conventions-genai",
+    "open-telemetry/semantic-conventions",
+    "open-telemetry/github-threat-detection",
+    "open-telemetry/admin",
 ];
 export const DEFAULT_REPOSITORY = REPOSITORIES[0];
 export const LAUNCH_OWNER_ID = 218610;

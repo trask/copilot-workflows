@@ -139,7 +139,22 @@ function controller({ records = [], pulls = [pull()], dashboardState = state(), 
 }
 
 test("repository config is small, has the requested default, and bounds reads and targets", () => {
-    assert.deepEqual(REPOSITORIES, [repo, "open-telemetry/semantic-conventions-conformance", "open-telemetry/shared-workflows"]);
+    assert.deepEqual(REPOSITORIES, [
+        "open-telemetry/opentelemetry-java-instrumentation",
+        "open-telemetry/semantic-conventions-conformance",
+        "open-telemetry/shared-workflows",
+        "open-telemetry/semantic-conventions-genai",
+        "open-telemetry/semantic-conventions",
+        "open-telemetry/github-threat-detection",
+        "open-telemetry/admin",
+    ]);
+    assert.equal(DEFAULT_REPOSITORY, "open-telemetry/opentelemetry-java-instrumentation");
+    for (const selected of REPOSITORIES) {
+        const name = selected.split("/")[1];
+        assert.deepEqual(targetParts(`${selected}#12`), { repo: selected, number: 12 });
+        assert.equal(dashboardPath(selected),
+            `repos/open-telemetry/shared-workflows/contents/${name}/dashboard-state.json?ref=otelbot%2Fpull-request-dashboard-state%2F${name}`);
+    }
     assert.match(dashboardPath(repo), /ref=otelbot%2Fpull-request-dashboard-state%2Fopentelemetry-java-instrumentation$/);
     assert.deepEqual(targetParts(target), { repo, number: 12 });
     for (const invalid of ["12", "other/repo#12", `${repo}#0`, `${repo}#12\n`]) assert.throws(() => targetParts(invalid));
