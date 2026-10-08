@@ -46,6 +46,8 @@ engine:
   env:
     AWF_CHROOT_IDENTITY_HOME: /tmp/review-loop-worker-home
     XDG_CACHE_HOME: /tmp/review-loop-worker-home/.cache
+    COPILOT_PROVIDER_MODEL_ID: gpt-6.1-sol
+    COPILOT_PROVIDER_WIRE_API: responses
 sandbox:
   agent:
     runtime: docker

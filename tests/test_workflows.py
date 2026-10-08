@@ -1,3 +1,4 @@
+import json
 import re
 import runpy
 import unittest
@@ -16,8 +17,10 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("\nengine:\n  id: copilot\n  version: \"1.0.93\"\n"
                       "  model: gpt-6.1-sol?effort=high\n",
                       frontmatter)
-        jobs = (root / "copilot-worker.lock.yml").read_text(
-            encoding="utf-8").split("\njobs:\n", 1)[1]
+        compiled = (root / "copilot-worker.lock.yml").read_text(encoding="utf-8")
+        metadata = json.loads(compiled.splitlines()[0].split(": ", 1)[1])
+        self.assertEqual("1.0.93", metadata["engine_versions"]["copilot"])
+        jobs = compiled.split("\njobs:\n", 1)[1]
         sections = dict(re.findall(
             r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
             jobs, re.MULTILINE | re.DOTALL))
@@ -28,6 +31,10 @@ class WorkflowTests(unittest.TestCase):
                 self.assertIn('install_copilot_cli.sh" 1.0.93', sections[job])
                 self.assertEqual(["1.0.93"], re.findall(
                     r'^\s+GH_AW_INFO_VERSION: "(.+)"$', sections[job], re.MULTILINE))
+                self.assertEqual(["gpt-6.1-sol"], re.findall(
+                    r"^\s+COPILOT_PROVIDER_MODEL_ID: (.+)$", sections[job], re.MULTILINE))
+                self.assertEqual(["responses"], re.findall(
+                    r"^\s+COPILOT_PROVIDER_WIRE_API: (.+)$", sections[job], re.MULTILINE))
 
     def test_custom_secrets_require_the_protected_environment(self):
         root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
