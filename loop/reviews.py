@@ -11,24 +11,29 @@ def body_classification(body):
     return _body_classification(body)[0]
 
 
+def _without_review_footer(body):
+    body = re.sub(
+        r"\n\n---\n\nGive feedback about Copilot approvals in \[this survey\]"
+        r"\(https://[^\s()<>]+\) to enter a drawing for a \$[0-9]+ gift card\.\n?\Z",
+        "", body)
+    effort = re.search(r"\n\n\U0001f9e0 \*\*Review effort:\*\* Balanced\n?\Z", body)
+    return (body[:effort.start()], True) if effort is not None else (body, False)
+
+
 def _body_classification(body):
     if not isinstance(body, str):
         return "unknown", []
     if body.count("<!-- ccr-overview-v2 -->") != 1:
         return "unknown", []
-    body = re.sub(
-        r"\n\n---\n\nGive feedback about Copilot approvals in \[this survey\]"
-        r"\(https://[^\s()<>]+\) to enter a drawing for a \$[0-9]+ gift card\.\n?\Z",
-        "", body)
+    body, effort = _without_review_footer(body)
     counts = re.findall(r"\*\*Findings:\*\*\s*(None|[0-9]+)\b", body)
     counts += re.findall(r"(?:\*\*|<strong>)([0-9]+) open findings?(?:\*\*|</strong>)", body)
     if len(counts) != 1:
         return "unknown", []
     if counts[0] != "None" and int(counts[0]) > 0:
         return "findings", []
-    effort = re.search(r"\n\n\U0001f9e0 \*\*Review effort:\*\* Balanced\n?\Z", body)
-    if effort is not None:
-        body = body[:effort.start()]
+    if re.search(r"Previously missed|Open \([1-9]|New \([1-9]", body):
+        return "findings", []
     resolved_ids = []
     resolved = re.search(
         r"\n\n<details>\n<summary><strong>(?:Resolved since last review "
@@ -47,12 +52,12 @@ def _body_classification(body):
                 or len(set(resolved_ids)) != len(resolved_ids)):
             return "unknown", []
         body = body[:resolved.start()]
-    if re.search(r"discussion_r[0-9]+|Previously missed|Open \([1-9]|New \([1-9]", body):
+    if re.search(r"discussion_r[0-9]+", body):
         return "findings", []
     heading = (r"### (?:\U0001f7e2 Approval recommended|\U0001f535 Needs a closer look)"
                r"\n\n[^\n<>#*]+\n\n")
     clean = (r"<!-- ccr-overview-v2 -->\n\n" + heading + r"\*\*0 open findings\*\*\n?"
-             if effort is not None else
+             if effort else
              r"<!-- ccr-overview-v2 -->\n\n## Copilot review overview\n\n" + heading
              + r"\*\*Review effort:\*\* Balanced  \n\*\*Findings:\*\* None\n?")
     if counts[0] in {"None", "0"} and re.fullmatch(clean, body):
@@ -83,7 +88,8 @@ def missed_fingerprints(findings):
     for finding in findings:
         if finding["kind"] != "body" or body_classification(finding["body"]) != "findings":
             continue
-        missed = re.search(section, finding["body"], re.DOTALL)
+        body, _ = _without_review_footer(finding["body"])
+        missed = re.search(section, body, re.DOTALL)
         if missed is None:
             continue
         items = list(entry.finditer(missed[2]))

@@ -1332,6 +1332,42 @@ class ReviewTests(unittest.TestCase):
         read.resolved = True
         self.assertEqual("clean", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
 
+    def test_resolved_summary_keeps_missed_findings_before_native_footers(self):
+        body = CURRENT_CLEAN_RESOLVED.replace(
+            "\n\n\U0001f9e0", "\n" + MISSED.rstrip("\n") + "\n\n\U0001f9e0")
+        footer = ("\n\n---\n\nGive feedback about Copilot approvals in [this survey]"
+                  "(https://survey.alchemer.com/s3/9011660/CCR-Public-Preview-Autoapprove-feedback-survey)"
+                  " to enter a drawing for a $150 gift card.")
+        fingerprints = missed_fingerprints([{"kind": "body", "body": NONCLEAN + MISSED}])
+        self.assertEqual(1, len(fingerprints))
+        for submitted in (body, body + footer):
+            with self.subTest(body=submitted):
+                self.assertEqual("findings", body_classification(submitted))
+                self.assertEqual(fingerprints, missed_fingerprints(
+                    [{"kind": "body", "body": submitted}]))
+                read, req = Read(), personal_request()
+                read.resolved = True
+                read.reviews.append(review(id=13, body=submitted, submitted_at=iso(200)))
+                self.assertEqual("findings", fresh_collection(
+                    read, req, [12], 100, SHA, 400)["decision"])
+                read.resolved = False
+                state = live_state(stage="waiting_review")
+                state["seen_inline_findings"] = inline_fingerprints(state["request"]["findings"])
+                state["review_request"] = {
+                    "baseline_review_ids": [12], "recorded_at": 100, "sha": SHA}
+                store, name = stored(state)
+                continued = watch_review(store, name, state, read, 400)
+                self.assertEqual("ready", continued["stage"])
+                self.assertEqual(fingerprints, continued["seen_missed_findings"])
+                continued["review_request"] = {
+                    "baseline_review_ids": [12, 13], "recorded_at": 500, "sha": SHA}
+                read.reviews.append(review(id=14, body=submitted, submitted_at=iso(600)))
+                store, name = stored(continued)
+                self.assertEqual("repeated_findings", watch_review(
+                    store, name, continued, read, 800)["reason"])
+        self.assertEqual([], missed_fingerprints(
+            [{"kind": "body", "body": body + footer + "\nUnexpected finding"}]))
+
     def test_current_resolved_summary_requires_closed_verified_roots(self):
         read, req = Read(), personal_request()
         read.reviews.append(review(id=13, body=CURRENT_CLEAN_RESOLVED, submitted_at=iso(200)))
