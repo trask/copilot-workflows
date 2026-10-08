@@ -17,7 +17,7 @@ class APIError(RuntimeError):
     def __init__(self, status, message, *, rate_limited=False, retry_at=None):
         super().__init__(message)
         self.status = status
-        self.rate_limited = rate_limited
+        self.rate_limited = rate_limited or status == 429
         self.retry_at = retry_at
 
 
@@ -73,9 +73,9 @@ class API:
                                     and (limits.get("X-RateLimit-Remaining") == 0
                                          or "Retry-After" in limits))
                     retry_at = (limits.get("X-RateLimit-Reset")
-                                if limits.get("X-RateLimit-Remaining") == 0 else
-                                int(time.time()) + limits["Retry-After"]
-                                if "Retry-After" in limits else None)
+                                if limits.get("X-RateLimit-Remaining") == 0 else None)
+                    if retry_at is None and "Retry-After" in limits:
+                        retry_at = int(time.time()) + limits["Retry-After"]
                     message = f"GitHub API {method} failed with HTTP {error.code}; endpoint={path}"
                     if rate_limited:
                         message += "; rate limited"

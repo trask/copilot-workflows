@@ -232,6 +232,37 @@ class WaiterTests(unittest.TestCase):
             else:
                 sleep.assert_not_called()
 
+    def test_rate_limited_waiter_waits_for_reset_without_dispatching_or_blocking_tasks(self):
+        api = Mock()
+        api.call.side_effect = [
+            APIError(403, "Quota exhausted", rate_limited=True, retry_at=200),
+            {"object": {"sha": REVISION}},
+        ]
+        with patch.dict(os.environ, ENV, clear=True), \
+                patch("loop.waiter.time.monotonic", return_value=0), \
+                patch("loop.waiter.time.time", return_value=100), \
+                patch("loop.waiter.time.sleep") as sleep, \
+                patch("loop.waiter.poll", return_value=False) as poll_once:
+            wait(api, MemoryState(), duration=120)
+        sleep.assert_called_once_with(101)
+        poll_once.assert_called_once()
+        self.assertEqual(2, api.call.call_count)
+        self.assertTrue(all(len(call.args) == 1 for call in api.call.call_args_list))
+        self.assertIsNone(api.deadline)
+
+    def test_quota_reset_outside_waiter_deadline_defers_to_schedule_without_api_handoff(self):
+        api = Mock()
+        api.call.side_effect = APIError(403, "Quota exhausted", rate_limited=True, retry_at=200)
+        with patch.dict(os.environ, ENV, clear=True), \
+                patch("loop.waiter.time.monotonic", return_value=0), \
+                patch("loop.waiter.time.time", return_value=100), \
+                patch("loop.waiter.time.sleep") as sleep, patch("loop.waiter.poll") as poll_once:
+            wait(api, MemoryState(), duration=60)
+        api.call.assert_called_once()
+        sleep.assert_not_called()
+        poll_once.assert_not_called()
+        self.assertIsNone(api.deadline)
+
     def test_waiter_rejects_untrusted_runner_and_never_receives_publisher_auth(self):
         environment = dict(ENV, GITHUB_REPOSITORY=CENTRAL, GITHUB_REF="refs/heads/main",
                            GITHUB_EVENT_NAME="workflow_run")
@@ -349,25 +380,105 @@ class ControlTests(unittest.TestCase):
 class StateCacheTests(unittest.TestCase):
     def test_immutable_state_cache_avoids_refetching_archives_and_never_shares_mutable_values(self):
         value = {"schema": 2, "request": {"pr": 1}}
+        payload = canonical(value)
         entry = {"path": "request-" + "d" * 32 + ".json", "type": "blob", "mode": "100644",
-                 "sha": "c" * 40, "size": len(canonical(value))}
+                 "sha": hashlib.sha1(b"blob " + str(len(payload)).encode() + b"\0" + payload).hexdigest(),
+                 "size": len(payload)}
         api = Mock()
         api.call.side_effect = lambda path: (
             {"object": {"sha": REVISION}} if "/ref/" in path else
             {"tree": {"sha": "e" * 40}} if "/commits/" in path else
             {"truncated": False, "tree": [entry]} if "/trees/" in path else
             {"content": base64.b64encode(canonical(value)).decode()})
+        api.graphql.return_value = {"repository": {"blob0": {
+            "oid": entry["sha"], "text": canonical(value).decode(), "isTruncated": False}}}
         store = State(api)
         first = store.snapshot()[2]
         first[entry["path"]]["request"]["pr"] = 999
         self.assertEqual(1, store.snapshot()[2][entry["path"]]["request"]["pr"])
-        self.assertEqual(5, api.call.call_count)
+        self.assertEqual(4, api.call.call_count)
+        api.graphql.assert_called_once()
         api.call.side_effect = lambda path: (
             {"object": {"sha": "f" * 40}} if "/ref/" in path else
             {"tree": {"sha": "e" * 40}} if "/commits/" in path else
             {"truncated": False, "tree": [entry]} if "/trees/" in path else
             self.fail("Unchanged archived blob was refetched"))
         self.assertEqual(value, store.snapshot()[2][entry["path"]])
+        api.graphql.assert_called_once()
+
+    def test_snapshot_batches_checkpoint_and_archive_reads(self):
+        entries = [
+            {"path": path, "type": "blob", "mode": "100644",
+             "sha": hashlib.sha1(b'blob 8\0{"pr":1}').hexdigest(), "size": 8}
+            for path in ("pr-v2-1-1.json", "request-" + "d" * 32 + ".json",
+                         "stopped-" + "d" * 32 + "-1.json")]
+        api = Mock()
+        api.call.side_effect = lambda path: (
+            {"object": {"sha": REVISION}} if "/ref/" in path else
+            {"tree": {"sha": "e" * 40}} if "/commits/" in path else
+            {"truncated": False, "tree": entries})
+        api.graphql.return_value = {"repository": {
+            f"blob{i}": {"oid": entry["sha"], "text": '{"pr":1}', "isTruncated": False}
+            for i, entry in enumerate(entries)}}
+        self.assertEqual({entry["path"]: {"pr": 1} for entry in entries},
+                         State(api).snapshot()[2])
+        self.assertEqual(3, api.call.call_count)
+        api.graphql.assert_called_once()
+        self.assertEqual({f"blob{i}": entry["sha"] for i, entry in enumerate(entries)},
+                         {key: value for key, value in api.graphql.call_args.args[1].items()
+                          if key.startswith("blob")})
+
+    def test_truncated_graphql_checkpoint_fetches_the_complete_bound_rest_blob(self):
+        entry = {"path": "pr-v2-1-1.json", "type": "blob", "mode": "100644",
+                 "sha": hashlib.sha1(b'blob 8\0{"pr":1}').hexdigest(), "size": 8}
+        api = Mock()
+        api.call.side_effect = lambda path: (
+            {"object": {"sha": REVISION}} if "/ref/" in path else
+            {"tree": {"sha": "e" * 40}} if "/commits/" in path else
+            {"truncated": False, "tree": [entry]} if "/trees/" in path else
+            {"content": base64.b64encode(b'{"pr":1}').decode()})
+        api.graphql.return_value = {"repository": {"blob0": {
+            "oid": entry["sha"], "text": '{"pr":', "isTruncated": True}}}
+        self.assertEqual({entry["path"]: {"pr": 1}}, State(api).snapshot()[2])
+        self.assertEqual(4, api.call.call_count)
+        self.assertEqual("repos/" + CENTRAL + "/git/blobs/" + entry["sha"],
+                         api.call.call_args.args[0])
+
+    def test_changed_graphql_text_fetches_exact_rest_bytes_even_when_json_is_valid(self):
+        entry = {"path": "pr-v2-1-1.json", "type": "blob", "mode": "100644",
+                 "sha": hashlib.sha1(b'blob 8\0{"pr":1}').hexdigest(), "size": 8}
+        api = Mock()
+        api.call.side_effect = lambda path: (
+            {"object": {"sha": REVISION}} if "/ref/" in path else
+            {"tree": {"sha": "e" * 40}} if "/commits/" in path else
+            {"truncated": False, "tree": [entry]} if "/trees/" in path else
+            {"content": base64.b64encode(b'{"pr":1}').decode()})
+        api.graphql.return_value = {"repository": {"blob0": {
+            "oid": entry["sha"], "text": '{"pr":0}', "isTruncated": False}}}
+        self.assertEqual({entry["path"]: {"pr": 1}}, State(api).snapshot()[2])
+        self.assertEqual(4, api.call.call_count)
+        self.assertEqual("repos/" + CENTRAL + "/git/blobs/" + entry["sha"],
+                         api.call.call_args.args[0])
+        api.call.side_effect = lambda path: (
+            {"object": {"sha": REVISION}} if "/ref/" in path else
+            {"tree": {"sha": "e" * 40}} if "/commits/" in path else
+            {"truncated": False, "tree": [entry]} if "/trees/" in path else
+            {"content": base64.b64encode(b'{"pr":0}').decode()})
+        with self.assertRaisesRegex(Rejected, "blob bytes differ"):
+            State(api).snapshot()
+
+    def test_batched_checkpoint_identity_is_checked_before_acceptance(self):
+        entry = {"path": "pr-v2-1-1.json", "type": "blob", "mode": "100644",
+                 "sha": "c" * 40, "size": 8}
+        api = Mock()
+        api.call.side_effect = lambda path: (
+            {"object": {"sha": REVISION}} if "/ref/" in path else
+            {"tree": {"sha": "e" * 40}} if "/commits/" in path else
+            {"truncated": False, "tree": [entry]})
+        api.graphql.return_value = {"repository": {"blob0": {
+            "oid": "f" * 40, "text": '{"pr":1}', "isTruncated": False}}}
+        with self.assertRaisesRegex(Rejected, "blob identity"):
+            State(api).snapshot()
 
     def test_state_conflict_backoff_is_bounded(self):
         store = State(Mock())
@@ -425,9 +536,17 @@ class StateCacheTests(unittest.TestCase):
                         value = {"truncated": False, "tree": list(entries.values())}
                     else:
                         value = dict(data, tree={"sha": data["tree"]})
-                    identity = hashlib.sha1(canonical(value)).hexdigest()
+                    identity = (hashlib.sha1(b"blob " + str(len(payload)).encode() + b"\0" + payload).hexdigest()
+                                if path.endswith("/blobs") else hashlib.sha1(canonical(value)).hexdigest())
                     self.objects[identity] = value
                     return {"sha": identity}
+
+            def graphql(self, query, variables):
+                with self.lock:
+                    return {"repository": {
+                        key: {"oid": identity, "isTruncated": False,
+                              "text": base64.b64decode(self.objects[identity]["content"]).decode()}
+                        for key, identity in variables.items() if key.startswith("blob")}}
         api = GitAPI()
         fixtures, _ = phases(10)
         def write(item):

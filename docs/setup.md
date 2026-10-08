@@ -99,6 +99,8 @@ External-review publication freezes every unresolved original comment from submi
 
 API errors report the failed endpoint and numeric rate-limit headers without printing response bodies or credentials. A rate-limited HTTP 403 is distinct from a permission denial. `X-RateLimit-Remaining=0` identifies an exhausted primary quota, and `X-RateLimit-Reset` gives its UTC epoch reset time. The central Actions token shares a 1,000-request hourly quota across jobs in this repository.
 
+Checkpoint snapshots batch uncached Git blobs in one native GraphQL query and verify the text against each Git object hash. Truncated or altered text requires a complete read through the bound REST blob endpoint; source and archive evidence are never shortened. The shared waiter treats confirmed rate-limit errors as transient and waits for the reported reset within its existing execution deadline. If the reset is later, it exits without another dispatch and the scheduled waiter resumes polling.
+
 Dispatch `coordinator.yml` from central `main`. Only the existing personal owner can launch work. The target must be open and authored by that user or be a Copilot PR GitHub attributes to them, except for PR Reviewer.
 
 ```bash

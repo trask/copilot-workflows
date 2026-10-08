@@ -114,7 +114,8 @@ def poll(api, store, now, revision, checked):
         except (Rejected, ValueError, KeyError, TypeError, OSError, RuntimeError) as error:
             print(f"WAIT FAILED {name}: {type(error).__name__}: {str(error)[:1000]}", file=sys.stderr)
             transient = (isinstance(error, OSError)
-                         or isinstance(error, APIError) and (error.status == 429 or error.status >= 500))
+                         or isinstance(error, APIError) and (
+                             error.rate_limited or error.status == 429 or error.status >= 500))
             _, _, latest = store.snapshot()
             if not transient and latest.get(name) == state:
                 summary(cas(store, name, state, stage="blocked", reason="waiter_operation_rejected",
@@ -131,13 +132,24 @@ def run(api, store, duration=DURATION):
     checked = {}
     try:
         while True:
-            revision = api.call(f"repos/{CENTRAL}/git/ref/heads/main")["object"]["sha"]
-            if revision != os.environ["GITHUB_SHA"]:
-                print("Trusted main changed; handing waiting to a fresh runner.")
-                break
-            if not poll(api, store, int(time.time()), revision, checked):
-                print("No active authorized PRs remain.")
-                return
+            try:
+                revision = api.call(f"repos/{CENTRAL}/git/ref/heads/main")["object"]["sha"]
+                if revision != os.environ["GITHUB_SHA"]:
+                    print("Trusted main changed; handing waiting to a fresh runner.")
+                    break
+                if not poll(api, store, int(time.time()), revision, checked):
+                    print("No active authorized PRs remain.")
+                    return
+            except APIError as error:
+                if not error.rate_limited:
+                    raise
+                delay = max(60, (error.retry_at or int(time.time()) + 60) - int(time.time()) + 1)
+                if delay >= duration - (time.monotonic() - started):
+                    print("API quota resets after this waiter window; the scheduled waiter will retry.")
+                    return
+                print(f"API rate limited; shared waiter pauses for {delay} seconds.")
+                time.sleep(delay)
+                continue
             remaining = duration - (time.monotonic() - started)
             if remaining <= 0:
                 break

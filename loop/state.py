@@ -2,6 +2,7 @@
 
 import base64
 import copy
+import hashlib
 import json
 import random
 import re
@@ -11,6 +12,10 @@ from loop.api import APIError
 from loop.policy import CENTRAL, STATE_BRANCH, Rejected, canonical, checkpoint_name, require
 
 PREFIX = f"repos/{CENTRAL}/git/"
+
+
+def blob_oid(payload):
+    return hashlib.sha1(b"blob " + str(len(payload)).encode() + b"\0" + payload).hexdigest()
 
 
 class Conflict(RuntimeError):
@@ -42,6 +47,7 @@ class State:
         entries = {}
         self.sizes = {}
         blobs = {}
+        missing = []
         for entry in tree["tree"]:
             require(entry["type"] == "blob" and entry["mode"] == "100644"
                     and entry["path"].endswith(".json") and "/" not in entry["path"],
@@ -49,9 +55,36 @@ class State:
             require(entry.get("size", 0) <= 1024 * 1024, "Checkpoint too large")
             cached = self.blobs.get(entry["path"])
             if cached is None or cached[0] != entry["sha"]:
-                blob = self.api.call(PREFIX + "blobs/" + entry["sha"])
-                cached = (entry["sha"], json.loads(base64.b64decode(blob["content"])))
-            blobs[entry["path"]] = cached
+                missing.append(entry)
+            else:
+                blobs[entry["path"]] = cached
+        if missing:
+            variables = dict(zip(("owner", "repo"), CENTRAL.split("/")))
+            variables.update({f"blob{i}": entry["sha"] for i, entry in enumerate(missing)})
+            arguments = ", ".join(f"$blob{i}: GitObjectID!" for i in range(len(missing)))
+            fields = " ".join(
+                f"blob{i}: object(oid: $blob{i}) {{ ... on Blob {{ oid text isTruncated }} }}"
+                for i in range(len(missing)))
+            batch = self.api.graphql(
+                "query($owner: String!, $repo: String!, " + arguments + ") { "
+                "repository(owner: $owner, name: $repo) { " + fields + " } }",
+                variables)["repository"]
+            for i, entry in enumerate(missing):
+                blob = batch[f"blob{i}"]
+                require(isinstance(blob, dict) and blob.get("oid") == entry["sha"]
+                        and type(blob.get("isTruncated")) is bool,
+                        "Batched checkpoint blob identity or completeness differs")
+                require(isinstance(blob.get("text"), str), "Checkpoint blob is not text")
+                payload = blob["text"].encode("utf-8")
+                if blob["isTruncated"] or blob_oid(payload) != entry["sha"]:
+                    print("[state] Reading complete Git blob; GraphQL text is truncated or differs")
+                    complete = self.api.call(PREFIX + "blobs/" + entry["sha"])
+                    payload = base64.b64decode(complete["content"])
+                require(len(payload) <= 1024 * 1024, "Checkpoint too large")
+                require(blob_oid(payload) == entry["sha"], "Checkpoint blob bytes differ from Git identity")
+                blobs[entry["path"]] = (entry["sha"], json.loads(payload))
+        for entry in tree["tree"]:
+            cached = blobs[entry["path"]]
             entries[entry["path"]] = copy.deepcopy(cached[1])
             self.sizes[entry["path"]] = entry.get("size", len(canonical(entries[entry["path"]])))
         self.blobs = blobs
