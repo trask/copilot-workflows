@@ -206,9 +206,9 @@ class SelfReviewTests(unittest.TestCase):
                "GITHUB_RUN_ID": "88", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": REVISION,
                "PUBLICATION_AUTH_MODE": "fine_grained_pat", "PUBLISHER_AVAILABLE": "true",
                "PUBLISHER_HEAD_REPO": FIXTURE,
-               "PUBLISHER_SECRET_NAME": "TEST_PUBLISH_TOKEN",
+               "PUBLISHER_SECRET_NAME": "TRASK_PUBLISH_TOKEN",
                "PUBLISHER_SECRET_MAP": json.dumps({
-                   FIXTURE.split("/")[0]: "TEST_PUBLISH_TOKEN"}),
+                   FIXTURE.split("/")[0]: "TRASK_PUBLISH_TOKEN"}),
                "INFERENCE_AVAILABLE": "true", "LOOP_KIND": "self_review"}
         store, read = MemoryState(), SelfRead()
         with patch.dict(os.environ, env, clear=True), \
@@ -231,9 +231,9 @@ class SelfReviewTests(unittest.TestCase):
                "GITHUB_RUN_ID": "88", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": REVISION,
                "PUBLICATION_AUTH_MODE": "fine_grained_pat", "PUBLISHER_AVAILABLE": "true",
                "PUBLISHER_HEAD_REPO": FIXTURE,
-               "PUBLISHER_SECRET_NAME": "TEST_PUBLISH_TOKEN",
+               "PUBLISHER_SECRET_NAME": "TRASK_PUBLISH_TOKEN",
                "PUBLISHER_SECRET_MAP": json.dumps({
-                   FIXTURE.split("/")[0]: "TEST_PUBLISH_TOKEN"}),
+                   FIXTURE.split("/")[0]: "TRASK_PUBLISH_TOKEN"}),
                "INFERENCE_AVAILABLE": "true", "LOOP_KIND": "self_review"}
         store, read = MemoryState(), SelfRead()
         with patch.dict(os.environ, env, clear=True), \

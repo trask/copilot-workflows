@@ -18,7 +18,7 @@ from loop.policy import (BOT_IDENTITY_PATH, CENTRAL, PROFILE, SHA, digest,
 from loop.verify import (artifact_metadata, git as object_git, parse_json, safe_path, verify)
 from loop.candidates import current_request
 
-SECRET = "TEST_PUBLISH_TOKEN"
+SECRET = "TRASK_PUBLISH_TOKEN"
 
 
 def git(args, directory):

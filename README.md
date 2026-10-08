@@ -74,14 +74,14 @@ Publisher tokens are selected by the repository where the effect occurs. Source 
 
 ```json
 {
-  "trask": "TEST_PUBLISH_TOKEN",
+  "trask": "TRASK_PUBLISH_TOKEN",
   "open-telemetry": "OPENTELEMETRY_PUBLISH_TOKEN"
 }
 ```
 
 The variable and secret names are reusable by other workflows in this repository. Personal and organization tasks can run concurrently with separate credentials. Owners match case-insensitively; secret names must be uppercase, start with a letter and end in `_PUBLISH_TOKEN`. Only the selected token reaches the trusted publisher. Fork source pushes select the head owner's token, which must also have target PR read access; report-only tasks select the base owner's token. Missing mappings, missing secrets or denied permissions block without trying another token.
 
-Without the variable, only effects in repositories owned by the central owner select `TEST_PUBLISH_TOKEN`. An explicit mapping replaces that default. The personal test token must stay scoped to the test repository; an organization entry needs its own token and any required organization approval. Live identity, target/head access and isolation from central private contents are still checked. The loop neither provisions credentials nor changes their permissions.
+Without the variable, only effects in repositories owned by the central owner select `TRASK_PUBLISH_TOKEN`. An explicit mapping replaces that default. The personal token can cover selected repositories or all personal repositories, including forks; an organization entry needs its own token and any required organization approval. All-repository access includes private repositories such as the central workflow repository. Private and central PR targets remain rejected, and workers never receive publisher tokens. The publisher checks live identity, target/head access and bound effects, not the token's complete repository scope. The loop neither provisions credentials nor changes their permissions.
 
 Published commits use the launch owner's verified GitHub account as both author and committer, with the account's numeric-ID noreply email. This identity is frozen from GitHub PR metadata, bound to the candidate before verification and checked against the authenticated publisher. For Copilot-authored PRs, the owner's account is verified through GitHub's author search and frozen separately from the bot author. The commit date is the freeze time and Copilot remains credited in the co-author trailer. Push credentials alone do not determine Git commit authorship.
 

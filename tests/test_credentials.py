@@ -14,7 +14,7 @@ from tests.test_live import FIXTURE, TEST_TOKEN, Read, live_state, personal_pr, 
 from tests.test_loop import FakeAPI, MemoryState, REVISION
 
 MAPPING = json.dumps({
-    FIXTURE.split("/")[0]: "TEST_PUBLISH_TOKEN",
+    FIXTURE.split("/")[0]: "TRASK_PUBLISH_TOKEN",
     "organization": "OPENTELEMETRY_PUBLISH_TOKEN",
 })
 DISPATCH = {
@@ -27,10 +27,11 @@ DISPATCH = {
 class PublisherCredentialTests(unittest.TestCase):
     def test_default_is_personal_only_and_explicit_mapping_has_no_fallback(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(SECRET, publisher_secret(CENTRAL.split("/")[0] + "/test"))
+            self.assertEqual("TRASK_PUBLISH_TOKEN",
+                             publisher_secret(CENTRAL.split("/")[0] + "/test"))
             self.assertEqual("", publisher_secret("organization/workflows"))
         with patch.dict(os.environ, {"PUBLISHER_SECRET_MAP": MAPPING}, clear=True):
-            self.assertEqual("TEST_PUBLISH_TOKEN", publisher_secret(FIXTURE))
+            self.assertEqual("TRASK_PUBLISH_TOKEN", publisher_secret(FIXTURE))
             self.assertEqual("OPENTELEMETRY_PUBLISH_TOKEN",
                              publisher_secret("Organization/workflows"))
             self.assertEqual("", publisher_secret("unconfigured/workflows"))
@@ -84,7 +85,7 @@ class PublisherCredentialTests(unittest.TestCase):
         publisher.assert_not_called()
         api.call.assert_called_once_with("repos/organization/workflows/pulls/1")
         self.assertEqual({"publisher_head_repo": FIXTURE,
-                          "publisher_secret": "TEST_PUBLISH_TOKEN"},
+                          "publisher_secret": "TRASK_PUBLISH_TOKEN"},
                          dict(call.args for call in output.call_args_list))
 
     def test_read_access_gate_is_preserved_and_other_api_failures_are_not_hidden(self):
@@ -118,7 +119,7 @@ class PublisherCredentialTests(unittest.TestCase):
                 patch("loop.cli.output") as output:
             select_publisher(api, FIXTURE + "#1", "self_review")
             self.assertEqual({"publisher_head_repo": FIXTURE,
-                              "publisher_secret": "TEST_PUBLISH_TOKEN"},
+                              "publisher_secret": "TRASK_PUBLISH_TOKEN"},
                              dict(call.args for call in output.call_args_list))
             output.reset_mock()
             ownership["search"]["nodes"] = []
@@ -148,9 +149,9 @@ class PublisherCredentialTests(unittest.TestCase):
 
     def test_launch_rechecks_head_routing_and_missing_secret_blocks_before_inference(self):
         for head_repo, secret, available in (
-                (FIXTURE, "TEST_PUBLISH_TOKEN", "true"),
-                (FIXTURE, "TEST_PUBLISH_TOKEN", "false"),
-                ("organization/workflows", "TEST_PUBLISH_TOKEN", "true"),
+                (FIXTURE, "TRASK_PUBLISH_TOKEN", "true"),
+                (FIXTURE, "TRASK_PUBLISH_TOKEN", "false"),
+                ("organization/workflows", "TRASK_PUBLISH_TOKEN", "true"),
                 (FIXTURE, "OPENTELEMETRY_PUBLISH_TOKEN", "true")):
             store = MemoryState()
             environment = dict(
@@ -167,7 +168,7 @@ class PublisherCredentialTests(unittest.TestCase):
                     patch("loop.cli.target_api", return_value=Read()), \
                     patch("loop.cli.dispatch") as dispatch, patch("loop.cli.stage_source") as source, \
                     patch("loop.cli.summary"), patch("loop.cli.time.time", return_value=100):
-                if head_repo == FIXTURE and secret == "TEST_PUBLISH_TOKEN":
+                if head_repo == FIXTURE and secret == "TRASK_PUBLISH_TOKEN":
                     cli_main()
                     state = next(iter(store.entries.values()))
                     if available == "false":
@@ -189,7 +190,7 @@ class PublisherCredentialTests(unittest.TestCase):
     def test_continuation_and_reconciliation_select_each_frozen_head_independently(self):
         for stage in ("publish_pending", "publication_intent", "waiting_review", "waiting_ci"):
             for head_repo, expected in (
-                    (FIXTURE, "TEST_PUBLISH_TOKEN"),
+                    (FIXTURE, "TRASK_PUBLISH_TOKEN"),
                     ("organization/workflows", "OPENTELEMETRY_PUBLISH_TOKEN"),
                     ("unconfigured/workflows", "")):
                 state = live_state(stage=stage)
@@ -206,7 +207,7 @@ class PublisherCredentialTests(unittest.TestCase):
 
     def test_live_job_only_accepts_selected_owner_secret_and_never_falls_back(self):
         for head_repo, secret, token, expected_error in (
-                (FIXTURE, "TEST_PUBLISH_TOKEN", TEST_TOKEN, None),
+                (FIXTURE, "TRASK_PUBLISH_TOKEN", TEST_TOKEN, None),
                 ("organization/workflows", "OPENTELEMETRY_PUBLISH_TOKEN", TEST_TOKEN, None),
                 (FIXTURE, "OPENTELEMETRY_PUBLISH_TOKEN", TEST_TOKEN, "selection differs"),
                 (FIXTURE, "", TEST_TOKEN, "selection differs"),
@@ -253,7 +254,7 @@ class PublisherCredentialTests(unittest.TestCase):
         )
         organization_name = checkpoint_name("organization/workflows", 1, 77)
         store.entries[organization_name] = organization
-        for name, secret in ((personal_name, "TEST_PUBLISH_TOKEN"),
+        for name, secret in ((personal_name, "TRASK_PUBLISH_TOKEN"),
                              (organization_name, "OPENTELEMETRY_PUBLISH_TOKEN")):
             with self.subTest(checkpoint=name), patch.dict(
                     os.environ, {"PUBLISHER_SECRET_MAP": MAPPING}, clear=True), \

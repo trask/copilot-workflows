@@ -22,7 +22,7 @@ Only the central launch owner can dispatch. PR Reviewer accepts the owner's or a
 | CI repair code push | Head repository | Head Contents write, base PR/Checks/Statuses/Actions read |
 | Evidence-based failed-jobs rerun | Base repository | Base PR/Checks/Statuses/Actions read and Actions write; no head push permission |
 
-The selected fine-grained PAT must authenticate as the launch owner and be issued only for the intended public target/head repositories, excluding the central repository. The publisher checks the actor, frozen repository identities and bound effects; it never probes central readability or claims to attest the PAT's complete repository scope. Its API client permits only target/head reads and authorized target mutations. No task falls back to another token. CI launch authorizes possible source repairs with the head-owner secret. An accepted rerun proposal explicitly routes that effect to the base-owner secret, not to a fallback credential. A missing base-owner mapping or denied Actions write stops the rerun. Git source acquisition is always unauthenticated, never using the publisher, inference or optional API read token.
+The selected fine-grained PAT must authenticate as the launch owner and have the permissions required for the target/head effect. The publisher checks the actor, frozen repository identities and bound effects; it never probes central readability or claims to attest the PAT's complete repository scope. Its API client permits only target/head reads and authorized target mutations. No task falls back to another token. CI launch authorizes possible source repairs with the head-owner secret. An accepted rerun proposal explicitly routes that effect to the base-owner secret, not to a fallback credential. A missing base-owner mapping or denied Actions write stops the rerun. Git source acquisition is always unauthenticated, never using the publisher, inference or optional API read token.
 
 New diff-based tasks require full head/merge-base trees and the complete authoritative GitHub PR diff. Source and diffs have no byte-size, Git-object-count, file-count or added-line caps. GitHub binary markers identify changed files; their bytes come from the bound complete Git snapshots, not invented text-line anchors. Truncation or missing source stops rather than narrowing scope. Conflict source acquisition deepens until both frozen tips reach the merge base, without a commit-count limit. Its publisher preserves exact frozen head/base parents, including merges whose tree equals the original head, and every cleanly merged incoming change. Merge patches preserve whitespace byte for byte; clean incoming blobs must still exactly match Git's automatic merge tree.
 
@@ -54,7 +54,7 @@ Add the tokens through the environment's secrets UI or the CLI's interactive pro
 
 ```bash
 gh secret set COPILOT_GITHUB_TOKEN --repo trask/copilot-workflows --env protected
-gh secret set TEST_PUBLISH_TOKEN --repo trask/copilot-workflows --env protected
+gh secret set TRASK_PUBLISH_TOKEN --repo trask/copilot-workflows --env protected
 gh secret set OPENTELEMETRY_PUBLISH_TOKEN --repo trask/copilot-workflows --env protected
 ```
 
@@ -66,30 +66,32 @@ If used, store `REVIEW_LOOP_SOURCE_READ_TOKEN` in `protected` too. Keep the non-
 
 Workers also need `COPILOT_GITHUB_TOKEN`, a personal inference credential with Copilot Requests read access and no repository write access. The pinned engine proxies inference and excludes it from the agent environment. Do not add inherited MCP, OTLP or broad repository credentials to the worker.
 
-Launch uses explicit `publication_auth=fine_grained_pat`. The two review loops publish warranted fixes. Copilot review always replies to and resolves eligible original Copilot threads; self-review never does. There are no preview/shadow modes or optional thread switches. The credential must authenticate as the launch owner, read the actual target PR and push the actual head repository/ref. Issue it only for the intended target/head repositories and keep it separate from the central Actions token. Missing or disabled auth records `human_gate_target_repository_push_and_review_access`; the publisher checks identity and actual target/head access before effects.
+Launch uses explicit `publication_auth=fine_grained_pat`. The two review loops publish warranted fixes. Copilot review always replies to and resolves eligible original Copilot threads; self-review never does. There are no preview/shadow modes or optional thread switches. The credential must authenticate as the launch owner, read the actual target PR and push the actual head repository/ref. Keep it separate from the central Actions token. Missing or disabled auth records `human_gate_target_repository_push_and_review_access`; the publisher checks identity and actual target/head access before effects.
 
 ### Owner-scoped publisher secrets
 
-Create one fine-grained PAT per resource owner, limited to the repositories that the workflow should publish to. Use `TEST_PUBLISH_TOKEN` for personal test PRs and `OPENTELEMETRY_PUBLISH_TOKEN` for OpenTelemetry PRs. Store these as Actions secrets in the repository's `protected` environment, not as plaintext variables. Other workflows using these names must also reference `protected`.
+Create one fine-grained PAT per resource owner. Use `TRASK_PUBLISH_TOKEN` for personal repositories, including forks, and `OPENTELEMETRY_PUBLISH_TOKEN` for OpenTelemetry repositories. Store these as Actions secrets in the repository's `protected` environment, not as plaintext variables. Other workflows using these names must also reference `protected`.
+
+The personal token can select individual repositories or all repositories owned by `trask`. All-repository access covers current and future personal forks, but also grants access to private repositories such as `trask/copilot-workflows`. Private and central PR targets remain rejected. Only the trusted publisher receives this token; workers never receive it. Repository selection limits the credential itself, while the publisher's bound-effect checks limit what the workflow may do with it.
 
 Set the repository's shared Actions variable `PUBLISHER_SECRETS` to:
 
 ```json
 {
-  "trask": "TEST_PUBLISH_TOKEN",
+  "trask": "TRASK_PUBLISH_TOKEN",
   "open-telemetry": "OPENTELEMETRY_PUBLISH_TOKEN"
 }
 ```
 
-The mapping supports any GitHub owner, not just these examples. Keys match case-insensitively and must be unique; values must be uppercase Actions secret names that start with a letter, contain only letters, digits and underscores, and end in `_PUBLISH_TOKEN`. The variable contains names only, never token values. An explicit `{}` disables all publisher routing. Without the variable, only effects in repositories owned by the central owner use `TEST_PUBLISH_TOKEN`.
+The mapping supports any GitHub owner, not just these examples. Keys match case-insensitively and must be unique; values must be uppercase Actions secret names that start with a letter, contain only letters, digits and underscores, and end in `_PUBLISH_TOKEN`. The variable contains names only, never token values. An explicit `{}` disables all publisher routing. Without the variable, only effects in repositories owned by the central owner use `TRASK_PUBLISH_TOKEN`.
 
 GitHub does not expose saved secret values for renaming. When migrating secret names, add the token values under the names in this mapping through the Actions secrets UI. Existing secrets under other names are not copied or used as fallbacks.
 
-Source selection uses the actual PR **head repository owner**, so a personal fork of an organization repository uses the personal token. Description and pending reviews instead select the base owner. A single fine-grained PAT cannot grant permissions across resource owners; if the selected token cannot read/review the base PR as well as push the head, publication stops. There is no second-token fallback.
+Source selection uses the actual PR **head repository owner**, so a personal fork of an organization repository uses the personal token. Description and pending reviews instead select the base owner. Fine-grained PATs include read-only access to public repositories, but their write permissions do not cross resource owners. A personal token can push its selected personal fork without upstream PR-write permissions. Copilot feedback tasks also need upstream PR-write permissions for bot-thread handling and review requests, which a personal-scoped token cannot grant for an organization PR. Missing required permissions stop publication; there is no second-token fallback.
 
 The launch checks the selected secret's presence before admitting a worker and rechecks the effect repository after freezing the PR. Continuations and explicit reconciliation select from the frozen effect-repository identity and the current mapping. The live job verifies the selection again before authenticating. A mapping change between selection and publication blocks instead of using a mismatched token. Only the selected token is injected into the publisher step; the coordinator sees names and a presence boolean, and workers, verifiers and the waiter receive no publisher tokens.
 
-Source-changing publisher tokens need Contents read/write and external-review tokens also need Pull requests read/write. Report-only tokens need base Contents read and Pull requests write, not head push access. CI repair needs base Actions read/write for evidence and reruns. Include Workflows write when fixes can change workflow files. Organization policies may require approval. Select only intended public target/head repositories, excluding the central repository. The personal test token must stay scoped to the test repository; adding a mapping does not broaden it or provision any token.
+Source-changing publisher tokens need Contents read/write and external-review tokens also need Pull requests read/write. Report-only tokens need base Contents read and Pull requests write, not head push access. CI repair needs base Actions read/write for evidence and reruns. Include Workflows write when fixes can change workflow files. Organization policies may require approval. Adding a mapping does not broaden a token or provision one.
 
 External-review publication freezes every unresolved original comment from submitted, verified Copilot reviews, including older-head reviews and outdated threads, plus nonempty current-head review bodies. It starts the worker without an initial review request, Git push dry run or Copilot permission probe. A missing verified review or empty finding set rejects the launch. Copilot review-request permission is assumed; if the post-publication request fails, the loop stops with an explicit error and retains the confirmed publication. Uncertain requests are reconciled, never blindly reissued. Self-review neither reads nor requests Copilot reviews and needs no review-request permission.
 

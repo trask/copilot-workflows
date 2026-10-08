@@ -352,7 +352,7 @@ class ProtocolTests(unittest.TestCase):
 
     def test_manual_rerun_of_a_stopped_gate_is_a_new_authorized_phase(self):
         state = live_state(stage="blocked")
-        state.update(reason="human_gate_TEST_PUBLISH_TOKEN", iteration=0,
+        state.update(reason="human_gate_TRASK_PUBLISH_TOKEN", iteration=0,
                      intent=None, run=None)
         store, _ = stored(state)
         new = dict(personal_request(max_pipelines=5), request_id="e" * 32)
