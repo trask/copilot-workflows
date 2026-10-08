@@ -111,7 +111,8 @@ class PublisherAPI(API):
         user = self.call("user")
         require(user["id"] == request["authorized_actor_id"] and user["type"] == "User",
                 "Publisher must authenticate as the authorized personal owner")
-        login, _ = commit_author(request)
+        commit_author(request)
+        login = request["commit_author"]["login"]
         require(isinstance(user.get("login"), str) and user["login"].casefold() == login.casefold(),
                 "Publisher account differs from the frozen GitHub commit author")
         repo = None

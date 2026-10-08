@@ -64,7 +64,7 @@ def commit_author(request):
             and author["id"] == request["authorized_actor_id"]
             and isinstance(author["login"], str) and ACCOUNT.fullmatch(author["login"]),
             "Missing or invalid frozen GitHub commit author")
-    return author["login"], f"{author['id']}+{author['login']}@users.noreply.github.com"
+    return "Trask Stalnaker", f"{author['id']}+{author['login']}@users.noreply.github.com"
 
 
 def loop_kind(request):

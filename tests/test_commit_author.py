@@ -22,7 +22,7 @@ class CommitAuthorTests(unittest.TestCase):
                 frozen = freeze(read, 1, REVISION, 100, FIXTURE, loop_kind=kind)
                 self.assertEqual({"id": AUTHOR_ID, "login": "launch-owner"},
                                  frozen["commit_author"])
-                self.assertEqual(("launch-owner",
+                self.assertEqual(("Trask Stalnaker",
                                   f"{AUTHOR_ID}+launch-owner@users.noreply.github.com"),
                                  commit_author(frozen))
                 altered = copy.deepcopy(frozen)
@@ -63,13 +63,14 @@ class CommitAuthorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as package, tempfile.TemporaryDirectory() as restored:
             git(["init", "--bare", "--quiet"], restored)
             req = dict(personal_request(), frozen_sha=baseline(restored), frozen_at=100)
+            req["commit_author"]["login"] = "trask"
             candidate = reconstruct({"candidate.patch": GOOD_PATCH}, req, baseline, package)
             git(["-c", "protocol.file.allow=always", "fetch", "--quiet",
                  str(Path(package) / "candidate.bundle"),
                  "refs/heads/candidate:refs/heads/candidate"], restored)
             self.assertEqual([
-                "launch-owner", f"{AUTHOR_ID}+launch-owner@users.noreply.github.com", "100",
-                "launch-owner", f"{AUTHOR_ID}+launch-owner@users.noreply.github.com", "100",
+                "Trask Stalnaker", "218610+trask@users.noreply.github.com", "100",
+                "Trask Stalnaker", "218610+trask@users.noreply.github.com", "100",
             ], git(["show", "-s", "--format=%an%n%ae%n%at%n%cn%n%ce%n%ct",
                     candidate["commit"]], restored).decode().splitlines())
             self.assertEqual(candidate["parent"],
