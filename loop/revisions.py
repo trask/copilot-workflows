@@ -1,5 +1,8 @@
 """Exact central workflow refs for independently pinned phases."""
 
+import sys
+import time
+
 from loop.api import APIError
 from loop.policy import CENTRAL, SHA, require
 
@@ -62,7 +65,15 @@ def pin_revision(api, revision):
     except APIError as error:
         if error.status != 422:
             raise
-    return check_pin(api, ref, revision)
+    for attempt in range(3):
+        try:
+            return check_pin(api, ref, revision)
+        except APIError as error:
+            if error.status != 404 or attempt == 2:
+                raise
+        print(f"PIN READ RETRY: Created ref not yet visible; attempt {attempt + 2}/3",
+              file=sys.stderr)
+        time.sleep(attempt + 1)
 
 
 def inherit_pin(request, state):

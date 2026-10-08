@@ -127,6 +127,8 @@ There is one fresh launch operation. Old mode, replacement, and start-publicatio
 
 Each new phase saves `workflow_revision` and `workflow_ref`, a central branch named `review-loop-revisions/<workflow_revision>`. The launch uses its Actions run's exact central-main commit, even if `main` advances while that run is starting. A branch is created once per revision and reused only when its exact ref, commit-object type and SHA match. The automation never updates or force-pushes these branches.
 
+After creating a revision branch, or losing a concurrent creation race, launch confirms the exact ref with up to three reads. A temporary 404 waits one second, then two seconds before the final read. Creation is never retried. Other errors, mismatched refs and a final 404 stop the launch. Existing-phase pin checks do not retry missing refs or recreate branches.
+
 The shared waiter remains on current `main` and routes each phase to its saved ref. Worker dispatch and targeted coordinator ticks run the frozen workflow definition and code; verifier, finalizer and publisher jobs check out the bound revision. Later review/fix passes retain the same phase pin. New pushes to `main` do not block pinned phases, and no phase silently adopts newer automation. Ref drift, cancellation, target drift, deadlines and provenance failures still stop work.
 
 Keep revision branches while their phases or retained evidence may need them. Deleting or moving one blocks its affected work without a `main` fallback. Cancel and relaunch an active phase to pick up an automation fix. Existing phases without `workflow_ref` keep their original central-main revision guard; this does not rewrite historical checkpoints or restart phases already blocked by an update.

@@ -38,6 +38,49 @@ class RevisionTests(unittest.TestCase):
         self.assertEqual(revision_ref(REVISION), pin_revision(api, REVISION))
         self.assertEqual(1, sum(method == "POST" for _, method, _ in api.calls))
 
+    def test_new_pin_confirmation_waits_for_ref_visibility_without_recreating_it(self):
+        for concurrent in (False, True):
+            api = FakeAPI()
+            original = api.call
+            missing_reads = 2
+            def delayed(path, method="GET", data=None):
+                nonlocal missing_reads
+                value = original(path, method, data)
+                if method == "POST" and concurrent:
+                    raise APIError(422, "Already created")
+                if method == "GET" and missing_reads:
+                    missing_reads -= 1
+                    raise APIError(404, "Ref not visible yet")
+                return value
+            api.call = delayed
+            with self.subTest(concurrent=concurrent), \
+                    patch("time.sleep") as sleep, \
+                    patch("sys.stderr") as stderr:
+                self.assertEqual(revision_ref(REVISION), pin_revision(api, REVISION))
+                self.assertEqual([1, 2], [call.args[0] for call in sleep.call_args_list])
+                self.assertIn("PIN READ RETRY", "".join(
+                    call.args[0] for call in stderr.write.call_args_list))
+                self.assertEqual(1, sum(method == "POST" for _, method, _ in api.calls))
+                self.assertEqual(4, sum(method == "GET" for _, method, _ in api.calls))
+
+    def test_pin_confirmation_retries_only_404_and_stops_after_three_reads(self):
+        for status, reads in ((404, 3), (403, 1), (503, 1)):
+            api = FakeAPI()
+            original = api.call
+            def unavailable(path, method="GET", data=None):
+                value = original(path, method, data)
+                if method == "GET":
+                    raise APIError(status, "Confirmation failed")
+                return value
+            api.call = unavailable
+            with self.subTest(status=status), patch("time.sleep") as sleep, patch("sys.stderr"):
+                with self.assertRaises(APIError) as raised:
+                    pin_revision(api, REVISION)
+                self.assertEqual(status, raised.exception.status)
+                self.assertEqual(reads - 1, sleep.call_count)
+                self.assertEqual(1, sum(method == "POST" for _, method, _ in api.calls))
+                self.assertEqual(reads + 1, sum(method == "GET" for _, method, _ in api.calls))
+
     def test_changed_pin_is_never_overwritten_or_replaced_by_main(self):
         api = FakeAPI()
         ref = revision_ref(REVISION)
