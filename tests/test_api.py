@@ -1,4 +1,6 @@
+import http.client
 import io
+import ssl
 import unittest
 import urllib.error
 from unittest.mock import Mock, call, patch
@@ -86,6 +88,21 @@ class APITests(unittest.TestCase):
         open_request.assert_called_once()
         sleep.assert_not_called()
 
+    def test_get_tls_eof_and_connection_reset_retry_without_accepting_partial_reads(self):
+        for failure in (urllib.error.URLError(ssl.SSLEOFError("TLS connection closed")),
+                        urllib.error.URLError(ConnectionResetError("connection reset"))):
+            interrupted = response()
+            interrupted.read.side_effect = http.client.IncompleteRead(b'{"partial":')
+            with self.subTest(failure=type(failure.reason).__name__), \
+                    patch("loop.api.urllib.request.urlopen",
+                          side_effect=[failure, interrupted, response()]) as open_request, \
+                    patch("loop.api.time.sleep") as sleep, \
+                    patch("loop.api.sys.stderr", new_callable=io.StringIO):
+                self.assertEqual({"sha": "example"}, API().call(f"repos/{CENTRAL}/actions/runs"))
+            self.assertEqual(3, open_request.call_count)
+            interrupted.__exit__.assert_called_once()
+            self.assertEqual([call(1), call(2)], sleep.call_args_list)
+
     def test_permission_validation_and_rate_limit_failures_are_not_retried(self):
         for status in (400, 401, 403, 404, 409, 422, 429):
             with self.subTest(status=status), \
@@ -124,7 +141,8 @@ class APITests(unittest.TestCase):
                              ("DELETE", f"repos/{CENTRAL}/actions/runs/1"),
                              ("POST", "graphql")):
             for failure in (http_error(503), TimeoutError("response lost"),
-                            urllib.error.URLError(TimeoutError("connection timed out"))):
+                            urllib.error.URLError(TimeoutError("connection timed out")),
+                            urllib.error.URLError(ssl.SSLEOFError("TLS connection closed"))):
                 with self.subTest(method=method, path=path, failure=type(failure).__name__), \
                         patch("loop.api.urllib.request.urlopen", side_effect=failure) as open_request, \
                         patch("loop.api.time.sleep") as sleep, \
@@ -204,6 +222,78 @@ class APITests(unittest.TestCase):
             self.assertTrue(all(c.args == (65536,) for c in downloaded.read.call_args_list))
             self.assertNotIn("secret", stderr.getvalue())
             self.assertNotIn("signed-log", stderr.getvalue())
+
+    def test_signed_download_retries_both_hops_and_discards_interrupted_log_evidence(self):
+        redirect = http_error(302)
+        redirect.headers["Location"] = "https://example.com/log?signature=secret"
+        interrupted = response()
+        interrupted.readline.side_effect = [b"2026-10-07T01:00:00Z partial evidence\n",
+                                            ssl.SSLEOFError("TLS connection closed")]
+        downloaded = response()
+        downloaded.readline.side_effect = io.BytesIO(b"2026-10-07T01:00:00Z complete evidence\n").readline
+        with patch("loop.api.urllib.request.build_opener") as opener, \
+                patch("loop.api.urllib.request.urlopen",
+                      side_effect=[interrupted, downloaded]) as download, \
+                patch("loop.api.time.sleep") as sleep, \
+                patch("loop.api.sys.stderr", new_callable=io.StringIO) as stderr:
+            opener.return_value.open.side_effect = [
+                urllib.error.URLError(ssl.SSLEOFError("TLS connection closed")), redirect, redirect]
+            self.assertEqual(b"2026-10-07T01:00:00Z complete evidence\n", API("read-token").signed_download(
+                "repos/target/repo/actions/jobs/1/logs",
+                log_windows=[("2026-10-07T01:00:00Z", "2026-10-07T01:00:01Z")]))
+        self.assertEqual(3, opener.return_value.open.call_count)
+        self.assertEqual(2, download.call_count)
+        self.assertEqual([call(1), call(2)], sleep.call_args_list)
+        interrupted.__exit__.assert_called_once()
+        self.assertTrue(all(c.args[0].get_header("Authorization") == "Bearer read-token"
+                            for c in opener.return_value.open.call_args_list))
+        self.assertTrue(all(c.args[0] == redirect.headers["Location"] for c in download.call_args_list))
+        self.assertIn("endpoint=repos/target/repo/actions/jobs/1/logs", stderr.getvalue())
+        self.assertNotIn("read-token", stderr.getvalue())
+        self.assertNotIn("signature", stderr.getvalue())
+
+    def test_signed_download_retries_transient_http_errors_with_fresh_redirects(self):
+        redirect = http_error(302)
+        redirect.headers["Location"] = "https://example.com/artifact"
+        with patch("loop.api.urllib.request.build_opener") as opener, \
+                patch("loop.api.urllib.request.urlopen",
+                      side_effect=[http_error(503), response(b"complete artifact")]) as download, \
+                patch("loop.api.time.sleep") as sleep, \
+                patch("loop.api.sys.stderr", new_callable=io.StringIO):
+            opener.return_value.open.side_effect = [http_error(502), redirect, redirect]
+            self.assertEqual(b"complete artifact", API().artifact_zip(1, 100))
+        self.assertEqual(3, opener.return_value.open.call_count)
+        self.assertEqual(2, download.call_count)
+        self.assertEqual([call(1), call(2)], sleep.call_args_list)
+
+    def test_signed_download_transport_retries_are_bounded_and_do_not_retry_certificate_errors(self):
+        for reason, attempts in ((ssl.SSLEOFError("TLS connection closed"), 3),
+                                 (ssl.SSLCertVerificationError("certificate verification failed"), 1)):
+            failure = urllib.error.URLError(reason)
+            with self.subTest(reason=type(reason).__name__), \
+                    patch("loop.api.urllib.request.build_opener") as opener, \
+                    patch("loop.api.time.sleep") as sleep, \
+                    patch("loop.api.sys.stderr", new_callable=io.StringIO), \
+                    self.assertRaises(urllib.error.URLError) as error:
+                opener.return_value.open.side_effect = failure
+                API().signed_download("repos/target/repo/actions/jobs/1/logs")
+            self.assertIs(failure, error.exception)
+            self.assertEqual(attempts, opener.return_value.open.call_count)
+            self.assertEqual(attempts - 1, sleep.call_count)
+
+    def test_signed_download_cannot_retry_past_the_execution_deadline(self):
+        api = API()
+        api.deadline = 101
+        with patch("loop.api.urllib.request.build_opener") as opener, \
+                patch("loop.api.time.monotonic", return_value=100), \
+                patch("loop.api.time.sleep") as sleep, \
+                self.assertRaises(DeadlineReached):
+            opener.return_value.open.side_effect = urllib.error.URLError(
+                ssl.SSLEOFError("TLS connection closed"))
+            api.signed_download("repos/target/repo/actions/jobs/1/logs")
+        opener.return_value.open.assert_called_once()
+        self.assertEqual(1, opener.return_value.open.call_args.kwargs["timeout"])
+        sleep.assert_not_called()
 
     def test_signed_artifacts_still_require_the_complete_download(self):
         redirect = http_error(302)

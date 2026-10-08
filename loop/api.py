@@ -1,7 +1,9 @@
 """Bounded GitHub API access with a read-only target policy."""
 
+import http.client
 import json
 import os
+import ssl
 import sys
 import time
 import urllib.error
@@ -25,6 +27,16 @@ class DeadlineReached(TimeoutError):
     pass
 
 
+def transport_failure(error):
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, DeadlineReached):
+        return None
+    if isinstance(reason, (TimeoutError, ConnectionResetError, ssl.SSLEOFError,
+                           http.client.IncompleteRead)):
+        return type(reason).__name__
+    return None
+
+
 class API:
     def __init__(self, token=None):
         self.token = token if token is not None else os.environ.get("GH_TOKEN")
@@ -35,6 +47,21 @@ class API:
                 or path.startswith("installation/repositories"), "Unexpected API path")
         if method != "GET" and path != "graphql":
             require(path.startswith(f"repos/{CENTRAL}/"), "Target mutation is forbidden")
+
+    def read_timeout(self):
+        if self.deadline is None:
+            return 60
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise DeadlineReached("API execution deadline reached")
+        return min(60, remaining)
+
+    def retry_read(self, attempt, failure):
+        delay = attempt + 1
+        if self.deadline is not None and self.deadline - time.monotonic() <= delay:
+            raise DeadlineReached("API retry would exceed execution deadline")
+        print(f"READ RETRY: {failure}; attempt {attempt + 2}/3", file=sys.stderr)
+        time.sleep(delay)
 
     def call(self, path, method="GET", data=None, raw=False, limit=MAX_RESPONSE, accept=None,
              *, token=None):
@@ -52,12 +79,7 @@ class API:
         req = urllib.request.Request("https://api.github.com/" + path, data=body,
                                      headers=headers, method=method)
         for attempt in range(3):
-            timeout = 60
-            if self.deadline is not None:
-                remaining = self.deadline - time.monotonic()
-                if remaining <= 0:
-                    raise DeadlineReached("API execution deadline reached")
-                timeout = min(timeout, remaining)
+            timeout = self.read_timeout()
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as response:
                     payload = response.read() if limit is None else response.read(limit + 1)
@@ -86,20 +108,14 @@ class API:
                     raise APIError(error.code, message, rate_limited=rate_limited,
                                    retry_at=retry_at) from error
                 failure = f"HTTP {error.code}"
-            except (TimeoutError, urllib.error.URLError) as error:
-                if (method != "GET" or attempt == 2
-                        or isinstance(error, urllib.error.URLError)
-                        and not isinstance(error.reason, TimeoutError)):
+            except (TimeoutError, urllib.error.URLError, ConnectionResetError,
+                    ssl.SSLEOFError, http.client.IncompleteRead) as error:
+                failure = transport_failure(error)
+                if method != "GET" or attempt == 2 or failure is None:
                     raise
-                failure = "timeout"
             else:
                 break
-            delay = attempt + 1
-            if self.deadline is not None and self.deadline - time.monotonic() <= delay:
-                raise DeadlineReached("API retry would exceed execution deadline")
-            print(f"READ RETRY: GitHub API GET {failure}; attempt {attempt + 2}/3",
-                  file=sys.stderr)
-            time.sleep(delay)
+            self.retry_read(attempt, f"GitHub API GET {failure}; endpoint={path}")
         require(limit is None or len(payload) <= limit, "API response exceeds limit")
         return payload if raw else (json.loads(payload) if payload else None)
 
@@ -126,6 +142,21 @@ class API:
         return self.signed_download(f"repos/{CENTRAL}/actions/artifacts/{artifact_id}/zip", limit)
 
     def signed_download(self, path, limit=None, *, log_windows=(), token=None):
+        for attempt in range(3):
+            try:
+                return self._signed_download(path, limit, log_windows=log_windows, token=token)
+            except APIError as error:
+                if attempt == 2 or error.status not in {500, 502, 503, 504}:
+                    raise
+                failure = f"HTTP {error.status}"
+            except (TimeoutError, urllib.error.URLError, ConnectionResetError,
+                    ssl.SSLEOFError, http.client.IncompleteRead) as error:
+                failure = transport_failure(error)
+                if attempt == 2 or failure is None:
+                    raise
+            self.retry_read(attempt, f"GitHub signed download GET {failure}; endpoint={path}")
+
+    def _signed_download(self, path, limit=None, *, log_windows=(), token=None):
         self.authorize(path, "GET", None)
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *_args, **_kwargs):
@@ -137,7 +168,8 @@ class API:
             "User-Agent": "copilot-review-loop",
         })
         try:
-            urllib.request.build_opener(NoRedirect).open(req, timeout=60)
+            with urllib.request.build_opener(NoRedirect).open(req, timeout=self.read_timeout()):
+                raise Rejected("Unexpected artifact download response")
         except urllib.error.HTTPError as error:
             try:
                 if error.code != 302:
@@ -145,17 +177,17 @@ class API:
                 destination = error.headers["Location"]
             finally:
                 error.close()
-        else:
-            raise Rejected("Unexpected artifact download response")
         parsed = urllib.parse.urlsplit(destination)
         require(parsed.scheme == "https" and parsed.hostname and not parsed.username
                 and not parsed.password and parsed.port in {None, 443}, "Unsafe artifact redirect")
         # Signed destination came from the authenticated API. Never forward its bearer token.
         try:
-            with urllib.request.urlopen(destination, timeout=60) as response:
+            with urllib.request.urlopen(destination, timeout=self.read_timeout()) as response:
                 if log_windows or limit is None:
                     payload = bytearray()
                     deadline = time.monotonic() + 60
+                    if self.deadline is not None:
+                        deadline = min(deadline, self.deadline)
                     windows = [(start[:19].encode("ascii"), end[:19].encode("ascii"))
                                for start, end in log_windows]
                     read = response.readline if windows else response.read
