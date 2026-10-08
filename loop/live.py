@@ -359,13 +359,13 @@ def observed_review_request(read, state, intent, *, allow_head_change=False):
 def new_review_intent(read, state, now):
     pr = read.call(f"repos/{state['request']['repo']}/pulls/{state['request']['pr']}")
     unchanged(dict(state["request"], frozen_sha=state["expected_sha"]), pr)
-    require(not any(bot(u) for u in pr.get("requested_reviewers", [])),
-            "Copilot review already pending; do not duplicate the request")
+    if any(bot(u) for u in pr.get("requested_reviewers", [])):
+        return None
     reviews = read.pages(f"repos/{state['request']['repo']}/pulls/{state['request']['pr']}/reviews")
     runs = read.pages(f"repos/{state['request']['repo']}/actions/runs?head_sha={state['expected_sha']}", "workflow_runs")
-    require(not any(bot(r.get("actor")) and r["status"] != "completed"
-                    and r["path"] == "dynamic/agents/copilot-pull-request-reviewer" for r in runs),
-            "Copilot workflow is still active")
+    if any(bot(r.get("actor")) and r["status"] != "completed"
+           and r["path"] == "dynamic/agents/copilot-pull-request-reviewer" for r in runs):
+        return None
     return {"claim": uuid.uuid4().hex, "recorded_at": int(time.time()), "sha": state["expected_sha"],
             "baseline_review_ids": sorted(r["id"] for r in reviews),
             "baseline_run_ids": sorted(r["id"] for r in runs), "status": "uncertain",
@@ -471,8 +471,12 @@ def request_review(store, name, state, read, publisher, now):
     require(state["stage"] == "threads_settled",
             "Fresh review requires settled mandatory thread effects")
     intent = new_review_intent(read, state, now)
+    if intent is None:
+        return cas(store, name, state, reason="existing_Copilot_review_pending",
+                   next_check_at=now + 300)
     state = cas(store, name, state, stage="review_request_intent",
-                review_request=intent, next_check_at=now + 300)
+                reason="fresh_Copilot_review_request_intent", review_request=intent,
+                next_check_at=now + 300)
     guard_review_request(store, name, state, read)
     publisher.call(f"repos/{state['request']['repo']}/pulls/{state['request']['pr']}/requested_reviewers", "POST",
                    {"reviewers": ["copilot-pull-request-reviewer[bot]"]})

@@ -529,15 +529,31 @@ class ProtocolTests(unittest.TestCase):
             observed_review_request(read, state, intent)
 
     def test_existing_request_or_active_review_cannot_be_requested_again(self):
-        state, read = live_state(), Read()
-        read.pr["requested_reviewers"] = [BOT]
-        with self.assertRaises(Rejected):
-            new_review_intent(read, state, 100)
-        read.pr["requested_reviewers"] = []
-        read.runs = [{"actor": BOT, "status": "in_progress",
-                      "path": "dynamic/agents/copilot-pull-request-reviewer"}]
-        with self.assertRaises(Rejected):
-            new_review_intent(read, state, 100)
+        for pending in ("requested_reviewer", "active_workflow"):
+            state, read = live_state(stage="threads_settled"), Read()
+            state["publications"] = [{"sha": SHA, "effect": "no_change"}]
+            if pending == "requested_reviewer":
+                read.pr["requested_reviewers"] = [BOT]
+            else:
+                read.runs = [{"actor": BOT, "status": "in_progress",
+                              "path": "dynamic/agents/copilot-pull-request-reviewer"}]
+            store, name = stored(state)
+            publisher = Publisher(read)
+            with self.subTest(pending=pending):
+                self.assertIsNone(new_review_intent(read, state, 100))
+                waiting = advance(store, name, state, None, read, publisher, 100)
+                self.assertEqual(dict(state, reason="existing_Copilot_review_pending",
+                                      next_check_at=400), waiting)
+                self.assertEqual([], publisher.posts)
+                self.assertNotIn("review_request", waiting)
+                read.pr["requested_reviewers"] = []
+                read.runs = []
+                with patch("loop.live.time.time", return_value=400):
+                    resumed = advance(store, name, waiting, None, read, publisher, 400)
+                self.assertEqual("waiting_review", resumed["stage"])
+                self.assertEqual(1, len(publisher.posts))
+                self.assertEqual("confirmed", resumed["review_request"]["status"])
+                self.assertEqual(state["publications"], resumed["publications"])
 
     def test_cancellation_and_stale_head_prevent_new_side_effect(self):
         state = live_state()

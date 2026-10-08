@@ -113,9 +113,12 @@ def poll(api, store, now, revision, checked):
             raise
         except (Rejected, ValueError, KeyError, TypeError, OSError, RuntimeError) as error:
             print(f"WAIT FAILED {name}: {type(error).__name__}: {str(error)[:1000]}", file=sys.stderr)
+            if isinstance(error, APIError) and error.rate_limited:
+                checked.pop(name, None)
+                raise
             transient = (isinstance(error, OSError)
                          or isinstance(error, APIError) and (
-                             error.rate_limited or error.status == 429 or error.status >= 500))
+                             error.status == 429 or error.status >= 500))
             _, _, latest = store.snapshot()
             if not transient and latest.get(name) == state:
                 summary(cas(store, name, state, stage="blocked", reason="waiter_operation_rejected",

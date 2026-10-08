@@ -200,6 +200,20 @@ class WaiterTests(unittest.TestCase):
         self.assertEqual("exhausted", next(iter(store.entries.values()))["stage"])
         self.assertEqual(before, list(store.entries.values())[1])
 
+    def test_rate_limited_probe_preserves_phase_and_propagates_reset_before_more_reads(self):
+        store, _ = phases()
+        before = copy.deepcopy(store.entries)
+        checked = {}
+        error = APIError(403, "Quota exhausted", rate_limited=True, retry_at=1000)
+        with patch("loop.waiter.target_api", side_effect=error), patch("sys.stderr"), \
+                patch.object(store, "snapshot", wraps=store.snapshot) as snapshot, \
+                self.assertRaises(APIError) as raised:
+            poll(Controls(), store, 400, REVISION, checked)
+        self.assertIs(error, raised.exception)
+        self.assertEqual(before, store.entries)
+        self.assertEqual({}, checked)
+        snapshot.assert_called_once()
+
     def test_changed_trusted_revision_blocks_without_spawning_work(self):
         store, _ = phases()
         api = Controls()
