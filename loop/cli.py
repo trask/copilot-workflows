@@ -12,7 +12,7 @@ import shutil
 from pathlib import Path
 
 from loop.api import API, APIError
-from loop.coordinator import (cancel, checkpoint, dispatch, due, matching_runs, quiescent, reconcile,
+from loop.coordinator import (cancel, checkpoint, dispatch, due, executions_quiescent, matching_runs, quiescent, reconcile,
                               record_result, run_binding)
 from loop.control import busy as coordinator_busy, claim as claim_coordinator, owned
 from loop.publisher_auth import publisher_secret
@@ -29,7 +29,7 @@ from loop.reviews import select_checks
 from loop.live import (STAGES as LIVE_STAGES, publication_invocation,
                        authorize_publication_reconciliation, execution_revision,
                        start as start_publication)
-from loop.revisions import execution_ref, pin_revision, workflow_ref
+from loop.revisions import execution_ref, pin_revision, verification_revision, workflow_ref
 
 
 def output(name, value):
@@ -87,7 +87,7 @@ def choose_verification(store, now=None, api=None, only=None):
                 and now < state["request"]["deadline"]):
             pipeline_budget(state)
             request = state["request"]
-            if (workflow_ref(request) != "main"
+            if (execution_ref(state) != "main"
                     and os.environ["GITHUB_SHA"] != execution_revision(state)):
                 continue
             if api is not None:
@@ -109,7 +109,7 @@ def choose_verification(store, now=None, api=None, only=None):
             for key, value in {"verify": "true", "pr": request["pr"],
                                "repo": request["repo"],
                                "request_id": request["request_id"],
-                               "revision": request["workflow_revision"],
+                               "revision": verification_revision(state),
                                "generation": state["generation"]}.items():
                 output(key, value)
             return name
@@ -200,8 +200,8 @@ def verify_pending(api, store, args):
               "request_digest": digest(request), "artifacts": [], "verification": "failed"}
     try:
         require(git(["rev-parse", "HEAD"], Path.cwd()).decode().strip()
-                == request["workflow_revision"],
-                "Verifier did not check out the frozen trusted revision")
+                == verification_revision(state),
+                "Verifier did not check out the authorized trusted revision")
         require(int(time.time()) < request["deadline"], "Verification deadline passed")
         check_target(target_api(api, request["repo"], request["head_repo"]), request)
         fetch = None
@@ -402,9 +402,52 @@ def attach_source(api, store, args):
     dispatch(store, name, api, int(time.time()))
 
 
+def recover_coordinator(api, store, args, revision, now):
+    name, prior = get_state(store, int(args.pr), args.previous_request, args.repo)
+    supported_checkpoint(prior)
+    request = prior["request"]
+    pipeline_budget(prior)
+    require(prior["generation"] == int(args.previous_generation)
+            and prior["stage"] in {"dispatched", "running", "verify_pending"}
+            and request.get("mode") == "publish"
+            and not prior.get("coordinator_recovery") and not prior.get("reconciliation")
+            and not prior.get("report") and not prior.get("publications") and not prior.get("effects")
+            and not prior.get("publication_intent") and not prior.get("task_intent")
+            and not prior.get("review_request")
+            and now < request["deadline"]
+            and now < request["publication"]["continuation_deadline"],
+            "Recovery requires an exact unexpired unfinished result without publication effects")
+    executions_quiescent(api, prior)
+    runs = matching_runs(api, request)
+    require(len(runs) == 1, "Recovery requires exactly one completed worker")
+    run = runs[0]
+    run_binding(run, request)
+    require(run["status"] == "completed" and run["conclusion"] == "success"
+            and (prior["run"] is None or prior["run"]["id"] == run["id"]),
+            "Recovery requires the original successful worker")
+    artifact_metadata(api, run, request)
+    check_target(target_api(api, request["repo"], request["head_repo"]), request)
+    head, _, _ = store.snapshot()
+    ref = pin_revision(api, revision)
+    def recover(current):
+        require(current == prior, "Cancelled or concurrently advanced coordinator recovery")
+        current.update(next_check_at=now, coordinator_recovery={
+            "execution_revision": revision, "workflow_ref": ref,
+            "original_revision": request["workflow_revision"], "original_stage": prior["stage"],
+            "prior_state_commit": head, "authorized_at": now,
+            "owner": {"id": int(os.environ["GITHUB_RUN_ID"]), "attempt": 1},
+        })
+        return current
+    state = store.update(name, recover)
+    if state["stage"] != "verify_pending":
+        state = reconcile(store, name, api, now)
+    summary(state)
+    return name
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=["launch", "reconcile-publication",
+    parser.add_argument("operation", choices=["launch", "reconcile-publication", "recover-coordinator",
                                              "cancel", "status", "tick", "prepare",
                                              "verify", "finalize", "publish", "attach-source",
                                              "select-publisher"])
@@ -431,6 +474,14 @@ def main():
     selection = None
     if args.operation == "publish":
         publication_gate()
+    elif args.operation == "recover-coordinator":
+        publication_invocation()
+        require(os.environ.get("PUBLICATION_AUTH_MODE") == "fine_grained_pat",
+                "Recovery is restricted to explicit personal publication mode")
+        revision = api.call(f"repos/{CENTRAL}/git/ref/heads/main")["object"]["sha"]
+        require(os.environ["GITHUB_SHA"] == revision, "Recovery must run at current trusted main")
+        args.repo, args.pr = parse_target(args.target)
+        selection = recover_coordinator(api, store, args, revision, now)
     elif args.operation == "reconcile-publication":
         publication_invocation()
         repo, number = parse_target(args.target)
@@ -541,7 +592,7 @@ def main():
                     break
                 elif state["stage"] != "verify_pending" or now >= state["request"]["deadline"]:
                     reconcile(store, name, api, now)
-    if args.operation in {"launch", "reconcile-publication", "tick"}:
+    if args.operation in {"launch", "reconcile-publication", "recover-coordinator", "tick"}:
         verification = choose_verification(store, api=api, only=selection)
         if verification is None:
             choose_live(store, now, api, only=selection)

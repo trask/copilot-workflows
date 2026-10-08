@@ -23,12 +23,18 @@ def workflow_ref(request):
 
 
 def execution_revision(state):
-    return state.get("reconciliation", {}).get(
+    recovery = state.get("reconciliation") or state.get("coordinator_recovery") or {}
+    return recovery.get(
         "execution_revision", state["request"]["workflow_revision"])
 
 
+def verification_revision(state):
+    return (execution_revision(state) if state.get("coordinator_recovery")
+            else state["request"]["workflow_revision"])
+
+
 def execution_ref(state):
-    reconciliation = state.get("reconciliation")
+    reconciliation = state.get("reconciliation") or state.get("coordinator_recovery")
     if reconciliation:
         require(workflow_ref(state["request"]) == "main" or "workflow_ref" in reconciliation,
                 "Missing reconciled workflow revision pin")

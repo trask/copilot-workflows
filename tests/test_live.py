@@ -2027,6 +2027,20 @@ class RealObjectEvidenceTests(unittest.TestCase):
                 with self.subTest(key=key), self.assertRaises(Rejected):
                     evidence(Artifacts(), state, restored)
                 pipeline[key] = before
+            state["coordinator_recovery"] = {"execution_revision": "f" * 40,
+                                             "workflow_ref": revision_ref("f" * 40)}
+            with self.assertRaisesRegex(Rejected, "trusted verification pipeline"):
+                evidence(Artifacts(), state, restored)
+            pipeline["head_sha"] = "f" * 40
+            artifacts[0]["workflow_run"]["head_sha"] = "f" * 40
+            recovered = root / "recovered"
+            recovered.mkdir()
+            with patch("loop.publication.git", side_effect=redirect), \
+                    patch("loop.publication.time.time", return_value=100):
+                self.assertEqual((accepted, derived), evidence(Artifacts(), state, recovered))
+            state.pop("coordinator_recovery")
+            pipeline["head_sha"] = REVISION
+            artifacts[0]["workflow_run"]["head_sha"] = REVISION
             store, name = stored(state)
             read = Read(req)
             publisher = Publisher(read)

@@ -6,7 +6,7 @@ on:
       operation:
         description: Central operation
         type: choice
-        options: [launch, reconcile-publication, cancel, status, tick]
+        options: [launch, reconcile-publication, recover-coordinator, cancel, status, tick]
         default: status
       target:
         description: Explicit owner/repo#number or github.com PR URL

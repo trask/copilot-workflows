@@ -253,6 +253,19 @@ Unknown effects retain their intent and stop with `thread_reply_uncertain_no_ret
 
 `operation=reconcile-publication` requires a fresh owner dispatch, explicit fine-grained authorization and exact stopped request/generation. It confirms only the already-authorized unexpired current-protocol candidate, saved acceptance/artifacts and agreeing live tip/tree identity. It archives the stopped checkpoint and records separate execution provenance. It neither reaccepts under another protocol nor pushes again. Historical candidates are never resumed.
 
+### Recovering a completed worker on fixed coordinator code
+
+When a pinned coordinator cannot process a completed worker, authorize verification and completion on current central code:
+
+```bash
+gh workflow run coordinator.yml --repo trask/copilot-workflows --ref main \
+  -f operation=recover-coordinator -f publication_auth=fine_grained_pat \
+  -f target=owner/repository#123 \
+  -f previous_request=<observed-request-id> -f previous_generation=<observed-generation>
+```
+
+Recovery requires the exact unexpired request and generation, one successful completed worker, stopped claimed executions, an unchanged target and no accepted result or publication effects. It pins the current coordinator revision and retains the original frozen request, worker identity, artifacts and consumed pipeline budget. Verification and completion use the recovery pin; the worker is not rerun. Automatic retries never upgrade a phase without this explicit authorization.
+
 ### Restarting after an unpublished push
 
 After correcting publisher access, start new work instead of rerunning the failed Actions job:

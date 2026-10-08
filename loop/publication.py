@@ -17,6 +17,7 @@ from loop.policy import (BOT_IDENTITY_PATH, CENTRAL, PROFILE, SHA, digest,
                          timestamp, unchanged)
 from loop.verify import (artifact_metadata, git as object_git, parse_json, safe_path, verify)
 from loop.candidates import current_request
+from loop.revisions import verification_revision
 
 SECRET = "TRASK_PUBLISH_TOKEN"
 
@@ -256,7 +257,7 @@ def evidence(api, state, destination):
     require(pipeline["repository"]["full_name"] == CENTRAL
             and pipeline["head_repository"]["full_name"] == CENTRAL
             and pipeline["path"].split("@")[0] == ".github/workflows/coordinator.yml"
-            and pipeline["head_sha"] == request["workflow_revision"]
+            and pipeline["head_sha"] == verification_revision(state)
             and pipeline["id"] == state["verification_run"]["id"]
             and pipeline["event"] in {"workflow_dispatch", "workflow_run", "schedule"}
             and pipeline["run_attempt"] == state["verification_run"]["attempt"] == 1

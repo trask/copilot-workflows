@@ -1,15 +1,16 @@
 import copy
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from loop.api import APIError
-from loop.cli import choose_live, choose_verification, main as cli_main
+from loop.cli import choose_live, choose_verification, main as cli_main, recover_coordinator
 from loop.control import busy, claim
 from loop.coordinator import checkpoint, dispatch, run_binding
 from loop.policy import CENTRAL, Rejected, pipeline_budget
 from loop.revisions import (check_pin, execution_ref, inherit_pin, pin_revision,
-                            revision_ref, workflow_ref)
+                            revision_ref, verification_revision, workflow_ref)
 from loop.waiter import poll
 from tests.test_live import FIXTURE, Read, live_state, personal_request, stored
 from tests.test_loop import FakeAPI, MemoryState, REVISION, run
@@ -268,3 +269,66 @@ class RevisionTests(unittest.TestCase):
             with self.subTest(ref=ref), patch.dict(os.environ, dict(env, GITHUB_REF=ref), clear=True), \
                     self.assertRaises(Rejected):
                 claim(MemoryState(), name, state, api)
+
+    def test_completed_worker_recovery_pins_coordinator_without_changing_worker_request(self):
+        req = dict(personal_request(), workflow_ref=revision_ref(REVISION))
+        state = live_state(req, "running")
+        state["intent"] = {"id": req["request_id"], "recorded_at": 100}
+        store, name = stored(state)
+        api = FakeAPI([dict(run(), head_branch=req["workflow_ref"])])
+        args = SimpleNamespace(pr=1, repo=FIXTURE, previous_request=req["request_id"],
+                               previous_generation="6")
+        env = dict(ENV, GITHUB_SHA="f" * 40, GITHUB_REF="refs/heads/main")
+        with patch.dict(os.environ, env, clear=True), \
+                patch("loop.cli.artifact_metadata"), \
+                patch("loop.cli.target_api", return_value=Read(req)), patch("loop.cli.summary"):
+            self.assertEqual(name, recover_coordinator(api, store, args, "f" * 40, 400))
+            recovered = copy.deepcopy(store.entries[name])
+            with patch("loop.cli.output") as output:
+                self.assertEqual(name, choose_verification(store, 400, api, only=name))
+            output.assert_any_call("revision", "f" * 40)
+        self.assertEqual("verify_pending", recovered["stage"])
+        self.assertEqual(req, recovered["request"])
+        self.assertEqual(6, recovered["generation"])
+        self.assertEqual(1, recovered["iteration"])
+        self.assertEqual(24, recovered["run"]["id"])
+        self.assertEqual(revision_ref("f" * 40), execution_ref(recovered))
+        self.assertEqual("f" * 40, verification_revision(recovered))
+        self.assertEqual("f" * 40, store.entries[name]["coordinator_run"]["revision"])
+        self.assertFalse(any(path.endswith("/dispatches") for path, _, _ in api.calls))
+
+    def test_recovery_rejects_stale_or_effect_bearing_phase_before_any_mutation(self):
+        req = dict(personal_request(), workflow_ref=revision_ref(REVISION))
+        state = live_state(req, "running")
+        args = SimpleNamespace(pr=1, repo=FIXTURE, previous_request=req["request_id"],
+                               previous_generation="6")
+        for mutation in ({"generation": 7}, {"stage": "published"},
+                         {"publication_intent": {"status": "uncertain"}},
+                         {"report": {"verification": "verified"}},
+                         {"coordinator_recovery": {"execution_revision": "f" * 40}}):
+            store, _ = stored(dict(state, **mutation))
+            before = copy.deepcopy(store.entries)
+            api = FakeAPI()
+            with self.subTest(mutation=mutation), self.assertRaises(Rejected):
+                recover_coordinator(api, store, args, "f" * 40, 400)
+            self.assertEqual(before, store.entries)
+            self.assertEqual([], api.calls)
+
+    def test_recovery_rejects_running_worker_without_changing_pin_or_phase(self):
+        req = dict(personal_request(), workflow_ref=revision_ref(REVISION))
+        state = live_state(req, "running")
+        state["intent"] = {"id": req["request_id"], "recorded_at": 100}
+        store, _ = stored(state)
+        before = copy.deepcopy(store.entries)
+        api = FakeAPI([dict(run(), head_branch=req["workflow_ref"], status="in_progress")])
+        args = SimpleNamespace(pr=1, repo=FIXTURE, previous_request=req["request_id"],
+                               previous_generation="6")
+        with self.assertRaisesRegex(Rejected, "Previous worker remains active"):
+            recover_coordinator(api, store, args, "f" * 40, 400)
+        self.assertEqual(before, store.entries)
+        self.assertTrue(all(method == "GET" for _, method, _ in api.calls))
+
+    def test_publication_reconciliation_preserves_original_verification_revision(self):
+        state = live_state()
+        state["reconciliation"] = {"execution_revision": "f" * 40}
+        self.assertEqual(REVISION, verification_revision(state))
