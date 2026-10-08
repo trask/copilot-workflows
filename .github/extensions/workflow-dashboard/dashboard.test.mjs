@@ -974,6 +974,16 @@ test("history coalesces archive reads, reports failures, and cannot mix with a r
     assert.match(dashboard.state().pauseReason, /History read failed/);
 });
 
+test("task buttons wrap between words and move to another row instead of shrinking below a word", async () => {
+    const styles = await readFile(new URL("styles.css", import.meta.url), "utf8");
+    const grid = styles.match(/^\.task-grid \{([^}]+)\}/m)?.[1];
+    const button = styles.match(/^\.task-button \{([^}]+)\}/m)?.[1];
+    assert.match(grid, /flex-wrap: wrap;/);
+    assert.match(button, /min-width: min-content;/);
+    assert.match(button, /overflow-wrap: normal;/);
+    assert.match(button, /white-space: normal;/);
+});
+
 test("busy icons rotate normally and use a static hourglass under reduced motion", async () => {
     const styles = await readFile(new URL("styles.css", import.meta.url), "utf8");
     const spinner = styles.match(/^\.task-icon \.spinner \{([^}]+)\}/m)?.[1];
