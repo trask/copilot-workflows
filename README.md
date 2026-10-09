@@ -58,6 +58,8 @@ Launch requires the isolated `COPILOT_GITHUB_TOKEN` inference credential and exp
 
 Once a run finishes, use Run again with the same inputs. A terminal, verified quiescent run permits a new phase of any kind, even at the same head. The coordinator verifies prior executions have stopped and archives their evidence. Review and CI loops allow five workers; single-pass tasks allow one. Phases have no overall deadline: CI and review waits do not consume a time budget, and later failures can trigger another pass while worker slots remain. Individual Actions jobs and API operations keep their timeouts. Ordinary reruns need no copied checkpoint IDs. Active phases cannot reset budgets or switch kinds; uncertain effects require reconciliation.
 
+See [workflow budgets and deadlines](docs/workflow-limits.md) for worker, inference, job, retry, retention, resource and dashboard limits.
+
 A fresh launch can reconcile an unconfirmed Copilot review request from a submitted review or exact Copilot workflow on its saved head, even after the PR head advances. The new phase records that confirmation and archives the previous evidence without issuing another review request. A requested reviewer on a different head is not proof, and unknown pushes or thread effects still block restart.
 
 New phases pin the automation commit their launch ran on. Workers and coordinator continuations use a verified `review-loop-revisions/<commit-sha>` branch, and verification/publication check out that same commit. Updating central `main` does not stop these phases or change their code. New launches use the revision selected by their Actions dispatch. To pick up an automation fix in an active phase, cancel it and launch again after it stops.
@@ -199,7 +201,7 @@ The waiter starts on coordinator/worker activity, exits when no active phases re
 
 One workflow kind can be active per PR. All kinds share the worker, coordinator, publisher, state store and global waiter. A loop phase keeps its identity, consumed pipeline count and publication history while each new head receives a new request digest and worker invocation. Review and CI phases allow five total model pipelines, including failed admitted work; single-pass tasks allow one, regardless of elapsed time or batch count. The sixth pipeline never dispatches. Per-PR ownership, non-force state CAS, cancellation checks, exact fresh source checks and uncertain-effect reconciliation remain in place.
 
-State is compact JSON only, capped before writes at 1,000 files, 1 MiB per file and 16 MiB total. Large candidate bundles and logs stay in bound Actions artifacts. See [setup and recovery](docs/setup.md) for credentials and operation details.
+State is compact JSON only, with no file-count, per-checkpoint size or total storage cap. Large candidate bundles and logs stay in bound Actions artifacts. See [setup and recovery](docs/setup.md) for credentials and operation details.
 
 After an acknowledged state write, reads wait up to five attempts for that commit or a descendant to become visible. Older API ref results cannot invalidate the saved transition; newer cancellation or concurrent updates still take effect. Persistent lag or divergent history stops explicitly.
 
