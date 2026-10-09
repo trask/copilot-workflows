@@ -325,6 +325,7 @@ export function taskPresentation(pr, kind, workflowReady, actions = []) {
         exhausted: ["Budget exhausted", "attention"], cancelled: ["Cancelled", "idle"],
     };
     if (terminal[phase.stage]) {
+        if (kind === "copilot_review" && evidence?.disabled) return idle();
         const presentation = result(...terminal[phase.stage]);
         return evidence ? { ...presentation, detail: `${presentation.detail} ${evidence.detail}` } : presentation;
     }

@@ -1659,6 +1659,38 @@ test("duplicate calls coalesce no mutations and ambiguous outcomes cannot be bli
     await assert.rejects(ambiguous.canvas.launch({ target, kind: "self_review", confirmed: true }), /Uncertain/);
 });
 
+test("clear current Copilot feedback overrides terminal run failures but not active or uncertain work", () => {
+    const pr = {
+        ...normalizePull(pull(), repo, state(), account), tasks: ["copilot_review"], actionBlock: null,
+        evidence: { sha, copilotThreads: 0, copilotBodies: 0 },
+        phase: { kind: "copilot_review", sha, stage: "blocked", reason: "unknown_fresh_review_body" },
+    };
+    for (const stage of ["blocked", "failed", "exhausted", "cancelled"]) {
+        pr.phase.stage = stage;
+        const presentation = taskPresentation(pr, "copilot_review", true);
+        assert.equal(presentation.label, "No Copilot feedback");
+        assert.equal(presentation.tone, "idle");
+        assert.equal(presentation.disabled, true);
+        assert.equal(presentation.detail, "No Copilot feedback to address.");
+        assert.equal(pr.phase.stage, stage);
+    }
+    pr.phase.stage = "waiting_review";
+    assert.equal(taskPresentation(pr, "copilot_review", true).label, "Waiting for review");
+    assert.equal(taskPresentation(pr, "copilot_review", true).busy, true);
+
+    pr.phase.stage = "blocked";
+    pr.evidence = { sha, error: "Review status unavailable." };
+    assert.equal(taskPresentation(pr, "copilot_review", true).label, "Blocked");
+    assert.equal(taskPresentation(pr, "copilot_review", true).tone, "attention");
+    pr.evidence = { sha: "b".repeat(40), copilotThreads: 0, copilotBodies: 0 };
+    assert.equal(taskPresentation(pr, "copilot_review", true).tone, "attention");
+
+    pr.evidence = { sha, copilotThreads: 0, copilotBodies: 0 };
+    pr.dispatch = { kind: "copilot_review", operation: "launch", status: "uncertain" };
+    assert.equal(taskPresentation(pr, "copilot_review", true).label, "Dispatch uncertain");
+    assert.equal(taskPresentation(pr, "copilot_review", true).tone, "attention");
+});
+
 test("task button states distinguish dispatch acceptance, queued workers, execution and waiting", () => {
     const pr = {
         ...normalizePull(pull(), repo, state(), account), tasks: ["self_review", "pr_review"],

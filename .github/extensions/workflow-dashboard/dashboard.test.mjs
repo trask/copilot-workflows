@@ -1787,14 +1787,37 @@ test("task tooltips separate status from effects and explain disabled controls w
     ]);
 });
 
+test("clear Copilot feedback removes a stopped run's red styling and error details", async () => {
+    const state = rendererState();
+    const pr = state.prs[0];
+    pr.evidence = { sha: pr.sha, copilotThreads: 0, copilotBodies: 0 };
+    pr.phase = {
+        kind: "copilot_review", sha: pr.sha, stage: "blocked", reason: "unknown_fresh_review_body",
+        coordinatorUrl: `https://github.com/${CENTRAL}/actions/runs/11`,
+    };
+    const { nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
+    const button = taskButtons(nodes.get("prs").firstChild)[0];
+    assert.equal(button.disabled, true);
+    assert.equal(button["data-tone"], "idle");
+    assert.equal(button["aria-label"], "Address Copilot feedback: No Copilot feedback");
+    assert.deepEqual(tooltipFor(button).children.map((node) => node.textContent), [
+        "No Copilot feedback", "No Copilot feedback to address.",
+    ]);
+    button.parentElement.events.click();
+    assert.equal(nodes.get("task-details-status").textContent, "No Copilot feedback");
+    assert.equal(nodes.get("task-details-links").children.length, 0);
+    assert.equal(pr.phase.stage, "blocked");
+    assert.equal(pr.phase.reason, "unknown_fresh_review_body");
+});
+
 test("disabled red tasks open readable details and the recorded run without dispatching", async () => {
     const state = rendererState();
     const pr = state.prs[0];
     pr.evidence = { sha: pr.sha, conflicts: "no", ci: "passing", copilotThreads: 0, copilotBodies: 0 };
-    pr.phase = {
-        kind: "copilot_review", sha: pr.sha, stage: "blocked", reason: "unknown_fresh_review_body",
+    pr.dispatch = {
+        kind: "copilot_review", operation: "launch", status: "uncertain",
+        message: "GitHub did not confirm the launch. Refresh before trying again.",
         runUrl: `https://github.com/${CENTRAL}/actions/runs/10`,
-        coordinatorUrl: `https://github.com/${CENTRAL}/actions/runs/11`,
     };
     const calls = [];
     const { renderer, nodes, html } = await rendererFixture(async (path) => {
@@ -1808,11 +1831,11 @@ test("disabled red tasks open readable details and the recorded run without disp
     button().parentElement.events.click();
     assert.equal(nodes.get("task-details").open, true);
     assert.equal(nodes.get("task-details-title").textContent, "Address Copilot feedback");
-    assert.equal(nodes.get("task-details-status").textContent, "Blocked");
+    assert.equal(nodes.get("task-details-status").textContent, "Dispatch uncertain");
     assert.equal(nodes.get("task-details-message").textContent,
-        "The workflow stopped because it could not interpret Copilot's latest review summary. No Copilot feedback to address.");
+        pr.dispatch.message);
     const run = nodes.get("task-details-links").firstChild;
-    assert.equal(run.href, pr.phase.coordinatorUrl);
+    assert.equal(run.href, pr.dispatch.runUrl);
     run.events.contextmenu({ preventDefault() {}, stopPropagation() {}, clientX: 100, clientY: 100 });
     assert.equal(nodes.get("link-menu").hidden, false);
     assert.equal(nodes.get("link-menu").parentElement, nodes.get("task-details"));
@@ -1829,6 +1852,7 @@ test("disabled red tasks open readable details and the recorded run without disp
     button().parentElement.events.keydown({ key: "Tab" });
     assert.equal(nodes.get("task-details").open, false);
 
+    pr.dispatch = null;
     renderer.render();
     assert.equal(nodes.get("task-details").open, false);
     const conflicts = taskButtons(nodes.get("prs").firstChild)[2];
