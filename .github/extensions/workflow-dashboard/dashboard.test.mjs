@@ -10,7 +10,7 @@ import { GitHub, GitHubError, CENTRAL, parseResponse, runGh } from "./github.mjs
 import { Checkpoints, runGit } from "./state.mjs";
 import { phaseSummary, targetHistory, actionSummary, commitLink, compareLink, recentTaskLog, RUN_LOG_WINDOW } from "./model.mjs";
 import { Dashboard } from "./dashboard.mjs";
-import { startServer } from "./server.mjs";
+import { startServer, openExternal } from "./server.mjs";
 import { KIND_LABELS } from "./kinds.mjs";
 import { filterPulls, taskPresentation, completionPresentation, TASK_EFFECTS } from "./prs.mjs";
 
@@ -1364,8 +1364,98 @@ test("right-click Copy link copies the selected PR URL without navigating or dis
     assert.equal(document.activeElement, prLink);
     assert.equal(document.body.children.length, 0);
     assert.equal(prLink.target, "_blank");
-    assert.equal(prLink.events.click, undefined);
     assert.deepEqual(calls, ["/api/visibility?visible=true", "/api/state"]);
+});
+
+test("Ctrl-click and Command-click open PR and Changes links externally while regular clicks retain in-app navigation", async () => {
+    const state = rendererState();
+    const changesUrl = `https://github.com/example/project/pull/12/changes/${sha("a")}..${sha("b")}`;
+    state.runLog = [{
+        number: 12, title: state.prs[0].title, url: state.prs[0].url, stage: "clean",
+        kind: "self_review", finished: 1300000,
+        changeRanges: [{ url: changesUrl, base: sha("a"), head: sha("b"), commits: 1 }],
+    }];
+    const calls = [];
+    let fail = false;
+    const { nodes } = await rendererFixture(async (path, options) => {
+        calls.push([path, options.body ? JSON.parse(options.body) : null]);
+        if (path === "/api/open-external") return { ok: !fail, status: fail ? 400 : 200,
+            json: async () => fail ? { error: "Could not open the link in your external browser." } : { opened: true } };
+        return { ok: true, json: async () => state };
+    });
+    const prLink = nodes.get("prs").firstChild.firstChild.firstChild;
+    const changesLink = nodes.get("run-log").firstChild.children[1].children[2];
+    for (const node of [prLink, changesLink]) {
+        let prevented = 0;
+        let stopped = 0;
+        const plain = { button: 0, ctrlKey: false, metaKey: false,
+            preventDefault() { prevented++; }, stopPropagation() { stopped++; } };
+        await node.events.click(plain);
+        assert.equal(prevented, 0);
+        assert.equal(stopped, 0);
+        await node.events.click({ ...plain, ctrlKey: true });
+        assert.equal(prevented, 1);
+        assert.equal(stopped, 1);
+        await node.events.click({ ...plain, metaKey: true });
+        assert.equal(prevented, 2);
+        assert.equal(stopped, 2);
+        assert.equal(node.target, "_blank");
+        assert.equal(node.rel, "noopener noreferrer");
+    }
+    assert.equal(changesLink.href, changesUrl);
+    assert.deepEqual(calls, [
+        ["/api/visibility?visible=true", null], ["/api/state", null],
+        ["/api/open-external", { url: state.prs[0].url }], ["/api/open-external", { url: state.prs[0].url }],
+        ["/api/open-external", { url: changesUrl }], ["/api/open-external", { url: changesUrl }],
+    ]);
+    fail = true;
+    await changesLink.events.click({ button: 0, ctrlKey: true, preventDefault() {}, stopPropagation() {} });
+    assert.equal(nodes.get("error").textContent, "Could not open the link in your external browser.");
+});
+
+test("external browser launching passes URL data without a shell and hides Windows console windows", async () => {
+    const url = "https://github.com/example/project/pull/12?x=1&y=%22quoted%22";
+    const calls = [];
+    const execute = (command, args, options, callback) => {
+        calls.push({ command, args, options });
+        callback(null);
+    };
+    await openExternal(url, execute, "win32");
+    assert.equal(calls[0].command, "powershell.exe");
+    assert.equal(calls[0].args.at(-1),
+        "$ErrorActionPreference = 'Stop'; Start-Process -FilePath $env:COPILOT_EXTERNAL_URL");
+    assert.equal(calls[0].options.env.COPILOT_EXTERNAL_URL, url);
+    assert.equal(calls[0].options.windowsHide, true);
+    assert.equal(calls[0].options.timeout, 10000);
+    assert.equal(calls[0].options.shell, undefined);
+    await openExternal(url, execute, "darwin");
+    assert.equal(calls[1].command, "open");
+    assert.deepEqual(calls[1].args, [url]);
+    await openExternal(url, execute, "linux");
+    assert.equal(calls[2].command, "xdg-open");
+    assert.deepEqual(calls[2].args, [url]);
+    assert.throws(() => openExternal("file:///C:/example.exe", execute), /HTTP or HTTPS/);
+    await assert.rejects(openExternal(url, (_command, _args, _options, callback) => callback(new Error("launch failed"))),
+        /Could not open/);
+});
+
+test("external link endpoint requires the canvas origin and an explicit JSON URL", async (t) => {
+    const opened = [];
+    const server = await startServer(fakeDashboard(), async (url) => opened.push(url));
+    t.after(() => server.close());
+    const url = "https://github.com/example/project/pull/12";
+    const post = (origin, input) => fetch(new URL("api/open-external", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) },
+        body: JSON.stringify(input),
+    });
+    assert.equal((await post(null, { url })).status, 403);
+    assert.equal((await post("https://evil.test", { url })).status, 403);
+    assert.equal((await post(new URL(server.url).origin, { url, extra: true })).status, 400);
+    assert.deepEqual(opened, []);
+    const response = await post(new URL(server.url).origin, { url });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { opened: true });
+    assert.deepEqual(opened, [url]);
 });
 
 test("link menu dismisses on Escape, outside clicks and refresh, and copies run-log links", async () => {
