@@ -118,6 +118,8 @@ function controller({ records = [], pulls = [pull()], dashboardState = state(), 
             detail: detail({ number: pr.number, head: pr.sha }),
         }])),
         recentCoordinators: async () => [],
+        completionRuns: async (ids) => new Map(await Promise.all(ids.map(async (id) =>
+            [id, (await github.get(`repos/${CENTRAL}/actions/runs/${id}`)).data]))),
         dispatch: async (inputs) => {
             calls.push(inputs);
             if (inputs.operation === "launch") currentRun = launchRun({
@@ -184,6 +186,9 @@ test("run-log rows use the selected repo's PR titles, including closed PRs, and 
         }),
     ] });
     const get = c.github.get;
+    const completedReads = [];
+    const completionRuns = c.github.completionRuns;
+    c.github.completionRuns = async (ids) => { completedReads.push(ids); return completionRuns(ids); };
     let titleReads = 0;
     c.github.get = async (path) => {
         if (path === `repos/${repo}/pulls/13`) {
@@ -196,6 +201,7 @@ test("run-log rows use the selected repo's PR titles, including closed PRs, and 
     assert.equal(titleReads, 0);
     const first = await c.canvas.refreshRunLog();
     assert.equal(first.runLog.length, 3);
+    assert.deepEqual(completedReads, [[10, 11, 12]]);
     assert.deepEqual(first.runLog.map((task) => [task.number, task.title]), [
         [12, "Handle <untrusted> input"], [12, "Handle <untrusted> input"], [13, "Closed PR title"],
     ]);
@@ -217,6 +223,7 @@ test("run-log rows use the selected repo's PR titles, including closed PRs, and 
     assert.equal(otherLog.runLog.length, 1);
     assert.equal(otherLog.runLog[0].number, 14);
     assert.equal(otherLog.runLog[0].title, "Other repository PR");
+    assert.deepEqual(completedReads.at(-1), [13]);
 });
 
 test("missing run-log titles warn without disabling controls and retry only on explicit log refresh", async () => {

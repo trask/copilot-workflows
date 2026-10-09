@@ -168,7 +168,8 @@ export class Dashboard {
             ]);
             const failure = reads.find((read) => read.status === "rejected");
             if (failure) throw failure.reason;
-            const records = reads[0].value;
+            const records = reads[0].value.filter((record) =>
+                !this.repository || !record.state?.request?.repo || record.state.request.repo === this.repository);
             const runs = new Map(reads[1].value.map((run) => [run.id, run]));
             const ids = new Set();
             for (const record of records) {
@@ -182,17 +183,7 @@ export class Dashboard {
                 const id = phase.coordinatorId ?? phase.verificationId ?? phase.workerId ?? phase.launchId;
                 if (id && !runs.has(id)) ids.add(id);
             }
-            const completions = await Promise.allSettled([...ids].map(async (id) => {
-                const run = (await this.github.get(`repos/${CENTRAL}/actions/runs/${id}`)).data;
-                if (run?.id !== id) throw new Error("GitHub returned a different task completion run.");
-                actionSummary(run, []);
-                if (run.status === "completed" && !Number.isFinite(Date.parse(run.updated_at))) {
-                    throw new Error("GitHub returned an invalid task finish time.");
-                }
-                runs.set(id, run);
-            }));
-            const completionFailure = completions.find((read) => read.status === "rejected");
-            if (completionFailure) throw completionFailure.reason;
+            for (const [id, run] of await this.github.completionRuns([...ids])) runs.set(id, run);
             const log = recentTaskLog(records, [...runs.values()], started, window);
             if (version === this.runLogVersion) {
                 this.value = { ...this.value, runLog: log.entries, runLogWarnings: log.warnings,

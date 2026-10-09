@@ -333,7 +333,7 @@ export class GitHub {
     }
 
     graphql(query, repo) {
-        configuredRepository(repo);
+        if (repo !== CENTRAL) configuredRepository(repo);
         return this.queueRead(`graphql:${repo}:${query}`, async () => {
             if (this.retryAt > this.now()) throw new GitHubError("GitHub reads are paused until the recorded rate-limit reset.", this.retryAt);
             const [owner, name] = repo.split("/");
@@ -357,6 +357,37 @@ export class GitHub {
             }
             return payload.data;
         });
+    }
+
+    async completionRuns(ids) {
+        if (ids.some((id) => !Number.isSafeInteger(id) || id < 1)) throw new GitHubError("Invalid task completion run identity.");
+        const results = new Map();
+        const batches = [];
+        const unique = [...new Set(ids)];
+        for (let index = 0; index < unique.length; index += 100) batches.push(unique.slice(index, index + 100));
+        const reads = await Promise.allSettled(batches.map(async (batch) => {
+            const data = await this.graphql(`query($owner: String!, $name: String!) {
+                repository(owner: $owner, name: $name) { nameWithOwner }
+                ${batch.map((id) => `run${id}: resource(url: "https://github.com/${CENTRAL}/actions/runs/${id}") {
+                    ... on WorkflowRun { databaseId updatedAt checkSuite { status } }
+                }`).join("\n")}
+            }`, CENTRAL);
+            if (data.repository.nameWithOwner?.toLowerCase() !== CENTRAL.toLowerCase()) {
+                throw new GitHubError("Task completion response belongs to a different repository.");
+            }
+            for (const id of batch) {
+                const run = data[`run${id}`];
+                const status = run?.checkSuite?.status?.toLowerCase();
+                if (run?.databaseId !== id || !Number.isFinite(Date.parse(run.updatedAt)) ||
+                    !["queued", "in_progress", "waiting", "pending", "requested", "completed"].includes(status)) {
+                    throw new GitHubError("Task completion response is missing or has a mismatched run identity or finish time.");
+                }
+                results.set(id, { id, status, updated_at: run.updatedAt });
+            }
+        }));
+        const failure = reads.find((read) => read.status === "rejected");
+        if (failure) throw failure.reason;
+        return results;
     }
 
     async pullEvidence(repo, pulls, { summaryCI = false } = {}) {

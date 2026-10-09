@@ -391,6 +391,60 @@ test("the run log paginates past polling runs and stops at the requested boundar
         workflow_runs: [{ id: 1, created_at: "missing" }] })).recentCoordinators(since), /invalid recent/);
 });
 
+test("completion lookups deduplicate runs and use one native GraphQL request per 100 runs", async () => {
+    const queries = [];
+    const github = new GitHub(async (args) => {
+        assert.ok(args.includes("graphql"));
+        assert.ok(args.includes("owner=trask"));
+        assert.ok(args.includes("name=copilot-workflows"));
+        const query = args.find((arg) => arg.startsWith("query="));
+        queries.push(query);
+        const ids = [...query.matchAll(/run([1-9][0-9]*): resource/g)].map((match) => Number(match[1]));
+        assert.ok(ids.length <= 100);
+        for (const id of ids) assert.ok(query.includes(`resource(url: "https://github.com/${CENTRAL}/actions/runs/${id}")`));
+        return response({ data: {
+            repository: { nameWithOwner: CENTRAL },
+            ...Object.fromEntries(ids.map((id) => [`run${id}`, {
+                databaseId: id, updatedAt: new Date(1300000).toISOString(),
+                checkSuite: { status: id === 101 ? "IN_PROGRESS" : "COMPLETED" },
+            }])),
+        } });
+    });
+    const runs = await github.completionRuns([...Array.from({ length: 101 }, (_, index) => index + 1), 1]);
+    assert.equal(queries.length, 2);
+    assert.equal(github.requests, 2);
+    assert.equal(runs.size, 101);
+    assert.deepEqual(runs.get(1), completion({ id: 1 }));
+    assert.equal(runs.get(101).status, "in_progress");
+    assert.equal((await github.completionRuns([])).size, 0);
+    assert.equal(queries.length, 2);
+});
+
+test("completion batch failures are explicit and settle all outstanding reads", async () => {
+    let release;
+    const github = new GitHub(async (args) => {
+        const query = args.find((arg) => arg.startsWith("query="));
+        if (query.includes("run1: resource")) return response({ data: {
+            repository: { nameWithOwner: CENTRAL }, run1: {
+                databaseId: 999, updatedAt: new Date(1300000).toISOString(), checkSuite: { status: "COMPLETED" },
+            },
+        } });
+        await new Promise((resolve) => release = resolve);
+        return response({ data: { repository: { nameWithOwner: CENTRAL }, run101: {
+            databaseId: 101, updatedAt: new Date(1300000).toISOString(), checkSuite: { status: "COMPLETED" },
+        } } });
+    });
+    let settled = false;
+    const pending = github.completionRuns(Array.from({ length: 101 }, (_, index) => index + 1))
+        .finally(() => settled = true);
+    const rejection = assert.rejects(pending, /mismatched run identity/);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(settled, false);
+    release();
+    await rejection;
+    assert.equal(github.activeReads, 0);
+});
+
 test("rate limits honor Retry-After or reset and never leak response bodies", async () => {
     let now = 1000000;
     const path = `repos/${CENTRAL}/actions/runs`;
@@ -837,6 +891,8 @@ function fakeDashboard(now = () => 2000000) {
             return { data: path.endsWith("/102") ? completion({ id: 102 }) : { id: 101, status: "in_progress" } };
         },
         recentCoordinators: async () => [],
+        completionRuns: async (ids) => new Map(await Promise.all(ids.map(async (id) =>
+            [id, (await github.get(`repos/${CENTRAL}/actions/runs/${id}`)).data]))),
     };
     const dashboard = new Dashboard(github, now);
     const snapshot = { sha: sha("a"), current: [record(fixture())] };
@@ -990,10 +1046,10 @@ test("failed completion reads settle before releasing the run-log lock", async (
         record(fixture({ stage: "complete", run: { id: 103 } }, { pr: 13 })),
     ];
     let release;
-    dashboard.github.get = async (path) => {
-        if (path.endsWith("/102")) throw new Error("Completion unavailable");
+    dashboard.github.completionRuns = async (ids) => {
+        assert.deepEqual(ids, [102, 103]);
         await new Promise((resolve) => release = resolve);
-        return { data: completion({ id: 103 }) };
+        throw new Error("Completion unavailable");
     };
     const pending = dashboard.refreshRunLog();
     await new Promise((resolve) => setImmediate(resolve));
