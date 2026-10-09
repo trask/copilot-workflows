@@ -12,7 +12,7 @@ const CHECK_FIELDS = `
     __typename
     ... on CheckRun {
         databaseId name status conclusion
-        checkSuite { app { id slug } workflowRun { runNumber event workflow { id } } }
+        checkSuite { app { id } workflowRun { runNumber event workflow { id } } }
     }
     ... on StatusContext { context state createdAt }`;
 const THREAD_FIELDS = `

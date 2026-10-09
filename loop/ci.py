@@ -5,7 +5,7 @@ from pathlib import Path
 
 from loop.api import APIError
 from loop.policy import check_target, direct_inputs, exact, iso, require, timestamp
-from loop.reviews import check_decision, ci_items, copilot_check
+from loop.reviews import check_decision, ci_items
 
 
 def latest_workflows(repo, sha, runs):
@@ -34,7 +34,7 @@ def collect(api, request, required, *, log_dir=None):
     checks, statuses = ci_items(api, repo, sha, latest_statuses=True)
     executions, selected, failures, bound_jobs = {}, [], [], {}
     for check in checks:
-        if check["name"] not in required or copilot_check(check):
+        if check["name"] not in required:
             continue
         identity = None
         if check.get("app", {}).get("id") == 15368:

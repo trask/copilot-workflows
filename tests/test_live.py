@@ -1602,7 +1602,7 @@ class ReviewTests(unittest.TestCase):
         read.comments[0].update(user={"id": AUTHOR_ID, "type": "User"})
         self.assertEqual("clean", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
 
-    def test_exact_ci_never_counts_copilot_empty_duplicate_pending_failed_or_status_spoof(self):
+    def test_exact_ci_handles_empty_duplicate_pending_failed_or_status_spoof(self):
         read = Read()
         required = [CI_CHECK]
         self.assertEqual("passed", exact_ci(read, FIXTURE, SHA, required)["decision"])
@@ -1625,8 +1625,6 @@ class ReviewTests(unittest.TestCase):
             else:
                 value.statuses = [{"id": 334, "context": required[0], "state": "success"}]
             self.assertEqual(expected, exact_ci(value, FIXTURE, SHA, required)["decision"])
-        read.checks[0]["name"] = "Copilot Code Review"
-        self.assertEqual("missing", exact_ci(read, FIXTURE, SHA, ["Copilot Code Review"])["decision"])
 
     def test_exact_ci_collects_later_pages_and_status_pagination(self):
         check = Read().checks[0]

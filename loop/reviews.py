@@ -3,7 +3,7 @@
 import re
 
 from loop.freeze import complete_threads, threads
-from loop.policy import (BOT_ID, DEFAULTS, bot, canonical, digest, require,
+from loop.policy import (DEFAULTS, bot, canonical, digest, require,
                          timestamp, unchanged)
 
 def body_classification(body):
@@ -164,17 +164,12 @@ def ci_items(api, repo, sha, *, latest_statuses=False):
 
 def select_checks(api, request):
     checks, statuses = ci_items(api, request["repo"], request["frozen_sha"])
-    selected = {c["name"] for c in checks if not copilot_check(c)}
-    selected.update(s["context"] for s in statuses if "copilot" not in s["context"].casefold())
+    selected = {c["name"] for c in checks}
+    selected.update(s["context"] for s in statuses)
     require(len(selected) <= 100
             and all(isinstance(name, str) and 0 < len(name) <= 200 for name in selected),
             "Invalid or oversized target CI selection")
     return sorted(selected)
-
-
-def copilot_check(check):
-    return ("copilot" in check["name"].casefold()
-            or check.get("app", {}).get("id") == BOT_ID)
 
 
 def check_decision(check, sha, *, accept_nonblocking=False):
@@ -289,9 +284,8 @@ def exact_ci(api, repo, sha, required):
     executions = {}
     workflow_runs = None
     for name in required:
-        runs = [c for c in checks if c["name"] == name and not copilot_check(c)]
-        contexts = [s for s in statuses if s["context"] == name
-                    and "copilot" not in name.casefold()]
+        runs = [c for c in checks if c["name"] == name]
+        contexts = [s for s in statuses if s["context"] == name]
         identities = None
         if len(runs) + len(contexts) > 1:
             selection = None

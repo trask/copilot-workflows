@@ -252,13 +252,12 @@ test("file-conflict evidence ignores aggregate mergeability and other failed mer
     assert.throws(() => normalizeEvidence(raw, "f".repeat(40)), /different head/);
 });
 
-test("CI evidence distinguishes failures, pending and absent checks without counting Copilot checks", () => {
+test("CI evidence distinguishes failures, pending and absent checks", () => {
     const evidence = (checks) => normalizeEvidence(detail({ checks }), sha);
     assert.equal(evidence([check()]).ci, "passing");
     assert.equal(evidence([]).ci, "none");
     assert.equal(evidence([check(null, { status: "IN_PROGRESS" })]).ci, "pending");
     assert.equal(evidence([check("FAILURE"), check(null, { name: "Build", status: "IN_PROGRESS" })]).ci, "failing");
-    assert.equal(evidence([check(), check("FAILURE", { name: "Copilot code review" })]).ci, "passing");
     assert.equal(evidence([{ __typename: "StatusContext", context: "Build", state: "ERROR",
         createdAt: "2026-10-07T21:00:00Z" }]).ci, "failing");
     assert.equal(evidence([check(null)]).ci, "unknown");
@@ -322,7 +321,6 @@ test("Fix CI is enabled only for known failures, including failures while other 
     const absent = detail();
     absent.commits.nodes[0].commit.statusCheckRollup = null;
     assert.equal(normalizeEvidence(absent, sha).ci, "none");
-    assert.equal(normalizeEvidence(detail({ checks: [check("SUCCESS", { name: "Copilot code review" })] }), sha).ci, "none");
 });
 
 test("CI check selection uses workflow sequence and preserves distinct workflows and events", () => {

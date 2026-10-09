@@ -241,9 +241,8 @@ new file mode 100644
                                      (None, "unknown")):
             read.checks[0]["conclusion"] = conclusion
             self.assertEqual(expected, exact_ci(read, FIXTURE, SHA, [CI_CHECK])["decision"])
-        read.checks[0]["name"] = "Copilot Code Review"
-        self.assertEqual([], select_checks(read, read.req))
         read.checks = []
+        self.assertEqual([], select_checks(read, read.req))
         read.statuses = [{"id": 1, "context": "external CI", "state": "success"}]
         self.assertEqual("passed", exact_ci(read, FIXTURE, SHA, ["external CI"])["decision"])
 

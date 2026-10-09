@@ -126,7 +126,6 @@ export function normalizeEvidence(detail, sha) {
     for (const check of checks) {
         const name = check?.__typename === "CheckRun" ? check.name : check?.__typename === "StatusContext" ? check.context : null;
         if (typeof name !== "string" || !name) throw new Error("Live CI status contains an unsupported check.");
-        if (/copilot/i.test(name) || check.checkSuite?.app?.slug === "copilot-pull-request-reviewer") continue;
         const run = check.checkSuite?.workflowRun;
         const sequence = check.__typename === "CheckRun" ? check.databaseId : Date.parse(check.createdAt);
         if (!Number.isSafeInteger(sequence) || sequence < 0 ||
