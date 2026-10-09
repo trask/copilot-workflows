@@ -88,7 +88,7 @@ def select_findings(reviews, comments, unresolved, sha):
                              "line": comment["line"],
                              "original_line": comment["original_line"],
                              "body": comment["body"]})
-    require(findings, "Empty finding set")
+    require(findings or not current, "Empty finding set")
     require(len({f["key"] for f in findings}) == len(findings), "Duplicate API findings")
     return findings
 

@@ -1275,22 +1275,67 @@ class ReviewTests(unittest.TestCase):
         read.reviews[0]["state"] = "CHANGES_REQUESTED"
         self.assertEqual("findings", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
 
-    def test_publication_requires_existing_findings_and_never_requests_an_initial_review(self):
+    def test_outdated_review_without_findings_requests_review_without_a_worker(self):
         read = Read()
+        read.reviews[0]["body"] = CLEAN
         read.reviews[0]["commit_id"] = REVISION
+        read.comments[0]["original_commit_id"] = REVISION
+        read.resolved = True
+        req = freeze(read, 1, REVISION, 100, FIXTURE)
+        self.assertEqual([], req["findings"])
+        self.assertEqual([12], req["baseline_review_ids"])
+        store, api = MemoryState(), FakeAPI()
+        name, state = start(store, api, req, "", 0, True, "fine_grained_pat", [], True, 100)
+        self.assertEqual("threads_settled", state["stage"])
+        self.assertEqual(0, state["iteration"])
+        self.assertEqual([], api.calls)
+        with patch.dict(os.environ, {"GITHUB_SHA": REVISION}), patch("loop.cli.output"):
+            self.assertEqual(name, choose_live(store, 100))
+        publisher = Publisher(read)
+        pending_store, pending_name = stored(state)
+        read.pr["requested_reviewers"] = [BOT.copy()]
+        pending = advance(pending_store, pending_name, state, api, read, publisher, 100)
+        self.assertEqual("existing_Copilot_review_pending", pending["reason"])
+        self.assertEqual([], publisher.posts)
+        read.pr["requested_reviewers"] = []
+        with patch("loop.live.time.time", return_value=100):
+            state = advance(store, name, state, api, read, publisher, 100)
+        self.assertEqual("waiting_review", state["stage"])
+        self.assertEqual(0, state["iteration"])
+        self.assertEqual([], state["publications"])
+        self.assertEqual([(
+            f"repos/{FIXTURE}/pulls/1/requested_reviewers", "POST",
+            {"reviewers": ["copilot-pull-request-reviewer[bot]"]},
+        )], publisher.posts)
+        waiting = copy.deepcopy(state)
+        read.pr["requested_reviewers"] = []
+        read.reviews.append(review(id=13, body=CLEAN, submitted_at=iso(200)))
+        state = advance(store, name, state, api, read, publisher, 400)
+        self.assertEqual("clean", state["stage"])
+        self.assertEqual(0, state["iteration"])
+        store, name = stored(waiting)
+        read.reviews[-1].update(state="CHANGES_REQUESTED", body="Fix the missing input guard.")
+        state = advance(store, name, waiting, api, read, publisher, 400)
+        self.assertEqual("ready", state["stage"])
+        self.assertEqual(0, state["iteration"])
+        self.assertEqual(["review:13"], [finding["key"] for finding in state["request"]["findings"]])
+        dispatch(store, name, api, 400)
+        self.assertEqual(1, store.entries[name]["iteration"])
+
+    def test_publication_never_requests_a_review_without_an_existing_verified_review(self):
+        read = Read()
+        read.reviews = []
         read.comments = []
-        for reviews in (read.reviews, []):
-            read.reviews = reviews
-            with self.subTest(reviews=reviews), \
-                    patch.object(read, "graphql", return_value={"repository": {"pullRequest": {
-                        "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []}}}}), \
-                    self.assertRaises(Rejected):
-                freeze(read, 1, REVISION, 100, FIXTURE)
+        with patch.object(read, "graphql", return_value={"repository": {"pullRequest": {
+                "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []}}}}), \
+                self.assertRaisesRegex(Rejected, "No submitted verified Copilot review"):
+            freeze(read, 1, REVISION, 100, FIXTURE)
         req = personal_request(max_pipelines=5)
         req["findings"] = []
+        req["baseline_review_ids"] = []
         store = MemoryState()
         api = FakeAPI()
-        with self.assertRaisesRegex(Rejected, "existing frozen Copilot findings"):
+        with self.assertRaisesRegex(Rejected, "existing frozen Copilot review"):
             start(store, api, req, "", 0, True, "fine_grained_pat", [CI_CHECK], True, 100)
         self.assertEqual({}, store.entries)
         state = live_state(req, "ready")

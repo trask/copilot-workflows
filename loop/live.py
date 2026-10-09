@@ -124,8 +124,8 @@ def start(store, api, request, previous_id, previous_generation, publisher_avail
     require(request["schema"] == 2, "Legacy requests are read-only")
     public_request(request)
     commit_author(request)
-    require(loop_kind(request) != "copilot_review" or request["findings"],
-            "Publication requires existing frozen Copilot findings")
+    require(loop_kind(request) != "copilot_review" or request["findings"] or request["baseline_review_ids"],
+            "Publication requires an existing frozen Copilot review")
     name = checkpoint_name(request["repo"], request["pr"], request["repo_id"])
     _, _, entries = store.snapshot()
     prior = entries.get(name)
@@ -188,6 +188,8 @@ def start(store, api, request, previous_id, previous_generation, publisher_avail
                      task_completion={"outcome": "no_change"})
     elif not inference_available:
         value.update(stage="blocked", reason="human_gate_COPILOT_GITHUB_TOKEN")
+    elif loop_kind(request) == "copilot_review" and not request["findings"]:
+        value.update(stage="threads_settled", reason="Copilot_review_outdated", next_check_at=now)
     elif loop_kind(request) == "ci_fix":
         value.update(stage="waiting_ci", reason="CI_preflight", next_check_at=now)
     def replace(current):
