@@ -124,7 +124,7 @@ test("304 requires an actual HTTP response and reuses data without charging prim
     await assert.rejects(emptyCache.get(path), /without cached/);
 });
 
-test("GitHub reads run concurrently with a maximum of three, and missing output stays an error", async () => {
+test("GitHub reads run concurrently with a maximum of five, and missing output stays an error", async () => {
     let active = 0;
     let maximum = 0;
     const github = new GitHub(async () => {
@@ -133,9 +133,9 @@ test("GitHub reads run concurrently with a maximum of three, and missing output 
         active--;
         return response({ workflow_runs: [], total_count: 0 });
     });
-    await Promise.all(["queued", "pending", "waiting", "requested", "in_progress"].map((status) =>
+    await Promise.all(["queued", "pending", "waiting", "requested", "in_progress", "completed", "success"].map((status) =>
         github.get(`repos/${CENTRAL}/actions/runs?status=${status}`)));
-    assert.equal(maximum, 3);
+    assert.equal(maximum, 5);
     assert.equal(github.activeReads, 0);
     assert.equal(github.readQueue.length, 0);
     assert.equal(github.inFlightReads.size, 0);
@@ -240,7 +240,7 @@ test("received HTTP errors are not retried even when stderr contains a transport
     }
 });
 
-test("read retries stay inside the three-request concurrency limit", async () => {
+test("read retries stay inside the five-request concurrency limit", async () => {
     let active = 0;
     let maximum = 0;
     const attempts = new Map();
@@ -254,11 +254,11 @@ test("read retries stay inside the three-request concurrency limit", async () =>
         if (attempt === 1) throw Object.assign(new GitHubError("Connection reset."), { transient: true });
         return response({ workflow_runs: [], total_count: 0 });
     }, () => 2000000, async () => {});
-    await Promise.all(["queued", "pending", "waiting", "requested", "in_progress"].map((status) =>
+    await Promise.all(["queued", "pending", "waiting", "requested", "in_progress", "completed", "success"].map((status) =>
         github.get(`repos/${CENTRAL}/actions/runs?status=${status}`)));
-    assert.equal(maximum, 3);
-    assert.equal(github.requests, 10);
-    assert.equal(github.readRetries, 5);
+    assert.equal(maximum, 5);
+    assert.equal(github.requests, 14);
+    assert.equal(github.readRetries, 7);
     assert.ok([...attempts.values()].every((attempt) => attempt === 2));
     assert.equal(github.activeReads, 0);
 });
@@ -349,23 +349,25 @@ test("out-of-order rate headers cannot increase capacity or replace a newer rese
 test("rate limits stop queued CLI reads and preserve the longest concurrent backoff", async () => {
     const releases = [];
     const github = new GitHub(async () => new Promise((resolve) => releases.push(resolve)), () => 1000000);
-    const pending = ["queued", "pending", "waiting", "requested", "in_progress"].map((status) =>
+    const pending = ["queued", "pending", "waiting", "requested", "in_progress", "completed", "success"].map((status) =>
         github.get(`repos/${CENTRAL}/actions/runs?status=${status}`));
     const settled = Promise.allSettled(pending);
-    assert.equal(releases.length, 3);
+    assert.equal(releases.length, 5);
     releases[0](response({}, { "Retry-After": "120" }, 429, 1));
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(github.retryAt, 1120000);
-    assert.equal(releases.length, 3);
+    assert.equal(releases.length, 5);
     releases[1](response({}, { "Retry-After": "30" }, 429, 1));
-    releases[2](response({ total_count: 0, workflow_runs: [] }, rateHeaders()));
+    for (const release of releases.slice(2)) {
+        release(response({ total_count: 0, workflow_runs: [] }, rateHeaders()));
+    }
     const results = await settled;
     assert.deepEqual(results.map((read) => read.status), [
-        "rejected", "rejected", "fulfilled", "rejected", "rejected",
+        "rejected", "rejected", "fulfilled", "fulfilled", "fulfilled", "rejected", "rejected",
     ]);
-    assert.match(results[3].reason.message, /paused/);
+    assert.match(results[5].reason.message, /paused/);
     assert.equal(github.retryAt, 1120000);
-    assert.equal(github.requests, 3);
+    assert.equal(github.requests, 5);
     assert.equal(github.activeReads, 0);
     assert.equal(github.readQueue.length, 0);
 });

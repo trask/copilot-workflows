@@ -6,7 +6,7 @@ import { currentCopilotReview } from "./prs.mjs";
 
 export const CENTRAL = "trask/copilot-workflows";
 export const MAX_RESPONSE = 16 * 1024 * 1024;
-const READ_CONCURRENCY = 3;
+const READ_CONCURRENCY = 5;
 const READ_RETRY_DELAY = 250;
 const CHECK_FIELDS = `
     __typename
@@ -358,7 +358,7 @@ export class GitHub {
         }
         const results = new Map();
         const batches = [];
-        for (let index = 0; index < pulls.length; index += 10) batches.push(pulls.slice(index, index + 10));
+        for (let index = 0; index < pulls.length; index += 5) batches.push(pulls.slice(index, index + 5));
         await Promise.all(batches.map(async (batch) => {
             try {
                 const { repository: data } = await this.graphql(`query($owner: String!, $name: String!) {

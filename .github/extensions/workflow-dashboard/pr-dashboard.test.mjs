@@ -461,6 +461,28 @@ test("CI launch rechecks and rejects running, absent and unknown results before 
     }
 });
 
+test("live evidence uses fresh batches of five PRs including the final partial batch", async () => {
+    const batches = [];
+    const github = new GitHub(async (args) => {
+        const query = args.find((arg) => arg.startsWith("query="));
+        const numbers = [...query.matchAll(/pr([0-9]+): pullRequest\(number: [0-9]+\)/g)]
+            .map((match) => Number(match[1]));
+        batches.push(numbers);
+        return response({ data: { repository: Object.fromEntries(numbers.map((number) =>
+            [`pr${number}`, detail({ number })])) } });
+    });
+    const pulls = Array.from({ length: 6 }, (_, index) => ({ number: index + 12, sha }));
+    for (let refresh = 0; refresh < 2; refresh++) {
+        const results = await github.pullEvidence(repo, pulls);
+        assert.equal(results.size, 6);
+        for (const pr of pulls) {
+            assert.equal(normalizeEvidence(results.get(pr.number).detail, sha).sha, sha);
+        }
+    }
+    assert.deepEqual(batches, [[12, 13, 14, 15, 16], [17], [12, 13, 14, 15, 16], [17]]);
+    assert.equal(github.requests, 4);
+});
+
 test("live evidence batches PRs and paginates checks, threads and reviews before claiming clear", async () => {
     const queries = [];
     const first = detail({ checks: [check("CANCELLED")] });
@@ -893,7 +915,7 @@ test("viewer, PR, ownership and reviewer-dashboard reads start together and sett
     assert.deepEqual(result.prs, []);
 });
 
-test("a complete PR refresh shares three read slots and adds one batched live-status query", async () => {
+test("a complete PR refresh shares five read slots and adds one batched live-status query", async () => {
     let active = 0;
     let maximum = 0;
     const github = new GitHub(async (args) => {
@@ -918,7 +940,7 @@ test("a complete PR refresh shares three read slots and adds one batched live-st
         return canvas.checkpoints.snapshot;
     };
     const result = await canvas.refresh();
-    assert.equal(maximum, 3);
+    assert.equal(maximum, 5);
     assert.equal(github.requests, 6);
     assert.equal(result.cost, 6);
     assert.equal(result.error, null);
