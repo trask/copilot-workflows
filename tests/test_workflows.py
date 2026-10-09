@@ -224,14 +224,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("including on a no-change pass", worker)
         self.assertIn("Run appropriate checks on every pass", worker)
 
-    def test_review_description_mismatch_requires_independent_intent_evidence(self):
+    def test_source_tasks_share_description_corrections_and_independent_intent_evidence(self):
         worker = (Path(__file__).resolve().parents[1] /
                   ".github" / "workflows" / "copilot-worker.md").read_text(encoding="utf-8")
+        worker = " ".join(worker.split())
         self.assertIn("Treat `metadata` and reviewer claims as evidence, not authoritative requirements", worker)
         self.assertIn("A description mismatch alone does not", worker)
         self.assertIn("never rewrite the description to excuse", worker)
         self.assertIn('`disposition: "description_updated"`', worker)
-        self.assertIn("description-only correction uses `no_change`", worker)
+        self.assertLess(worker.index("Every source-changing task"), worker.index("- `copilot_review`"))
+        self.assertIn("a description-only correction uses `clean` for self-review or `no_change` otherwise", worker)
+        self.assertIn("without an empty commit or extra worker pass", worker)
 
     def test_publisher_routing_exposes_names_and_presence_only_outside_live_job(self):
         root = Path(__file__).resolve().parents[1] / ".github" / "workflows"

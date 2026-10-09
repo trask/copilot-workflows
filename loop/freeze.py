@@ -4,7 +4,7 @@ import time
 import uuid
 
 from loop.policy import (AUTHOR_ID, BOT_IDENTITY_PATH, BOT_NODE, DEFAULTS, LOOP_KINDS, SHA, attributed_owner, bot, check_target, commit_author, diff_scope, eligible,
-                         iso, require, safe_ref, unchanged)
+                         iso, require, safe_ref, source_effect, unchanged)
 
 THREADS = """
 query($owner:String!, $name:String!, $number:Int!, $cursor:String) {
@@ -121,7 +121,7 @@ def probe_target(api, number, revision, now=None, repo=None, actor_id=AUTHOR_ID,
                 "Incomplete self-review merge-base identity")
         target.update(base_ref=base["ref"], base_sha=base_sha,
                       merge_base_sha=comparison["merge_base_commit"]["sha"])
-    if loop_kind in {"copilot_review", "pr_description"}:
+    if source_effect(dict(loop_kind=loop_kind)) or loop_kind == "pr_description":
         target["metadata"] = {"title": pr["title"], "body": pr["body"] or ""}
     now = int(time.time()) if now is None else now
     from loop.candidates import PROTOCOL

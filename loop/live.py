@@ -642,16 +642,16 @@ def advance(store, name, state, central, read, publisher, now, verified=None):
         from loop.task_effects import confirm_task
         return confirm_task(store, name, state, read, now)
     if stage == "published":
+        if ("proposal" in state["report"]["dispositions"]
+                and state.get("task_intent", {}).get("status") != "confirmed"):
+            from loop.task_effects import publish_task
+            return publish_task(store, name, state, central, read, publisher, now)
         if loop_kind(state["request"]) == "self_review":
             return watch_self(store, name, state, read, now)
         if loop_kind(state["request"]) == "ci_fix":
             return watch_ci_fix(store, name, state, read, now)
         if loop_kind(state["request"]) != "copilot_review":
             return watch_single(store, name, state, read, now)
-        if ("proposal" in state["report"]["dispositions"]
-                and state.get("task_intent", {}).get("status") != "confirmed"):
-            from loop.task_effects import publish_task
-            return publish_task(store, name, state, central, read, publisher, now)
         from loop.effects import initialize
         return cas(store, name, state, stage="thread_effects", effects=initialize(state),
                    next_check_at=now)

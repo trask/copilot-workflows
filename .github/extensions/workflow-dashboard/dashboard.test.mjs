@@ -71,18 +71,23 @@ test("merge parents, pending reviews and CI reruns retain separate saved evidenc
     assert.equal(item.ciWarnings[0].analysis, "Pre-existing failure");
 });
 
-test("Copilot feedback exposes confirmed description corrections separately from source changes", () => {
+test("source tasks expose confirmed description corrections separately from source changes", () => {
     const proposal = { title: "Images", body: "Use ZIP archives." };
-    const s = fixture({
-        stage: "waiting_review",
-        report: { dispositions: { outcome: "no_change", proposal } },
-        task_intent: { kind: "metadata", status: "confirmed" },
-    });
-    const item = targetHistory([record(s)], target).phases[0].iterations[0];
-    assert.deepEqual(item.proposal, proposal);
-    assert.equal(item.taskEffect.kind, "metadata");
-    assert.equal(item.taskEffect.status, "confirmed");
-    assert.equal(item.candidateSha, null);
+    for (const kind of ["copilot_review", "self_review", "ci_fix", "pr_conflict_resolver", "pr_simplify", "pr_consistency"]) {
+        const s = fixture({
+            stage: "complete", task_completion: { outcome: "no_change" },
+            report: { dispositions: { outcome: "no_change", proposal } },
+            task_intent: { kind: "metadata", status: "confirmed" },
+        }, { loop_kind: kind });
+        const item = targetHistory([record(s)], target).phases[0].iterations[0];
+        assert.deepEqual(item.proposal, proposal);
+        assert.equal(item.taskEffect.kind, "metadata");
+        assert.equal(item.taskEffect.status, "confirmed");
+        assert.equal(item.candidateSha, null);
+        assert.deepEqual(completionPresentation(phaseSummary(record(s))), {
+            label: "Updated", detail: "The PR description was updated. No source changes were published.",
+        });
+    }
     assert.match(TASK_EFFECTS.copilot_review, /stale PR description/);
 });
 

@@ -57,22 +57,22 @@ class PublisherAPI(API):
 
     def bind_effect(self, intent):
         if intent is not None:
-            if (self.loop_kind in {"pr_description", "pr_review", "ci_fix"}
-                    or self.loop_kind == "copilot_review" and intent["kind"] == "metadata"):
-                expected = {"copilot_review": "metadata", "pr_description": "metadata", "pr_review": "pending_review",
-                            "ci_fix": "rerun"}[self.loop_kind]
+            expected = ("metadata" if source_effect(self.request) and intent["kind"] == "metadata"
+                        else {"pr_description": "metadata", "pr_review": "pending_review",
+                              "ci_fix": "rerun"}.get(self.loop_kind))
+            if expected is not None:
                 require(intent["kind"] == expected and intent["request_digest"] == digest(self.request)
                         and intent["generation"] == self.request["publication"]["generation"]
                         and intent["target"] == [self.repo, self.number],
                         "Unbound task effect")
-                if self.loop_kind == "copilot_review":
+                if source_effect(self.request) and expected == "metadata":
                     from loop.recommendations import proposal
                     proposal(intent["payload"])
                     require("metadata" in self.request
                             and intent["payload"]["title"] == self.request["metadata"]["title"]
                             and intent["payload"]["body"] != self.request["metadata"]["body"]
                             and intent["head"] == intent["acceptance"]["candidate_commit"],
-                            "Unbound review description correction")
+                            "Unbound source-task description correction")
                 self.effect = intent
                 return
             from loop.policy import bot

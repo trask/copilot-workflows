@@ -115,12 +115,10 @@ class EffectTests(unittest.TestCase):
     def test_description_proposals_need_matching_decisions_and_frozen_metadata(self):
         _, _, state, _, _ = self.description_context()
         semantic(state["report"]["dispositions"], state["request"])
-        for mutation in ("missing_proposal", "no_decision", "unchanged_body", "changed_title", "no_metadata", "blocked"):
+        for mutation in ("missing_proposal", "unchanged_body", "changed_title", "no_metadata", "blocked"):
             req, value = copy.deepcopy(state["request"]), copy.deepcopy(state["report"]["dispositions"])
             if mutation == "missing_proposal":
                 value.pop("proposal")
-            elif mutation == "no_decision":
-                value["findings"][1]["disposition"] = "not_warranted"
             elif mutation == "unchanged_body":
                 value["proposal"]["body"] = req["metadata"]["body"]
             elif mutation == "changed_title":
@@ -133,6 +131,12 @@ class EffectTests(unittest.TestCase):
                 value["findings"][0]["disposition"] = "blocked"
             with self.subTest(mutation=mutation), self.assertRaises(Rejected):
                 semantic(value, req)
+
+    def test_source_fixes_can_update_description_without_an_invented_finding(self):
+        _, _, state, _, _ = self.description_context(True)
+        value = state["report"]["dispositions"]
+        value["findings"][1].update(disposition="fixed", commit=1)
+        semantic(value, state["request"])
 
     def test_description_drift_or_cancellation_prevents_PATCH(self):
         for mutation in ("metadata", "head", "cancel"):

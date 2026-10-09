@@ -15,13 +15,13 @@ from loop.api import API, APIError
 from loop.candidates import semantic
 from loop.ci import collect, diagnoses, same_attempts
 from loop.coordinator import cancel, checkpoint, dispatch, quiescent
-from loop.freeze import freeze
+from loop.freeze import freeze, probe_target
 from loop.inputs import acquire
 from loop.live import advance, start, watch_ci_fix, watch_single
 from loop.policy import (AUTHOR_ID, CENTRAL, LOOP_KINDS, Rejected, candidate_outcome, check_target,
                          canonical, digest, effect_repository, eligible, pipeline_budget)
 from loop.policy import iso, pipeline_limit, staged_source
-from loop.publication import PublisherAPI, authenticated_push, evidence, import_candidate
+from loop.publication import PublisherAPI, acceptance, authenticated_push, evidence, import_candidate
 from loop.recommendations import collect_diff, comments, description_diff, diff_anchors
 from loop.source import SourceAPI, acquire_source, import_source, package_source
 from loop.task_effects import confirm_task, publish_task
@@ -30,9 +30,9 @@ from loop.verify import git
 from loop.worker_output import check_output
 from tests.fixtures import CI_CHECK, FIXTURE
 from tests.support import REASONING, batch, native_files
-from tests.test_live import personal_pr, personal_request, stored, zipped, TEST_TOKEN
+from tests.test_live import Publisher, personal_pr, personal_request, stored, zipped, TEST_TOKEN
 from tests.test_loop import FakeAPI, MemoryState, REVISION, SHA, GOOD_PATCH, run
-from tests.test_self_review import BASE, MERGE_BASE, SelfRead, self_request
+from tests.test_self_review import BASE, MERGE_BASE, SelfRead, accepted_state, self_request
 
 
 def task_request(kind):
@@ -491,6 +491,86 @@ class TaskContractsTests(unittest.TestCase):
             self.assertEqual("exhausted", exhausted["stage"])
             self.assertEqual(1, exhausted["iteration"])
             self.assertFalse(api.calls)
+
+
+class SourceDescriptionTests(unittest.TestCase):
+    def context(self, kind, changed=False):
+        state, _ = accepted_state(changed)
+        req = task_request(kind)
+        req["metadata"] = {"title": "Original", "body": "Original body"}
+        value = result(req, "fixes" if changed else "clean" if kind == "self_review" else "no_change")
+        if changed and kind == "ci_fix":
+            value["diagnoses"][0]["decision"] = "fix"
+        value["proposal"] = {"title": "Original", "body": "Description matches the final implementation."}
+        state["request"] = req
+        state["report"].update(request_digest=digest(req), dispositions=value)
+        candidate = state["report"]["candidate"]
+        accepted = acceptance(state)
+        state.update(stage="published", expected_sha=candidate["commit"],
+                     publication_intent={"status": "confirmed", "candidate": candidate,
+                                         "acceptance": accepted},
+                     publications=[{"sha": candidate["commit"], "effect": "push" if changed else "no_change",
+                                    "confirmed_at": 100}])
+        read = TaskRead(req)
+        read.pr["head"]["sha"] = read.runs[0]["head_sha"] = read.checks[0]["head_sha"] = state["expected_sha"]
+        store, name = stored(state)
+        return state, read, store, name, Publisher(read)
+
+    def test_source_tasks_freeze_and_publish_descriptions_without_extra_passes(self):
+        for kind in ("self_review", "ci_fix", "pr_conflict_resolver", "pr_simplify", "pr_consistency"):
+            state, read, store, name, publisher = self.context(kind)
+            frozen = probe_target(read, 1, REVISION, 100, FIXTURE, loop_kind=kind)
+            self.assertEqual(state["request"]["metadata"], frozen["metadata"])
+            with self.subTest(kind=kind), patch("loop.live.time.time", return_value=100):
+                updated = advance(store, name, state, Mock(), read, publisher, 100)
+                self.assertEqual("published", updated["stage"])
+                self.assertEqual("confirmed", updated["task_intent"]["status"])
+                self.assertEqual(updated["report"]["dispositions"]["proposal"]["body"], read.pr["body"])
+                complete = advance(store, name, updated, Mock(), read, publisher, 100)
+            self.assertEqual("clean" if kind == "self_review" else "complete", complete["stage"])
+            self.assertEqual(state["iteration"], complete["iteration"])
+            self.assertEqual(state["publications"], complete["publications"])
+            self.assertEqual([(f"repos/{FIXTURE}/pulls/1", "PATCH",
+                               state["report"]["dispositions"]["proposal"])], publisher.posts)
+
+    def test_post_push_description_reconciles_before_CI_without_rechecking_old_failure_evidence(self):
+        state, read, store, name, publisher = self.context("ci_fix", changed=True)
+        read.diff = "The PR diff changed after publishing source fixes."
+        original = publisher.call
+        def interrupted(path, method="GET", data=None):
+            response = original(path, method, data)
+            if method == "PATCH":
+                raise APIError(503, "Lost PATCH response")
+            return response
+        with patch("loop.live.time.time", return_value=100), \
+                patch.object(publisher, "call", side_effect=interrupted), self.assertRaises(APIError):
+            advance(store, name, state, Mock(), read, publisher, 100)
+        pending = store.entries[name]
+        self.assertEqual("task_effect_intent", pending["stage"])
+        confirmed = advance(store, name, pending, Mock(), read, publisher, 200)
+        self.assertEqual("published", confirmed["stage"])
+        complete = advance(store, name, confirmed, Mock(), read, publisher, 200)
+        self.assertEqual("complete", complete["stage"])
+        self.assertEqual("CI_passed", complete["task_completion"]["outcome"])
+        self.assertEqual(1, len(publisher.posts))
+
+    def test_shared_proposals_preserve_metadata_guards_and_read_only_review(self):
+        state, read, store, name, publisher = self.context("pr_simplify", changed=True)
+        read.pr["body"] = "Human edit"
+        with patch("loop.live.time.time", return_value=100), self.assertRaisesRegex(Rejected, "metadata changed"):
+            advance(store, name, state, Mock(), read, publisher, 100)
+        self.assertEqual([], publisher.posts)
+        req = task_request("pr_review")
+        value = result(req)
+        value["proposal"] = state["report"]["dispositions"]["proposal"]
+        with self.assertRaises(Rejected):
+            semantic(value, req)
+        req = task_request("ci_fix")
+        req["metadata"] = state["request"]["metadata"]
+        value = result(req, "rerun")
+        value["proposal"] = state["report"]["dispositions"]["proposal"]
+        with self.assertRaisesRegex(Rejected, "source publication result"):
+            semantic(value, req)
 
 
 class NonCodeEffectsTests(unittest.TestCase):

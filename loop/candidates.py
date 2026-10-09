@@ -1,6 +1,6 @@
 """Semantic worker results; Git supplies candidate history and commit messages."""
 
-from loop.policy import digest, direct_inputs, exact, loop_kind, require
+from loop.policy import digest, direct_inputs, exact, loop_kind, require, source_effect
 
 PROTOCOL = "git-candidate-v1"
 TRAILER = "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"
@@ -25,7 +25,7 @@ def semantic(value, request):
     extra = {"copilot_review": {"findings"}, "pr_description": {"proposal"},
              "pr_review": {"comments"}, "pr_consistency": {"consistency"},
              "ci_fix": {"diagnoses", "rerun_run"}}.get(kind, set())
-    if kind == "copilot_review" and "proposal" in value:
+    if source_effect(request) and "proposal" in value:
         extra |= {"proposal"}
     exact(value, {"schema", "request_digest", "outcome"}
           | ({"input_identity"} if direct_inputs(request) else set()) | extra)
@@ -46,6 +46,13 @@ def semantic(value, request):
     elif kind == "pr_review":
         outcomes = {"comments", "no_change", "blocked"}
     require(value["outcome"] in outcomes, "Unknown worker outcome")
+    if source_effect(request) and "proposal" in value:
+        from loop.recommendations import proposal
+        proposal(value["proposal"])
+        require("metadata" in request and value["outcome"] not in {"blocked", "rerun"}
+                and value["proposal"]["title"] == request["metadata"]["title"]
+                and value["proposal"]["body"] != request["metadata"]["body"],
+                "Description correction requires a source publication result, changed body and unchanged title")
     if kind == "pr_description":
         from loop.recommendations import proposal
         proposal(value["proposal"])
@@ -87,15 +94,8 @@ def semantic(value, request):
             require((type(item["commit"]) is int and item["commit"] > 0)
                     if item["disposition"] == "fixed" else item["commit"] is None,
                     "Only fixed findings select a candidate commit")
-        require(("description_updated" in decisions) == ("proposal" in value),
+        require("description_updated" not in decisions or "proposal" in value,
                 "Description decisions require a matching proposal")
-        if "proposal" in value:
-            from loop.recommendations import proposal
-            proposal(value["proposal"])
-            require("metadata" in request and value["outcome"] != "blocked"
-                    and value["proposal"]["title"] == request["metadata"]["title"]
-                    and value["proposal"]["body"] != request["metadata"]["body"],
-                    "Review description correction requires changed body and unchanged title")
         require(value["outcome"] != "no_change" or decisions <= {"not_warranted", "description_updated"},
                 "False no-change")
         require(value["outcome"] != "blocked" or "blocked" in decisions, "Blocked without blocker")

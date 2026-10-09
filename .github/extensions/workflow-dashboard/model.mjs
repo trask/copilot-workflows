@@ -157,6 +157,7 @@ export function phaseSummary(record) {
                     ["waiting_ci", "waiting_review", "review_request_intent", "task_effect_intent"].includes(s.stage) ? "waiting" : "active",
         kind: r.loop_kind ?? "copilot_review", mode: r.mode ?? "unknown",
         outcome: s.task_completion?.outcome ?? null,
+        descriptionUpdated: s.task_intent?.kind === "metadata" && s.task_intent.status === "confirmed",
         reviewCommentCount: (s.task_completion?.comments ?? s.report?.dispositions?.comments)?.length ?? null,
         pendingReviewUrl: s.task_completion?.outcome === "pending_review" &&
             Number.isSafeInteger(s.task_completion.review_id) && s.task_completion.review_id > 0
@@ -228,8 +229,7 @@ function iteration(record, publication) {
         } : null,
         ci: s.ci ? { decision: s.ci.decision, sha: s.ci.sha, checks: s.ci.checks ?? [] } : null,
         task: s.task_completion ?? null,
-        proposal: ["copilot_review", "pr_description"].includes(r.loop_kind ?? "copilot_review")
-            ? s.report?.dispositions?.proposal ?? null : null,
+        proposal: s.report?.dispositions?.proposal ?? null,
         taskEffect: s.task_intent ? {
             kind: s.task_intent.kind, status: s.task_intent.status,
             reviewUrl: Number.isSafeInteger(s.task_intent.review_id) && s.task_intent.review_id > 0

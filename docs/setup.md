@@ -18,7 +18,7 @@ Only the central launch owner can dispatch. PR Reviewer accepts the owner's or a
 | --- | --- | --- |
 | Fix commits or base merge | Head repository for push, base repository for upstream API | Head Contents write, base PR read; Workflows write for workflow edits |
 | Description title/body PATCH | Base repository | Base Contents read and Pull requests write; no fork push permission |
-| Copilot feedback description correction | Base repository | Base Pull requests write, alongside the loop's existing head push and bot-thread permissions |
+| Source-task description correction | Base repository | Base Pull requests write, alongside the task's existing source publication permissions |
 | Viewer-owned pending review | Base repository | Base Contents read and Pull requests write; no fork push permission |
 | CI repair code push | Head repository for push, base repository for upstream API | Head Contents write, base PR/Checks/Statuses/Actions read |
 | Evidence-based failed-jobs rerun | Base repository | Base PR/Checks/Statuses/Actions read and Actions write; no head push permission |
@@ -37,7 +37,9 @@ Description rechecks the complete diff and original title/body before a title/bo
 
 Description results always contain a complete `proposal` object with `title` and `body`, including `no_change` and `blocked`. A no-change result copies the frozen `metadata` exactly and performs no metadata mutation. A null or missing proposal is rejected.
 
-Copilot feedback treats the frozen description as context, not a requirement. A finding that only exposes stale prose can use `description_updated` with `commit: null` and an optional complete `proposal` containing the unchanged title and corrected body. The worker must establish intended behavior independently and cannot use a prose edit to excuse a code defect. A description-only pass uses `no_change` with no source commit. After confirming the candidate head, publication checks the original title/body and confirms one guarded PATCH before bot-thread handling and fresh review. Metadata drift blocks instead of overwriting another edit, and lost PATCH responses reconcile without retrying.
+Every source-changing task treats the frozen description as context, not a requirement, and can return an optional complete `proposal` containing the unchanged title and corrected body. The worker must establish intended behavior independently and cannot use a prose edit to excuse a code defect. Source outcomes and completion rules stay unchanged: a description-only pass uses `clean` for self-review or `no_change` otherwise, with no empty commit or extra worker pass. After confirming the candidate head, publication checks the original title/body and confirms one guarded PATCH before continuing the task. Metadata drift blocks instead of overwriting another edit, and lost PATCH responses reconcile without retrying. Preflight no-work shortcuts and CI rerun-only results do not update descriptions.
+
+Copilot findings resolved by correcting stale prose use `description_updated` with `commit: null`. Description maintenance after source fixes requires no invented finding.
 
 All effects bind the verified result, request digest, generation, frozen target and durable intent. Drift, denial, ambiguous confirmation or a lost effect that cannot reconcile stops explicitly. All tasks retain cancellation, source/artifact provenance and historical read-only rules. A completed task is not the existing review loops' `clean` guarantee.
 
@@ -210,7 +212,7 @@ Fresh external findings can freeze another worker within the same phase regardle
 
 Both kinds allow five total model pipelines including the initial and failed admitted work, without an overall deadline. Active phases never replenish the worker budget. Frozen historical budgets stay unchanged; only a new authorized, quiescent phase gets fresh budgets. No sixth worker exists.
 
-Landing PRs, changing draft state, force pushes, top-level comments and human-rooted thread replies are not allowed. `pr_description` can update title/body; `copilot_review` can correct description errors identified in findings without changing the title. Only `pr_conflict_resolver` can publish a base merge. Explicit Copilot-review launch authorizes warranted commits and description corrections, original-bot replies, resolution, and then fresh review. Self-review authorizes commits only.
+Landing PRs, changing draft state, force pushes, top-level comments and human-rooted thread replies are not allowed. `pr_description` can update title/body; all source-changing tasks can correct inaccurate descriptions without changing the title. Draft review cannot update metadata. Only `pr_conflict_resolver` can publish a base merge. Explicit Copilot-review launch also authorizes original-bot replies, resolution, and then fresh review; no other source-changing task handles threads or requests external review.
 
 ## Native candidates and thread effects
 

@@ -17,13 +17,13 @@ const ROUTES = {
 
 export const TASK_EFFECTS = {
     copilot_review: "Fix valid Copilot findings in code or stale PR description text, then reply to and resolve bot threads. Push source fixes and repeat review until clean.",
-    self_review: "Review this PR and push fixes until review is clean.",
-    pr_conflict_resolver: "Merge the base branch into this PR and push the resolved merge. Does not merge the PR.",
-    ci_fix: "Investigate failing checks and push fixes. May rerun failed jobs.",
+    self_review: "Review this PR and push fixes until review is clean. Correct the description if needed.",
+    pr_conflict_resolver: "Merge the base branch into this PR and push the resolved merge. Correct the description if needed. Does not merge the PR.",
+    ci_fix: "Investigate failing checks and push fixes. Correct the description if needed. May rerun failed jobs.",
     pr_description: "Update the PR title and description if needed.",
-    pr_simplify: "Simplify this PR's code without changing behavior, then push changes.",
+    pr_simplify: "Simplify this PR's code without changing behavior, then push changes. Correct the description if needed.",
     pr_review: "Create a private GitHub review for you to inspect and submit.",
-    pr_consistency: "Match this PR's code to nearby patterns and repository instructions, then push fixes.",
+    pr_consistency: "Match this PR's code to nearby patterns and repository instructions, then push fixes. Correct the description if needed.",
 };
 
 export function checkedPull(pr, repo) {
@@ -273,7 +273,9 @@ export function completionPresentation(phase) {
                 : `${phase.reviewCommentCount} review comment${phase.reviewCommentCount === 1 ? "" : "s"} in a pending GitHub review. Only you can see it until you submit it.`,
         };
     }
-    if (phase.outcome === "no_change") return { label: "No changes", detail: "No changes were published." };
+    if (phase.outcome === "no_change") return phase.descriptionUpdated
+        ? { label: "Updated", detail: "The PR description was updated. No source changes were published." }
+        : { label: "No changes", detail: "No changes were published." };
     if (phase.outcome === "metadata_updated") return { label: "Updated", detail: "The PR title and description were updated." };
     if (phase.outcome === "CI_passed") return { label: "CI passed", detail: "CI passed for the recorded commit." };
     if (phase.outcome === "warnings_not_CI_clearance") return {
