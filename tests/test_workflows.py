@@ -120,6 +120,16 @@ class WorkflowTests(unittest.TestCase):
                                 text.index("Prepare fresh writable sandbox home"))
         self.assertIn("preserve AWF's `JAVA_TOOL_OPTIONS` proxy settings", worker)
 
+    def test_mise_installs_can_reach_version_metadata_and_sigstore_trust_roots(self):
+        root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+        worker = (root / "copilot-worker.md").read_text(encoding="utf-8")
+        network = worker.split("\nnetwork:\n", 1)[1].split("\ntools:", 1)[0]
+        declared = set(re.findall(r"^    - (\S+)$", network, re.MULTILINE))
+        self.assertLessEqual({"mise-versions.jdx.dev", "tuf-repo-cdn.sigstore.dev"}, declared)
+        compiled = (root / "copilot-worker.lock.yml").read_text(encoding="utf-8")
+        domains = re.search(r'\\"allowDomains\\":(\[.*?\])', compiled)[1]
+        self.assertEqual(declared, set(json.loads(domains.replace('\\"', '"'))))
+
     def test_launch_titles_identify_task_and_target_without_changing_tick_identity(self):
         coordinator = (Path(__file__).resolve().parents[1] /
                        ".github" / "workflows" / "coordinator.yml").read_text(encoding="utf-8")

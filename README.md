@@ -10,6 +10,8 @@ All eight kinds share `coordinator.yml`, one worker per pass, structural verific
 
 The shared Copilot worker uses `gpt-6.1-sol` with high reasoning effort. `.github/workflows/copilot-worker.md` sets the canonical `engine.model: gpt-6.1-sol` and passes `--reasoning-effort high` through `engine.args`. The gh-aw threat detector inherits the model and transport settings but keeps its default launcher and reasoning effort. Both pin Copilot CLI `1.0.93` and use the Responses wire API. `COPILOT_PROVIDER_MODEL_ID: gpt-6.1-sol` selects the CLI's built-in model configuration. GitHub's external Copilot PR reviews use GitHub-managed settings, not this worker configuration.
 
+The sandbox permits Mise's version metadata service at `mise-versions.jdx.dev` and Sigstore's trust-root service at `tuf-repo-cdn.sigstore.dev` so repository-pinned linters can install with TLS and artifact attestation verification enabled.
+
 | Display name | `loop_kind` | Completion |
 | --- | --- | --- |
 | Address Copilot feedback | `copilot_review` | Existing findings, warranted fixes, mandatory bot-thread handling and fresh external review until clean with passing exact-head CI |
