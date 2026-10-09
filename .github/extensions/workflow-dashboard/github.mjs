@@ -24,14 +24,14 @@ const REVIEW_FIELDS = `
     author { login __typename ... on Bot { id } }
     state submittedAt commit { oid }`;
 const REVIEW_FILTER = 'author: "copilot-pull-request-reviewer[bot]", states: [COMMENTED, APPROVED, CHANGES_REQUESTED]';
-const EVIDENCE_FIELDS = `
+const evidenceFields = (summaryCI) => `
     number headRefOid
     mergeRequirements { conditions { __typename result } }
     commits(last: 1) { nodes { commit { oid statusCheckRollup {
-        contexts(first: 100) {
+        ${summaryCI ? "state" : `contexts(first: 100) {
             pageInfo { hasNextPage endCursor }
             nodes { ${CHECK_FIELDS} }
-        }
+        }`}
     } } } }
     reviewThreads(first: 100) {
         pageInfo { hasNextPage endCursor }
@@ -369,7 +369,7 @@ export class GitHub {
         });
     }
 
-    async pullEvidence(repo, pulls) {
+    async pullEvidence(repo, pulls, { summaryCI = false } = {}) {
         configuredRepository(repo);
         if (pulls.some((pr) => !Number.isSafeInteger(pr.number) || pr.number < 1 || pr.number >= 100000000)) {
             throw new GitHubError("Invalid PR identity for live status.");
@@ -381,7 +381,7 @@ export class GitHub {
             try {
                 const { repository: data } = await this.graphql(`query($owner: String!, $name: String!) {
                     repository(owner: $owner, name: $name) {
-                        ${batch.map((pr) => `pr${pr.number}: pullRequest(number: ${pr.number}) { ${EVIDENCE_FIELDS} }`).join("\n")}
+                        ${batch.map((pr) => `pr${pr.number}: pullRequest(number: ${pr.number}) { ${evidenceFields(summaryCI)} }`).join("\n")}
                     }
                 }`, repo);
                 await Promise.all(batch.map(async (pr) => {
@@ -397,7 +397,8 @@ export class GitHub {
                         }
                         const threads = connection(detail.reviewThreads);
                         const reviews = connection(detail.reviews);
-                        const checks = commit.statusCheckRollup === null ? null : connection(commit.statusCheckRollup?.contexts);
+                        const checks = summaryCI || commit.statusCheckRollup === null
+                            ? null : connection(commit.statusCheckRollup?.contexts);
                         const pages = await Promise.allSettled([
                             this.completeConnection(repo, pr, threads, "threads"),
                             this.completeConnection(repo, pr, reviews, "reviews"),

@@ -61,11 +61,11 @@ const review = (changes = {}) => ({
 const reviewNode = (value, number = 12, head = sha) => ({
     ...value, pullRequest: { number, headRefOid: head, repository: { nameWithOwner: repo } },
 });
-function detail({ number = 12, head = sha, conflicts = "FAILED", checks = [], threads = [], reviews = [] } = {}) {
+function detail({ number = 12, head = sha, conflicts = "FAILED", checks = [], ciState = "SUCCESS", threads = [], reviews = [] } = {}) {
     return {
         number, headRefOid: head,
         mergeRequirements: { conditions: [{ __typename: "PullRequestMergeConflictStateCondition", result: conflicts }] },
-        commits: { nodes: [{ commit: { oid: head, statusCheckRollup: { contexts: connection(checks) } } }] },
+        commits: { nodes: [{ commit: { oid: head, statusCheckRollup: { state: ciState, contexts: connection(checks) } } }] },
         reviewThreads: connection(threads),
         reviews: connection(reviews),
     };
@@ -266,6 +266,33 @@ test("CI evidence distinguishes failures, pending and absent checks", () => {
     assert.throws(() => normalizeEvidence(incomplete, sha), /incomplete/);
     incomplete.commits.nodes[0].commit.oid = "f".repeat(40);
     assert.throws(() => normalizeEvidence(incomplete, sha), /PR head/);
+});
+
+test("CI display uses head-matched GitHub summaries without check counts", () => {
+    for (const [state, ci, disabled] of [
+        ["SUCCESS", "passing", true], ["FAILURE", "failing", false], ["ERROR", "failing", false],
+        ["PENDING", "pending", true], ["EXPECTED", "pending", true], ["UNRECOGNIZED", "unknown", true],
+    ]) {
+        const raw = detail({ ciState: state });
+        delete raw.commits.nodes[0].commit.statusCheckRollup.contexts;
+        const evidence = normalizeEvidence(raw, sha, { summaryCI: true });
+        assert.equal(evidence.ci, ci);
+        assert.equal(evidence.failing, null);
+        assert.equal(evidence.pending, null);
+        const presentation = actionEvidence({ sha, evidence }, "ci_fix");
+        assert.equal(presentation.disabled, disabled);
+        if (ci === "failing") assert.equal(presentation.detail, "GitHub reports failing checks on the latest PR commit.");
+        if (ci === "pending") assert.equal(presentation.detail, "GitHub reports pending checks for the latest PR commit.");
+        assert.throws(() => normalizeEvidence(raw, sha), /incomplete/);
+        assert.throws(() => normalizeEvidence(raw, "f".repeat(40), { summaryCI: true }), /different head/);
+    }
+    const missing = detail();
+    delete missing.commits.nodes[0].commit.statusCheckRollup.state;
+    assert.throws(() => normalizeEvidence(missing, sha, { summaryCI: true }), /summary is incomplete/);
+    missing.commits.nodes[0].commit.statusCheckRollup = null;
+    assert.equal(normalizeEvidence(missing, sha, { summaryCI: true }).ci, "none");
+    missing.commits.nodes[0].commit.oid = "f".repeat(40);
+    assert.throws(() => normalizeEvidence(missing, sha, { summaryCI: true }), /PR head/);
 });
 
 test("superseded CI failures and cancellations do not keep a passing task highlighted", () => {
@@ -512,7 +539,7 @@ test("fresh conflict, CI and Copilot preflight rejects unnecessary tasks after a
     ]) {
         const c = controller();
         c.github.pullEvidence = async () => new Map([[12, {
-            detail: detail({ checks: [check("FAILURE")], threads: [thread()] }),
+            detail: detail({ checks: [check("FAILURE")], ciState: "FAILURE", threads: [thread()] }),
         }]]);
         const snapshot = await c.canvas.refresh();
         assert.equal(taskPresentation(snapshot.prs[0], kind, true).disabled, false);
@@ -546,7 +573,7 @@ test("CI launch rechecks and rejects running, absent and unknown results before 
         [[check(null)], /unknown result/],
     ]) {
         const c = controller();
-        c.github.pullEvidence = async () => new Map([[12, { detail: detail({ checks: [check("FAILURE")] }) }]]);
+        c.github.pullEvidence = async () => new Map([[12, { detail: detail({ checks: [check("FAILURE")], ciState: "FAILURE" }) }]]);
         const snapshot = await c.canvas.refresh();
         assert.equal(taskPresentation(snapshot.prs[0], "ci_fix", true).disabled, false);
         c.github.pullEvidence = async () => new Map([[12, { detail: detail({ checks }) }]]);
@@ -554,6 +581,22 @@ test("CI launch rechecks and rejects running, absent and unknown results before 
         assert.equal(c.calls.filter((call) => typeof call === "object").length, 0);
         assert.equal(c.canvas.state().prs[0].dispatch, null);
     }
+});
+
+test("CI launch requests detailed evidence after a summary-only refresh", async () => {
+    const c = controller();
+    const modes = [];
+    c.github.pullEvidence = async (_repo, _prs, { summaryCI = false } = {}) => {
+        modes.push(summaryCI);
+        const raw = detail({ ciState: summaryCI ? "FAILURE" : "SUCCESS", checks: [check()] });
+        if (summaryCI) delete raw.commits.nodes[0].commit.statusCheckRollup.contexts;
+        return new Map([[12, { detail: raw }]]);
+    };
+    const snapshot = await c.canvas.refresh();
+    assert.equal(taskPresentation(snapshot.prs[0], "ci_fix", true).disabled, false);
+    await assert.rejects(c.canvas.launch({ target, kind: "ci_fix", confirmed: true }), /Nothing to fix/);
+    assert.deepEqual(modes, [true, false]);
+    assert.equal(c.calls.filter((call) => typeof call === "object").length, 0);
 });
 
 test("live evidence uses fresh batches of five PRs including the final partial batch", async () => {
@@ -608,6 +651,41 @@ test("live evidence batches PRs and paginates checks, threads and reviews before
     assert.equal(normalizeEvidence(result.get(12).detail, sha).copilotThreads, 1);
     assert.equal(normalizeEvidence(result.get(12).detail, sha).copilotBodies, 1);
     assert.equal(result.get(13).error, undefined);
+});
+
+test("summary CI reads stay fresh and still paginate threads and current review bodies", async () => {
+    const queries = [];
+    const first = detail({ ciState: "FAILURE", threads: [thread({ isResolved: true })],
+        reviews: [review({ id: "older", commit: { oid: "f".repeat(40) }, body: undefined })] });
+    delete first.commits.nodes[0].commit.statusCheckRollup.contexts;
+    first.reviewThreads.pageInfo = connection([], true).pageInfo;
+    first.reviews.pageInfo = connection([], true).pageInfo;
+    const github = new GitHub(async (args) => {
+        const query = args.find((arg) => arg.startsWith("query="));
+        queries.push(query);
+        assert.doesNotMatch(query, /contexts\(|checkSuite|databaseId/);
+        if (query.includes("nodes(ids:")) return response({ data: {
+            repository: { nameWithOwner: repo },
+            nodes: [reviewNode(review({ body: "Fix the missing input guard." }))],
+        } });
+        if (!query.includes("after:")) {
+            assert.match(query, /statusCheckRollup\s*\{\s*state\s*\}/);
+            return response({ data: { repository: { pr12: structuredClone(first) } } });
+        }
+        const more = query.includes("reviewThreads")
+            ? { number: 12, headRefOid: sha, reviewThreads: connection([thread()]) }
+            : { number: 12, headRefOid: sha, reviews: connection([review({ body: undefined })]) };
+        return response({ data: { repository: { pullRequest: more } } });
+    });
+    for (let refresh = 0; refresh < 2; refresh++) {
+        const result = await github.pullEvidence(repo, [{ number: 12, sha }], { summaryCI: true });
+        assert.equal(result.get(12).error, undefined);
+        const evidence = normalizeEvidence(result.get(12).detail, sha, { summaryCI: true });
+        assert.equal(evidence.ci, "failing");
+        assert.equal(evidence.copilotThreads, 1);
+        assert.equal(evidence.copilotBodies, 1);
+    }
+    assert.equal(queries.length, 8);
 });
 
 test("only submitted current-head verified Copilot reviews require body downloads", async () => {
@@ -777,7 +855,7 @@ test("refresh preserves previous PR evidence and workflow state until the replac
     assert.equal(during.pauseReason, previous.pauseReason);
     assert.equal(taskPresentation(during.prs[0], "pr_conflict_resolver", true).label, "No conflicts");
     assert.equal(taskPresentation(during.prs[0], "ci_fix", true).label, "CI passing");
-    release(new Map([[12, { detail: detail({ head: nextSha, checks: [check("FAILURE")] }) }]]));
+    release(new Map([[12, { detail: detail({ head: nextSha, checks: [check("FAILURE")], ciState: "FAILURE" }) }]]));
     const updated = await pending;
     assert.equal(updated.loading, false);
     assert.equal(updated.prs[0].title, "Updated PR title");

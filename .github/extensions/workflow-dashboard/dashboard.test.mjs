@@ -1682,7 +1682,8 @@ test("each task retains its indicator through active or waiting work and removes
 test("live action hints use amber, explain effects and disable tasks without actionable evidence", async () => {
     const state = rendererState();
     state.prs[0].evidence = {
-        sha: state.prs[0].sha, conflicts: "yes", ci: "failing", failing: 2, copilotThreads: 1, copilotBodies: 0,
+        sha: state.prs[0].sha, conflicts: "yes", ci: "failing", failing: null, pending: null,
+        copilotThreads: 1, copilotBodies: 0,
     };
     const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
     const buttons = () => taskButtons(nodes.get("prs").firstChild);
@@ -1695,6 +1696,7 @@ test("live action hints use amber, explain effects and disable tasks without act
     }
     assert.equal(button("pr_conflict_resolver")["aria-label"], "Resolve conflicts: Conflicts");
     assert.equal(button("ci_fix")["aria-label"], "Fix CI: CI failing");
+    assert.equal(tooltipFor(button("ci_fix")).children[1].textContent, "GitHub reports failing checks on the latest PR commit.");
     assert.equal(button("copilot_review")["aria-label"], "Address Copilot feedback: Open Copilot threads");
     Object.assign(state.prs[0].evidence, { conflicts: "no", ci: "passing", copilotThreads: 0 });
     renderer.render(state);
@@ -1709,7 +1711,7 @@ test("live action hints use amber, explain effects and disable tasks without act
     Object.assign(state.prs[0].evidence, { ci: "pending" });
     renderer.render();
     assert.equal(button("ci_fix").disabled, true);
-    assert.match(tooltipFor(button("ci_fix")).children[1].textContent, /CI is still running/);
+    assert.equal(tooltipFor(button("ci_fix")).children[1].textContent, "GitHub reports pending checks for the latest PR commit.");
     Object.assign(state.prs[0].evidence, { ci: "none" });
     renderer.render();
     assert.equal(button("ci_fix").disabled, true);

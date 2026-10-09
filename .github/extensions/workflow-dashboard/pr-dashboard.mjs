@@ -155,7 +155,7 @@ export class PrDashboard extends Dashboard {
                 this.prWarnings = warnings;
             }
             const [liveStatus] = await Promise.allSettled([
-                this.github.pullEvidence(this.repository, prs.filter((pr) => pr.mine)),
+                this.github.pullEvidence(this.repository, prs.filter((pr) => pr.mine), { summaryCI: true }),
                 workflow,
             ]);
             for (const pr of prs) {
@@ -164,7 +164,7 @@ export class PrDashboard extends Dashboard {
                 try {
                     if (!read?.detail) throw new Error(read?.error ??
                         (liveStatus.status === "rejected" ? liveStatus.reason.message : "Live action status is missing."));
-                    pr.evidence = normalizeEvidence(read.detail, pr.sha);
+                    pr.evidence = normalizeEvidence(read.detail, pr.sha, { summaryCI: true });
                 } catch (error) {
                     pr.evidence = { sha: pr.sha, error: error.message };
                     warnings.push(`${pr.target}: ${error.message}`);

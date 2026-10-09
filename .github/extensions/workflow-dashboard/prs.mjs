@@ -101,19 +101,16 @@ function hasCopilotBodyFeedback(body) {
     return !noFindings.test(summary);
 }
 
-export function normalizeEvidence(detail, sha) {
-    if (detail?.headRefOid !== sha || !Object.hasOwn(detail, "mergeRequirements") ||
-        detail.mergeRequirements !== null && !Array.isArray(detail.mergeRequirements?.conditions)) {
-        throw new Error("Live conflict status is incomplete or belongs to a different head.");
+function ciEvidence(rollup, summaryCI) {
+    if (summaryCI) {
+        let ci = "unknown";
+        if (rollup === null) ci = "none";
+        else if (typeof rollup?.state !== "string") throw new Error("Live CI summary is incomplete.");
+        else if (rollup.state === "SUCCESS") ci = "passing";
+        else if (["FAILURE", "ERROR"].includes(rollup.state)) ci = "failing";
+        else if (["PENDING", "EXPECTED"].includes(rollup.state)) ci = "pending";
+        return { failing: null, pending: null, ci };
     }
-    const conditions = detail.mergeRequirements?.conditions.filter((item) =>
-        item?.__typename === "PullRequestMergeConflictStateCondition") ?? [];
-    if (conditions.length > 1) throw new Error("Live conflict status contains duplicate file-conflict conditions.");
-    const conflicts = { FAILED: "yes", PASSED: "no" }[conditions[0]?.result] ?? "unknown";
-    const commit = detail.commits?.nodes?.[0]?.commit;
-    if (detail.commits?.nodes?.length !== 1 || commit?.oid !== sha ||
-        !Object.hasOwn(commit, "statusCheckRollup")) throw new Error("Live CI status does not match the PR head.");
-    const rollup = commit.statusCheckRollup;
     const checks = rollup === null ? [] : rollup?.contexts?.nodes;
     if (!Array.isArray(checks) || rollup !== null && rollup.contexts?.pageInfo?.hasNextPage !== false) {
         throw new Error("Live CI status is incomplete.");
@@ -153,6 +150,25 @@ export function normalizeEvidence(detail, sha) {
         else if (["EXPECTED", "PENDING"].includes(check.state)) pending++;
         else if (check.state !== "SUCCESS") unknown = true;
     }
+    return {
+        failing, pending,
+        ci: failing ? "failing" : pending ? "pending" : !total ? "none" : unknown ? "unknown" : "passing",
+    };
+}
+
+export function normalizeEvidence(detail, sha, { summaryCI = false } = {}) {
+    if (detail?.headRefOid !== sha || !Object.hasOwn(detail, "mergeRequirements") ||
+        detail.mergeRequirements !== null && !Array.isArray(detail.mergeRequirements?.conditions)) {
+        throw new Error("Live conflict status is incomplete or belongs to a different head.");
+    }
+    const conditions = detail.mergeRequirements?.conditions.filter((item) =>
+        item?.__typename === "PullRequestMergeConflictStateCondition") ?? [];
+    if (conditions.length > 1) throw new Error("Live conflict status contains duplicate file-conflict conditions.");
+    const conflicts = { FAILED: "yes", PASSED: "no" }[conditions[0]?.result] ?? "unknown";
+    const commit = detail.commits?.nodes?.[0]?.commit;
+    if (detail.commits?.nodes?.length !== 1 || commit?.oid !== sha ||
+        !Object.hasOwn(commit, "statusCheckRollup")) throw new Error("Live CI status does not match the PR head.");
+    const ci = ciEvidence(commit.statusCheckRollup, summaryCI);
     const threads = detail.reviewThreads;
     if (!Array.isArray(threads?.nodes) || threads.pageInfo?.hasNextPage !== false) {
         throw new Error("Live Copilot thread status is incomplete.");
@@ -180,10 +196,7 @@ export function normalizeEvidence(detail, sha) {
         }
         if (review.state === "CHANGES_REQUESTED" || hasCopilotBodyFeedback(review.body)) copilotBodies++;
     }
-    return {
-        sha, conflicts, copilotThreads, copilotBodies, failing, pending,
-        ci: failing ? "failing" : pending ? "pending" : !total ? "none" : unknown ? "unknown" : "passing",
-    };
+    return { sha, conflicts, copilotThreads, copilotBodies, ...ci };
 }
 
 export function actionEvidence(pr, kind) {
@@ -202,9 +215,13 @@ export function actionEvidence(pr, kind) {
     }
     if (kind === "ci_fix") {
         if (evidence.ci === "failing") return result("CI failing",
-            `${evidence.failing} failing ${evidence.failing === 1 ? "check" : "checks"} on the latest PR commit.`, "needed");
+            Number.isSafeInteger(evidence.failing) && evidence.failing > 0
+                ? `${evidence.failing} failing ${evidence.failing === 1 ? "check" : "checks"} on the latest PR commit.`
+                : "GitHub reports failing checks on the latest PR commit.", "needed");
         if (evidence.ci === "passing") return result("CI passing", "CI passed for the latest PR commit. Nothing to fix.", "idle", true);
-        if (evidence.ci === "pending") return result("CI pending", "CI is still running. No failing checks yet.", "idle", true);
+        if (evidence.ci === "pending") return result("CI pending", evidence.failing === 0
+            ? "CI is still running. No failing checks yet."
+            : "GitHub reports pending checks for the latest PR commit.", "idle", true);
         if (evidence.ci === "none") return result("No CI results", "No CI results yet for the latest PR commit.", "idle", true);
         return result("Status unknown", "CI has an unknown result. Refresh to check CI before running a repair.", "unknown", true);
     }
