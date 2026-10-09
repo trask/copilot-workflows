@@ -1251,7 +1251,7 @@ function rendererState(repository = "example/project") {
     };
 }
 
-test("the run log exposes exact task changes across repositories regardless of PR filters", async () => {
+test("compact run-log rows show PR titles and exact changes regardless of author or search filters", async () => {
     const state = rendererState();
     state.runLogLoadedAt = 2000000;
     const pushed = recentTaskLog([record(fixture({ stage: "clean", publications: [
@@ -1259,23 +1259,30 @@ test("the run log exposes exact task changes across repositories regardless of P
             candidate: { parent: sha("a"), commits: [
                 { commit: sha("b"), subject: "First" }, { commit: sha("c"), subject: "Second" },
             ] } },
-    ] }, { repo: "example/other", loop_kind: "self_review", launch_run: { id: 202 } }))],
+    ] }, { loop_kind: "self_review", launch_run: { id: 202 } }))],
     [], 2000000).entries[0];
-    state.runLog = [pushed, ...recentTaskLog([], [launch({ conclusion: "failure" })], 2000000).entries];
+    state.runLog = [pushed, ...recentTaskLog([], [launch({ conclusion: "failure" })], 2000000).entries]
+        .map((task) => ({ ...task, number: 12, title: state.prs[0].title }));
     const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
     nodes.get("search").value = "no matching PR";
     renderer.render();
     assert.equal(nodes.get("prs").firstChild.textContent, "No open PRs match these filters.");
     assert.equal(nodes.get("run-log").children.length, 2);
     const row = nodes.get("run-log").firstChild;
-    assert.equal(row.firstChild.firstChild.textContent, "example/other#12");
-    const links = row.children.find((node) => node.className === "links");
+    assert.equal(row.firstChild.firstChild.textContent, "#12 PR in example/project");
+    assert.equal(row.children.length, 2);
+    assert.equal(row.className, "run-log-entry");
+    const links = row.children[1];
     const changes = links.children.find((node) => node.textContent.startsWith("Changes"));
-    assert.equal(changes.href, `https://github.com/example/other/pull/12/changes/${sha("a")}..${sha("c")}`);
+    assert.equal(changes.href, `https://github.com/example/project/pull/12/changes/${sha("a")}..${sha("c")}`);
     assert.match(changes.textContent, /2 commits/);
     const failed = nodes.get("run-log").children[1];
     assert.equal(failed.firstChild.children[1].textContent, "Launch failure");
-    assert.ok(failed.children.some((node) => /Publication is not confirmed/.test(node.textContent)));
+    assert.equal(failed.children.length, 2);
+    assert.equal(failed.children[1].children.length, 2);
+    assert.equal(failed.children[1].children.some((node) => node.tag === "a"), false);
+    const styles = await readFile(new URL("styles.css", import.meta.url), "utf8");
+    assert.match(styles, /\.run-log-entry \{ padding: 8px 0;/);
     state.runLogError = "History read failed";
     renderer.render();
     assert.equal(nodes.get("run-log-error").hidden, false);
@@ -1995,6 +2002,7 @@ test("repository selection shows loading before its response and hides old cards
     assert.equal(nodes.get("prs").children.length, 1);
     assert.equal(nodes.get("prs").firstChild.textContent, "Loading open PRs for example/other...");
     assert.equal(nodes.get("troubleshooting-runs").firstChild.textContent, "Loading runs for example/other...");
+    assert.equal(nodes.get("run-log").firstChild.textContent, "Loading run log for example/other...");
     assert.equal(nodes.get("pr-count").textContent, "Loading...");
     assert.equal(nodes.get("refresh").textContent, "Loading...");
     for (const id of ["repo", "refresh", "auto"]) assert.equal(nodes.get(id).disabled, true);

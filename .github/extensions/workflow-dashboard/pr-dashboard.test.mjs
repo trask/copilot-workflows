@@ -167,6 +167,68 @@ test("repository config is small, has the requested default, and bounds reads an
     assert.throws(() => dashboardPath("other/repo"));
 });
 
+test("run-log rows use the selected repo's PR titles, including closed PRs, and keep launches separate", async () => {
+    const otherRepo = REPOSITORIES[1];
+    const c = controller({ records: [
+        checkpoint({ stage: "complete" }),
+        checkpoint({ stage: "complete", phase: "c".repeat(32) }, {
+            request_id: "c".repeat(32), launch_run: { id: 11 },
+        }),
+        checkpoint({ stage: "complete", phase: "d".repeat(32) }, {
+            pr: 13, request_id: "d".repeat(32), launch_run: { id: 12 },
+        }),
+        checkpoint({ stage: "complete", phase: "e".repeat(32) }, {
+            repo: otherRepo, head_repo: otherRepo, pr: 14, request_id: "e".repeat(32), launch_run: { id: 13 },
+        }),
+    ] });
+    const get = c.github.get;
+    let titleReads = 0;
+    c.github.get = async (path) => {
+        if (path === `repos/${repo}/pulls/13`) {
+            titleReads++;
+            return { data: pull({ number: 13, state: "closed", merged: true, title: "Closed PR title" }) };
+        }
+        return get(path);
+    };
+    const first = await c.canvas.refresh();
+    assert.equal(first.runLog.length, 3);
+    assert.deepEqual(first.runLog.map((task) => [task.number, task.title]), [
+        [12, "Handle <untrusted> input"], [12, "Handle <untrusted> input"], [13, "Closed PR title"],
+    ]);
+    assert.equal(c.calls.some((path) => typeof path === "string" && path.includes("/pulls/12")), false);
+    assert.equal(titleReads, 1);
+    assert.deepEqual(first.runLogWarnings, []);
+    c.setPulls([pull({ title: "Updated open PR title" })]);
+    const next = await c.canvas.refresh();
+    assert.equal(next.runLog[0].title, "Updated open PR title");
+    assert.equal(titleReads, 1);
+    c.setPulls([pull({
+        number: 14, title: "Other repository PR",
+        base: { repo: { full_name: otherRepo } }, head: { sha, repo: { full_name: otherRepo } },
+    })]);
+    const selected = await c.canvas.selectRepository(otherRepo);
+    assert.equal(selected.runLog.length, 1);
+    assert.equal(selected.runLog[0].number, 14);
+    assert.equal(selected.runLog[0].title, "Other repository PR");
+});
+
+test("missing run-log titles warn without hiding tasks or disabling unrelated controls, and retry on refresh", async () => {
+    const c = controller({ records: [
+        checkpoint({ stage: "complete" }, { pr: 13 }),
+    ] });
+    const first = await c.canvas.refresh();
+    assert.equal(first.runLog[0].number, 13);
+    assert.equal(first.runLog[0].title, null);
+    assert.match(first.runLogWarnings.join(" "), /PR title unavailable/);
+    assert.equal(first.prs[0].actionBlock, null);
+    const get = c.github.get;
+    c.github.get = async (path) => path === `repos/${repo}/pulls/13`
+        ? { data: pull({ number: 13, state: "closed", title: "Recovered title" }) } : get(path);
+    const recovered = await c.canvas.refresh();
+    assert.equal(recovered.runLog[0].title, "Recovered title");
+    assert.deepEqual(recovered.runLogWarnings, []);
+});
+
 test("dashboard decoding validates shape, version, Git identity, UTF-8 and size", () => {
     assert.deepEqual(decodeDashboard(file(state())), state());
     for (const invalid of [
