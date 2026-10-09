@@ -7,8 +7,6 @@ let busy = false;
 let loadingRepository = null;
 let stateVersion = 0;
 let runLogRequest = null;
-let expanded = new Set();
-const histories = new Map();
 let inViewport = true;
 let activeTooltip = null;
 let tooltipId = 0;
@@ -166,7 +164,6 @@ function renderPulls() {
 
 function render() {
     if (!state) return;
-    for (const key of histories.keys()) if (!key.startsWith(`${state.snapshot}:`)) histories.delete(key);
     $("auto").checked = state.auto;
     $("pause").hidden = !state.pauseReason;
     $("pause").textContent = state.pauseReason ?? "";
@@ -187,7 +184,6 @@ function render() {
     renderLoading();
     renderPulls();
     renderRunLog();
-    renderTroubleshooting();
 }
 
 function renderRunLog() {
@@ -238,50 +234,6 @@ function renderRunLog() {
     }
     if (!log.children.length) log.append(element("p", loading ? "Loading run log..." : state.runLogLoadedAt
         ? "No PR tasks ran in the past 24 hours." : "Select Load run log to view the past 24 hours.", "empty"));
-}
-
-function renderTroubleshooting() {
-    const runs = $("troubleshooting-runs");
-    runs.replaceChildren();
-    if (loadingRepository) {
-        runs.append(element("p", `Loading runs for ${loadingRepository}...`, "empty"));
-        return;
-    }
-    const entries = new Map(state.phases.filter((phase) => phase.target.startsWith(`${state.repository}#`))
-        .map((phase) => [phase.target, { target: phase.target, url: phase.url, phase }]));
-    for (const pr of state.prs) {
-        if (pr.phase || pr.dispatch || pr.actionBlock) entries.set(pr.target, pr);
-    }
-    for (const pr of [...entries.values()].sort((a, b) =>
-        Number(Boolean(b.dispatch)) - Number(Boolean(a.dispatch)) ||
-        (b.phase?.started ?? 0) - (a.phase?.started ?? 0))) {
-        const row = element("article", null, "run");
-        const heading = element("div", null, "row");
-        heading.append(link(pr.title ? `#${pr.number} ${pr.title}` : pr.target, pr.url));
-        if (pr.phase) heading.append(element("span",
-            `${KIND_LABELS[pr.phase.kind] ?? words(pr.phase.kind)} · ${words(pr.phase.stage)}`, "muted"));
-        row.append(heading);
-        if (pr.dispatch) {
-            const message = element("p", pr.dispatch.message, "notice");
-            if (pr.dispatch.runUrl) message.append(document.createTextNode(" "), link("View launch", pr.dispatch.runUrl));
-            row.append(message);
-        } else if (pr.actionBlock) row.append(element("p", pr.actionBlock, "muted"));
-        if (pr.phase) row.append(phaseCard(pr.phase, pr.sha));
-        runs.append(row);
-    }
-    if (!runs.children.length) runs.append(element("p", state.loadedAt
-        ? "No saved runs for this repository." : "Runs have not been loaded yet.", "empty"));
-    const failures = $("failures");
-    failures.replaceChildren();
-    $("failures-count").textContent = state.failures.length;
-    for (const run of state.failures) {
-        const row = element("article", null, "run");
-        const heading = element("div", null, "row");
-        heading.append(link(run.title || run.name, run.url), element("span", "Failed", "badge attention"));
-        row.append(heading, element("p", `${date(run.created)}${run.targets.length ? ` · ${run.targets.join(", ")}` : " · no matching task checkpoint"}`, "muted"));
-        failures.append(row);
-    }
-    if (!failures.children.length) failures.append(element("p", state.loadedAt ? "No failed coordinator dispatches found." : "Coordinator failures have not been loaded yet.", "empty"));
 }
 
 async function taskAction(pr, kind, cancel = false) {
@@ -392,190 +344,6 @@ function prCard(pr) {
     return card;
 }
 
-function phaseCard(phase, currentSha) {
-    const card = element("details", null, "card");
-    const summary = element("summary", "Run details");
-    const detail = element("div", null, "detail");
-    const meta = element("div", null, "meta");
-    for (const value of [
-        KIND_LABELS[phase.kind] ?? words(phase.kind),
-        `Head ${short(phase.sha)}`, `Started ${date(phase.started)}`,
-        ...(["active", "waiting"].includes(phase.category) && Number.isFinite(phase.deadline) ? [
-            `Deadline ${date(phase.deadline)}${phase.deadline < Date.now() ? " · overdue" : ""}`,
-        ] : []),
-    ]) meta.append(element("span", value));
-    detail.append(meta);
-    const completion = completionPresentation(phase);
-    if (completion) {
-        if (currentSha && phase.sha && phase.sha !== currentSha) {
-            detail.append(element("p", "Result from a previous PR commit.", "muted"));
-        }
-        detail.append(element("p", completion.detail));
-    }
-    if (phase.historical) detail.append(element("p", "Historical protocol evidence. Not an active generic phase.", "reason"));
-    if (phase.unknownStage) detail.append(element("p", "Unknown controller stage. Inspect its recorded evidence.", "reason"));
-    if (phase.error) detail.append(element("p", phase.error, "error"));
-    const timeline = element("div");
-    detail.append(timeline);
-    card.append(summary, detail);
-    const renderHistory = async () => {
-        const key = `${state.snapshot}:${phase.target}`;
-        if (!histories.has(key)) {
-            timeline.replaceChildren(element("p", "Loading saved history...", "muted"));
-            const pending = api(`/api/history?target=${encodeURIComponent(phase.target)}`);
-            histories.set(key, pending);
-        }
-        try {
-            const history = await histories.get(key);
-            if (history.snapshot !== state.snapshot || !card.isConnected) return;
-            timeline.replaceChildren();
-            for (const message of history.warnings) timeline.append(element("p", message, "notice"));
-            for (const item of history.phases) {
-                if (history.phases.length > 1) timeline.append(element("h3",
-                    `${item.current ? "Latest" : "Previous"} run · ${KIND_LABELS[item.kind] ?? words(item.kind)} · ${date(item.started)}`, "phase-heading"));
-                if (item.gaps.length) timeline.append(element("p", `No saved worker evidence for consumed iteration(s) ${item.gaps.join(", ")}.`, "notice"));
-                if (item.missingPublications.length) timeline.append(element("p", "Some published requests have no retained iteration snapshot. See recorded checkpoint evidence.", "notice"));
-                for (const publication of item.orphanPublications) {
-                    const saved = element("p", null, "links");
-                    saved.append(publication.effect === "push"
-                        ? link(`Recorded publication ${short(publication.sha)}`, publication.url)
-                        : element("span", "Recorded no-change publication. No commit pushed."));
-                    saved.append(element("span", date(publication.confirmed), "muted"));
-                    timeline.append(saved);
-                }
-                const list = element("div", null, "timeline");
-                for (const iteration of item.iterations) list.append(iterationCard(iteration));
-                for (const transition of item.transitions) list.append(element("p", `${words(transition.stage)} · ${transition.reason ?? "No worker dispatched"} · ${date(transition.frozen)}`, "muted"));
-                timeline.append(list);
-            }
-        } catch (failure) {
-            histories.delete(key);
-            timeline.replaceChildren(element("p", failure.message, "error"));
-            const retry = element("button", "Retry loading history");
-            retry.addEventListener("click", renderHistory);
-            timeline.append(retry);
-        }
-    };
-    card.addEventListener("toggle", () => {
-        if (card.open) {
-            expanded.add(phase.id);
-            if ($("troubleshooting").open) void renderHistory();
-        } else expanded.delete(phase.id);
-    });
-    if (expanded.has(phase.id)) card.open = true;
-    return card;
-}
-
-function iterationCard(item) {
-    const node = element("article", null, "iteration");
-    node.append(element("h3", `Pass ${item.number} · ${item.kind === "pr_review" && item.outcome === "no_change" ? "No findings" : words(item.outcome ?? item.stage)}`));
-    node.append(element("p", `Started ${date(item.dispatched)} · Worker ${item.workerConclusion ?? "not complete or not recorded"}`, "meta"));
-    const links = element("div", null, "links");
-    links.append(link(`Input ${short(item.inputSha)}`, item.inputUrl));
-    if (item.workerUrl) links.append(link("Worker log", item.workerUrl));
-    if (item.verifierUrl) links.append(link("Output verification", item.verifierUrl));
-    if (item.coordinatorUrl) links.append(link("Coordinator", item.coordinatorUrl));
-    node.append(links, element("p", `Output verification: ${words(item.verification)}. This checks saved outputs, not review quality or passing tests.`, "muted"));
-    if (item.publication) {
-        const published = element("div", null, "links");
-        if (item.publication.effect === "push") published.append(link(`Published ${short(item.publication.sha)}`, item.publication.url), link("Compare changes", item.publication.compareUrl));
-        else published.append(element("span", "No change. No commit pushed."));
-        published.append(element("span", date(item.publication.confirmed), "muted"));
-        node.append(published);
-        for (const commit of item.publication.commits ?? []) {
-            const row = element("div", null, "links");
-            row.append(link(`${short(commit.sha)} ${commit.subject}`, commit.url));
-            if (commit.parents?.length === 2) {
-                commit.parents.forEach((parent, index) => row.append(link(
-                    `${index === 0 ? "Head" : "Base"} parent ${short(parent.sha)}`, parent.url)));
-            }
-            node.append(row);
-        }
-    } else if (item.candidateSha) node.append(element("p", `Candidate ${short(item.candidateSha)}. Publication not confirmed.`, "muted"));
-    if (item.changedPaths.length) {
-        const paths = element("ul", null, "paths");
-        for (const path of item.changedPaths) {
-            const li = element("li");
-            li.append(element("code", path));
-            paths.append(li);
-        }
-        node.append(paths);
-    }
-    if (item.reason) node.append(element("p", `Controller result: ${item.reason}`, "muted"));
-    if (item.error) node.append(element("p", item.error, "error"));
-    if (item.task && item.task.outcome !== item.outcome) {
-        node.append(element("p", `Recorded outcome: ${words(item.task.outcome)}.`));
-    }
-    if (item.proposal) {
-        node.append(element("p", "Saved title/body proposal. Effect confirmation is recorded separately.", "muted"),
-            element("p", item.proposal.title), element("pre", item.proposal.body));
-    }
-    if (item.taskEffect) {
-        node.append(element("p", `${words(item.taskEffect.kind)}: ${words(item.taskEffect.status)}.`));
-        if (item.taskEffect.reviewUrl) node.append(link("Pending review", item.taskEffect.reviewUrl));
-    }
-    for (const comment of item.reviewComments ?? []) {
-        const row = element("div", null, "finding");
-        row.append(element("code", `${comment.path}:${comment.line}`),
-            element("p", comment.body, "finding-text"));
-        node.append(row);
-    }
-    for (const rerun of item.ciReruns ?? []) {
-        node.append(link(`Failed-jobs rerun ${rerun.runId}, attempt ${rerun.attempt ?? "not confirmed"}, ${rerun.status}`, rerun.url));
-    }
-    for (const warning of item.ciWarnings ?? []) node.append(element("p", `Unrelated CI warning: ${warning.analysis}`, "notice"));
-    for (const diagnosis of item.diagnoses ?? []) node.append(element("p", `${diagnosis.key}: ${diagnosis.decision}. ${diagnosis.analysis}`));
-    for (const report of item.consistency ?? []) {
-        node.append(element("p", `${report.path}: ${report.classification}. ${report.explanation}`),
-            element("p", (report.citations ?? []).join("\n"), "muted"));
-    }
-    if (item.review) {
-        const review = element("div", null, "links");
-        review.append(link(`Review: ${words(item.review.decision)}`, item.review.url));
-        item.review.inlineUrls.forEach((url, index) => review.append(link(`Finding ${index + 1}`, url)));
-        node.append(review);
-    }
-    if (item.ci) {
-        node.append(element("p", `Recorded CI: ${words(item.ci.decision)} at ${short(item.ci.sha)}`));
-        for (const check of item.ci.checks) {
-            const row = element("div", null, "check");
-            row.append(element("span", check.name), element("code", check.decision));
-            node.append(row);
-        }
-    }
-    if (item.findings.length) {
-        const details = element("details");
-        details.append(element("summary", `${item.findings.length} existing review comment${item.findings.length === 1 ? "" : "s"} and responses`));
-        for (const finding of item.findings) {
-            const row = element("div", null, "finding");
-            row.append(link(finding.path ?? "Review finding", finding.url),
-                element("p", finding.body, "finding-text"));
-            if (finding.disposition) row.append(element("p", `${words(finding.disposition)}: ${finding.reason ?? ""}`));
-            if (finding.upsides) row.append(element("p", `Upsides: ${finding.upsides}`));
-            if (finding.downsides) row.append(element("p", `Downsides: ${finding.downsides}`));
-            if (finding.commitUrl) row.append(link("Published fix", finding.commitUrl));
-            for (const effect of finding.effects ?? []) {
-                row.append(element("p", `Thread ${words(effect.status)}. Reply ${words(effect.reply)}. Resolution ${words(effect.resolution)}.`));
-                if (effect.reason) row.append(element("p", effect.reason, "muted"));
-                if (effect.replyUrl) row.append(link("Confirmed reply", effect.replyUrl));
-            }
-            details.append(row);
-        }
-        node.append(details);
-    }
-    if (item.artifacts.length) {
-        const details = element("details");
-        details.append(element("summary", "Downloads"));
-        for (const artifact of item.artifacts) {
-            const p = element("p", null, "links");
-            p.append(link(`${artifact.name}${artifact.expired ? " · expired" : ""}`, artifact.url));
-            details.append(p);
-        }
-        node.append(details);
-    }
-    return node;
-}
-
 async function load(path, repository = null) {
     if (busy) return;
     setBusy(true, repository);
@@ -583,7 +351,6 @@ async function load(path, repository = null) {
     if (repository) {
         renderPulls();
         renderRunLog();
-        renderTroubleshooting();
     }
     const version = stateVersion;
     let polling = false;
@@ -601,7 +368,6 @@ async function load(path, repository = null) {
     let failureMessage = null;
     try {
         state = await api(path, "POST", repository ? { repo: repository } : undefined);
-        histories.clear();
     } catch (failure) {
         failureMessage = failure.message;
     } finally {
@@ -636,9 +402,6 @@ async function loadRunLog() {
 
 $("refresh").addEventListener("click", refresh);
 $("load-run-log").addEventListener("click", loadRunLog);
-$("troubleshooting").addEventListener("toggle", () => {
-    if (state && $("troubleshooting").open) renderTroubleshooting();
-});
 $("auto").addEventListener("change", async () => {
     const version = stateVersion;
     try {

@@ -6,9 +6,9 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { runInNewContext } from "node:vm";
 import { request as httpRequest } from "node:http";
-import { GitHub, GitHubError, CENTRAL, FAILED_COORDINATORS, parseResponse, runGh } from "./github.mjs";
+import { GitHub, GitHubError, CENTRAL, parseResponse, runGh } from "./github.mjs";
 import { Checkpoints, runGit } from "./state.mjs";
-import { phaseSummary, targetHistory, actionSummary, failedActionSummary, commitLink, compareLink, recentTaskLog, RUN_LOG_WINDOW } from "./model.mjs";
+import { phaseSummary, targetHistory, actionSummary, commitLink, compareLink, recentTaskLog, RUN_LOG_WINDOW } from "./model.mjs";
 import { Dashboard } from "./dashboard.mjs";
 import { startServer } from "./server.mjs";
 import { KIND_LABELS } from "./kinds.mjs";
@@ -370,29 +370,6 @@ test("rate limits stop queued CLI reads and preserve the longest concurrent back
     assert.equal(github.requests, 5);
     assert.equal(github.activeReads, 0);
     assert.equal(github.readQueue.length, 0);
-});
-
-const failedCoordinator = (updates = {}) => ({
-    id: 37368497585, run_attempt: 1, status: "completed", conclusion: "failure",
-    name: "Review loop coordinator", display_title: "Review loop launch 37368497585",
-    created_at: "2026-10-05T20:14:29Z", ...updates,
-});
-
-test("recent coordinator failures use one fixed bounded read, not historical pagination", async () => {
-    const calls = [];
-    const github = new GitHub(async (args) => {
-        calls.push(args);
-        return response({ total_count: 100, workflow_runs: [failedCoordinator()] }, {
-            Link: `<https://api.github.com/${FAILED_COORDINATORS}&page=2>; rel="next"`,
-        });
-    });
-    assert.equal((await github.failedCoordinators())[0].id, 37368497585);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].at(-1), FAILED_COORDINATORS);
-    for (const data of [
-        { total_count: 1, workflow_runs: null }, { total_count: -1, workflow_runs: [] },
-        { total_count: 21, workflow_runs: Array.from({ length: 21 }, () => failedCoordinator()) },
-    ]) await assert.rejects(new GitHub(async () => response(data)).failedCoordinators(), /invalid/);
 });
 
 test("the run log paginates past polling runs and stops at the 24-hour boundary", async () => {
@@ -834,7 +811,6 @@ function fakeDashboard(now = () => 2000000) {
             assert.equal(path, `repos/${CENTRAL}/actions/runs/101`);
             return { data: { id: 101, status: "in_progress" } };
         },
-        failedCoordinators: async () => { github.requests++; github.counted++; return []; },
         recentCoordinators: async () => [],
     };
     const dashboard = new Dashboard(github, now);
@@ -846,11 +822,10 @@ function fakeDashboard(now = () => 2000000) {
     return dashboard;
 }
 
-test("a fresh state branch absence loads failed launches without inventing history", async () => {
+test("a fresh state branch absence loads an empty task snapshot without inventing history", async () => {
     const github = new GitHub(async (args) => {
         const path = args.at(-1);
         if (path.endsWith("/git/matching-refs/heads/review-loop-state")) return response([]);
-        if (path === FAILED_COORDINATORS) return response({ total_count: 1, workflow_runs: [failedCoordinator()] });
         if (path.includes("/actions/workflows/coordinator.yml/runs?per_page=100")) return response({ total_count: 0, workflow_runs: [] });
         throw new Error(`Unexpected dashboard read ${path}`);
     });
@@ -866,7 +841,6 @@ test("a fresh state branch absence loads failed launches without inventing histo
     assert.equal(state.auto, true);
     assert.deepEqual(state.phases, []);
     assert.deepEqual(state.actions, []);
-    assert.equal(state.failures[0].id, failedCoordinator().id);
     await assert.rejects(dashboard.history(target), /not in/);
 });
 
@@ -875,7 +849,7 @@ test("refresh coalesces, keeps stale data on failure, and respects manual/low-ca
     const first = dashboard.refresh();
     assert.equal(first, dashboard.refresh());
     const result = await first;
-    assert.equal(result.cost, 3);
+    assert.equal(result.cost, 2);
     assert.equal(result.phases.length, 1);
     dashboard.github.get = async () => { throw new GitHubError("HTTP 403 access denied"); };
     const failed = await dashboard.refresh();
@@ -1046,12 +1020,11 @@ test("manual refresh stays off without a notice, but read failures still report 
     assert.match(recovered.error, /Manual read unavailable/);
 });
 
-test("parallel refresh reads settle before releasing refresh coalescing after a failure", async () => {
+test("checkpoint reads settle before releasing refresh coalescing after a failure", async () => {
     const dashboard = fakeDashboard();
     let release;
     const waiting = new Promise((resolve) => release = resolve);
-    dashboard.github.failedCoordinators = async () => { throw new Error("Failure listing unavailable"); };
-    dashboard.checkpoints.load = async () => { await waiting; return dashboard.checkpoints.snapshot; };
+    dashboard.checkpoints.load = async () => { await waiting; throw new Error("State unavailable"); };
     const first = dashboard.refresh();
     let done = false;
     first.then(() => done = true);
@@ -1060,64 +1033,13 @@ test("parallel refresh reads settle before releasing refresh coalescing after a 
     assert.equal(dashboard.refresh(), first);
     release();
     const state = await first;
-    assert.match(state.error, /Failure listing unavailable/);
+    assert.match(state.error, /State unavailable/);
     assert.equal(state.loadedAt, null);
     assert.equal(state.loading, false);
     assert.equal(state.auto, false);
 });
 
-test("a late failure listing remains visible when another parallel state read fails", async () => {
-    const dashboard = fakeDashboard();
-    let release;
-    dashboard.github.failedCoordinators = () => new Promise((resolve) => release = resolve);
-    dashboard.checkpoints.load = async () => { throw new Error("State unavailable"); };
-    const pending = dashboard.refresh();
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(dashboard.refresh(), pending);
-    release([failedCoordinator()]);
-    const state = await pending;
-    assert.match(state.error, /State unavailable/);
-    assert.equal(state.failures[0].id, failedCoordinator().id);
-    assert.equal(state.loadedAt, null);
-});
 
-test("failed launches survive a fresh controller without inventing a checkpoint or PR association", async () => {
-    const run = failedCoordinator();
-    for (let restart = 0; restart < 2; restart++) {
-        const dashboard = fakeDashboard();
-        dashboard.checkpoints.snapshot.current = [];
-        dashboard.github.failedCoordinators = async () => [run];
-        const state = await dashboard.refresh();
-        assert.equal(state.phases.length, 0);
-        assert.equal(state.actions.length, 0);
-        assert.equal(state.failures.length, 1);
-        assert.equal(state.failures[0].conclusion, "failure");
-        assert.deepEqual(state.failures[0].targets, []);
-        assert.match(state.failures[0].url, /\/37368497585\/attempts\/1$/);
-    }
-    const phase = phaseSummary(record(fixture({}, { launch_run: { id: run.id } })));
-    assert.deepEqual(failedActionSummary(run, [phase]).targets, [target]);
-    const missingState = fakeDashboard();
-    missingState.github.failedCoordinators = async () => [run];
-    missingState.checkpoints.load = async () => { throw new Error("State branch missing"); };
-    const firstFailure = await missingState.refresh();
-    assert.equal(firstFailure.loadedAt, null);
-    assert.equal(firstFailure.failures[0].id, run.id);
-    assert.match(firstFailure.error, /State branch missing/);
-    assert.equal(firstFailure.auto, false);
-    for (const updates of [{ status: "in_progress" }, { conclusion: "success" }, { id: -1 },
-        { created_at: "invalid" }, { display_title: null }]) {
-        assert.throws(() => failedActionSummary(failedCoordinator(updates), []), /invalid/);
-    }
-    const dashboard = fakeDashboard();
-    dashboard.github.failedCoordinators = async () => [run];
-    await dashboard.refresh();
-    dashboard.github.failedCoordinators = async () => { throw new Error("Failed-run read unavailable"); };
-    const stale = await dashboard.refresh();
-    assert.equal(stale.failures.length, 1);
-    assert.match(stale.error, /Failed-run read unavailable/);
-    assert.equal(stale.auto, false);
-});
 
 test("automatic refresh pauses for slow steady-state cycles and low capacity, not request count", async () => {
     let now = 2000000;
@@ -1133,7 +1055,7 @@ test("automatic refresh pauses for slow steady-state cycles and low capacity, no
         return { data: { id: 101, status: "in_progress" } };
     };
     const highCost = await costly.refresh();
-    assert.equal(highCost.cost, 20);
+    assert.equal(highCost.cost, 19);
     assert.equal(highCost.auto, true);
     assert.equal(highCost.pauseReason, null);
     const low = fakeDashboard();
@@ -1262,7 +1184,7 @@ async function rendererFixture(fetch, timers = { setInterval() {}, clearInterval
         }
     }
     const html = await readFile(new URL("index.html", import.meta.url), "utf8");
-    assert.doesNotMatch(html, /<dialog\b|method="dialog"/);
+    assert.doesNotMatch(html, /<dialog\b|method="dialog"|id="troubleshooting"/);
     const nodes = new Map(Array.from(html.matchAll(/\bid="([^"]+)"/g), (match) => [match[1], new Node()]));
     for (const [input] of html.matchAll(/<input\b[^>]*>/g)) {
         const id = input.match(/\bid="([^"]+)"/)?.[1];
@@ -1296,7 +1218,7 @@ function rendererState(repository = "example/project") {
         auto: true, loading: false, loadedAt: 2000000, prLoadedAt: 2000000, snapshot: sha("a"),
         error: null, prError: null, pauseReason: null, warnings: [], prWarnings: [],
         cost: 0, rate: null, metrics: { requests: 10, cacheHits: 10 },
-        workflowReady: true, viewer: { login: "trask" }, phases: [], actions: [], failures: [],
+        workflowReady: true, viewer: { login: "trask" }, phases: [], actions: [],
         prs: [{
             target: `${repository}#12`, number: 12, title: `PR in ${repository}`,
             url: `https://github.com/${repository}/pull/12`, author: "trask", mine: true,
@@ -1602,7 +1524,6 @@ test("ownership toggle defaults to My PRs and shows only Draft review on other a
     assert.equal(active[1]["aria-label"], "Cancel task");
     assert.equal(active[1]["aria-busy"], "false");
     assert.equal(active[1].disabled, false);
-    assert.ok(nodes.get("troubleshooting-runs").firstChild.children.some((node) => node.tag === "details"));
     assert.equal(buttons(cards()[1]).length, 1);
     assert.equal(buttons(cards()[1])[0]["aria-label"], "Draft review: Run");
     assert.equal(buttons(cards()[1])[0].disabled, false);
@@ -1632,27 +1553,13 @@ test("ownership toggle defaults to My PRs and shows only Draft review on other a
     assert.equal(requests.length, reads);
 });
 
-test("renderer preserves safe history and shows per-task buttons with direct dispatch and activity", async () => {
-    const s = fixture({ stage: "blocked", reason: "target_ci_failed",
-        publications: [{ request_id: requestId("a"), sha: sha("b"), effect: "push" }],
-    }, { findings: [{ key: "one", body: '<img src=x onerror="throw Error()">', path: "src/example.js" }] });
-    const dashboard = fakeDashboard();
-    dashboard.github.failedCoordinators = async () => [failedCoordinator({
-        display_title: "Review loop launch pr_description example/project#12 <img src=x>",
-    })];
-    dashboard.checkpoints.snapshot.current = [record(s)];
-    const state = await dashboard.refresh();
-    Object.assign(state, {
-        repository: "example/project", repositories: ["example/project"], prLoadedAt: state.loadedAt,
-        prError: null, prWarnings: [], workflowReady: true, viewer: { login: "trask" },
-        prs: [{
-            target, number: 12, title: "<untrusted title>", url: "https://github.com/example/project/pull/12",
-            author: "trask", mine: true, sha: sha("a"), draft: false,
-            dashboardStatus: "missing", routeLabel: "Dashboard missing", reviewers: [], tasks: [],
-            phase: state.phases[0], canCancel: false, actionBlock: "Read only",
-        }],
+test("renderer escapes task errors and preserves direct dispatch, disabled controls and activity", async () => {
+    const state = rendererState();
+    const message = '<img src=x onerror="throw Error()">';
+    Object.assign(state.prs[0], {
+        title: "<untrusted title>", tasks: [],
+        phase: { ...phaseSummary(record(fixture({ stage: "blocked" }))), error: message },
     });
-    const history = await dashboard.history(target);
     const launches = [];
     let releaseLaunch;
     const { renderer, nodes } = await rendererFixture(async (path, options) => {
@@ -1663,27 +1570,15 @@ test("renderer preserves safe history and shows per-task buttons with direct dis
                 resolve({ ok: true, json: async () => state.prs[0].dispatch });
             });
         }
-        return { ok: true, json: async () => path.includes("history") ? history : path.includes("visibility") ? {} : state };
+        return { ok: true, json: async () => path.includes("visibility") ? {} : state };
     });
     const row = nodes.get("prs").firstChild;
-    assert.equal(nodes.get("failures-count").textContent, 1);
-    const failure = nodes.get("failures").firstChild;
-    assert.equal(failure.firstChild.firstChild.textContent,
-        "Review loop launch pr_description example/project#12 <img src=x>");
-    assert.match(failure.firstChild.firstChild.href, /\/37368497585\/attempts\/1$/);
-    assert.equal(failure.firstChild.children[1].textContent, "Failed");
     assert.ok(row.children.some((node) => node.children?.some((child) => child.textContent === "#12 <untrusted title>")));
-    const card = nodes.get("troubleshooting-runs").firstChild.children.find((node) => node.tag === "details");
-    nodes.get("troubleshooting").open = true;
-    card.open = true;
-    card.events.toggle();
-    await new Promise((resolve) => setImmediate(resolve));
     const all = [];
     const visit = (node) => { all.push(node); for (const child of node.children ?? []) visit(child); };
-    visit(card);
-    assert.ok(all.some((node) => node.textContent === '<img src=x onerror="throw Error()">'));
+    visit(row);
+    assert.ok(all.some((node) => typeof node.textContent === "string" && node.textContent.includes(message)));
     assert.equal(all.filter((node) => node.tag === "img" || node.tag === "script").length, 0);
-    assert.ok(all.some((node) => node.href === `https://github.com/example/fork/commit/${sha("b")}` && node.rel === "noopener noreferrer"));
     const buttons = () => taskButtons(nodes.get("prs").firstChild);
     assert.equal(buttons().length, Object.keys(KIND_LABELS).length);
     assert.ok(buttons().every((button) => button.disabled && button.firstChild.className === "task-name"));
@@ -1696,7 +1591,7 @@ test("renderer preserves safe history and shows per-task buttons with direct dis
 
     Object.assign(state.prs[0], {
         tasks: ["self_review"], actionBlock: "A task is already active",
-        phase: { ...state.phases[0], kind: "self_review", stage: "running" },
+        phase: { ...state.prs[0].phase, kind: "self_review", stage: "running" },
     });
     renderer.render();
     const active = buttons().filter((button) => button["aria-busy"] === "true");
@@ -1934,7 +1829,7 @@ test("PR headings put Draft and Approved after the title and the other author's 
     assert.match(css, /\.badge\.approved \{ color: var\(--true-color-green,/);
 });
 
-test("PR cards put status in task buttons and keep saved metadata in bottom troubleshooting details", async () => {
+test("PR cards retain task-button status without detailed run views", async () => {
     const state = rendererState();
     state.prs[0].evidence = { sha: state.prs[0].sha, conflicts: "no", ci: "passing", copilotThreads: 0, copilotBodies: 0 };
     Object.assign(state.prs[0], {
@@ -1955,40 +1850,27 @@ test("PR cards put status in task buttons and keep saved metadata in bottom trou
     assert.equal(buttons.length, Object.keys(KIND_LABELS).length);
     assert.ok(buttons.some((node) => node["aria-label"] === "Address Copilot feedback: Clean"));
     assert.equal(row().children.find((node) => node.tag === "details"), undefined);
-    const details = nodes.get("troubleshooting-runs").firstChild.children.find((node) => node.tag === "details");
-    assert.equal(details.firstChild.textContent, "Run details");
-    assert.equal(details.open, undefined);
-    assert.ok(details.children[1].children.find((node) => node.className === "meta")
-        .children.some((node) => node.textContent === `Head ${sha("a").slice(0, 8)}`));
     const all = [];
     const visit = (node) => { all.push(node); for (const child of node.children ?? []) visit(child); };
     visit(row());
     assert.equal(all.some((node) => node.textContent === "Central Actions"), false);
 });
 
-test("review cards keep only pending-review links inline and put outcomes in Run details", async () => {
+test("review cards retain completion tooltips and pending-review links", async () => {
     const state = rendererState();
     const s = fixture({
         stage: "complete", reason: "verified_no_change",
         task_completion: { outcome: "no_change" },
         report: { verification: "verified", dispositions: { outcome: "no_change", comments: [] } },
     }, { loop_kind: "pr_review" });
-    const history = () => ({ ...targetHistory([record(s)], target), snapshot: state.snapshot });
     state.prs[0].phase = phaseSummary(record(s));
-    const { renderer, nodes } = await rendererFixture(async (path) => ({
-        ok: true, json: async () => path.includes("history") ? history() : state,
-    }));
+    const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
     const card = () => nodes.get("prs").firstChild;
     const result = () => card().children.find((node) => node.className === "run-result");
-    const details = () => nodes.get("troubleshooting-runs").firstChild.children.find((node) => node.tag === "details");
-    const detailTexts = () => details().children[1].children.filter((node) => node.tag === "p")
-        .map((node) => node.textContent);
     const status = () => taskButtons(card()).find((node) => node["aria-label"]?.startsWith("Draft review:"));
     assert.equal(status()["aria-label"], "Draft review: No findings");
     assert.equal(result(), undefined);
-    assert.deepEqual(detailTexts(), ["No new findings. No pending review was created."]);
-    assert.equal(details().firstChild.textContent, "Run details");
-    assert.equal(details().open, undefined);
+    assert.equal(status()["aria-description"], "No new findings. No pending review was created.");
 
     const comments = [{ path: "src/example.js", line: 12, side: "RIGHT", body: "<img src=x> Missing input guard" }];
     Object.assign(s, {
@@ -2001,116 +1883,20 @@ test("review cards keep only pending-review links inline and put outcomes in Run
     assert.equal(result().children.length, 1);
     assert.equal(result().firstChild.textContent, "Open pending review");
     assert.equal(result().firstChild.href, "https://github.com/example/project/pull/12#pullrequestreview-42");
-    assert.deepEqual(detailTexts(), [
-        "1 review comment in a pending GitHub review. Only you can see it until you submit it.",
-    ]);
-    const expanded = details();
-    nodes.get("troubleshooting").open = true;
-    expanded.open = true;
-    expanded.events.toggle();
-    await new Promise((resolve) => setImmediate(resolve));
-    const all = [];
-    const visit = (node) => { all.push(node); for (const child of node.children ?? []) visit(child); };
-    visit(expanded);
-    assert.ok(all.some((node) => node.textContent === "src/example.js:12"));
-    assert.ok(all.some((node) => node.textContent === "<img src=x> Missing input guard"));
-    assert.equal(all.some((node) => node.tag === "img"), false);
+    assert.equal(status()["aria-description"],
+        "1 review comment in a pending GitHub review. Only you can see it until you submit it.");
 
     state.prs[0].sha = sha("b");
     renderer.render();
     assert.equal(status()["aria-label"], "Draft review: Previous head");
     assert.equal(result().firstChild.textContent, "Open pending review");
-    assert.deepEqual(detailTexts(), [
-        "Result from a previous PR commit.",
-        "1 review comment in a pending GitHub review. Only you can see it until you submit it.",
-    ]);
     Object.assign(state.prs[0], { sha: sha("a"), phase: { ...phaseSummary(record(s)), stage: "blocked" } });
     renderer.render();
     assert.equal(status()["aria-label"], "Draft review: Blocked");
     assert.equal(result(), undefined);
 });
 
-test("CI completion explanations and commit-age warnings appear only in Run details", async () => {
-    const state = rendererState();
-    const phase = phaseSummary(record(fixture({
-        stage: "complete", task_completion: { outcome: "warnings_not_CI_clearance" },
-    }, { loop_kind: "ci_fix" })));
-    Object.assign(state.prs[0], { phase, sha: sha("b") });
-    const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
-    assert.equal(nodes.get("prs").firstChild.children.length, 2);
-    const texts = () => nodes.get("troubleshooting-runs").firstChild.children
-        .find((node) => node.tag === "details").children[1].children
-        .filter((node) => node.tag === "p").map((node) => node.textContent);
-    assert.deepEqual(texts(), [
-        "Result from a previous PR commit.",
-        "The remaining CI failures were classified as unrelated to this PR.",
-    ]);
-    state.prs = [];
-    state.phases = [phase];
-    renderer.render();
-    assert.deepEqual(texts(), ["The remaining CI failures were classified as unrelated to this PR."]);
-});
 
-test("collapsed bottom troubleshooting retains launch links and active or recent runs outside PR filters", async () => {
-    const state = rendererState();
-    const phase = phaseSummary(record(fixture()));
-    Object.assign(state.prs[0], { phase, canCancel: true, actionBlock: "A task is already active on this PR." });
-    state.prs.push({
-        ...state.prs[0], target: "example/project#13", number: 13, title: "Launching another PR",
-        url: "https://github.com/example/project/pull/13", phase: null, canCancel: false,
-        dispatch: {
-            operation: "launch", kind: "self_review", status: "accepted",
-            message: "Dispatch accepted. Execution is not yet confirmed; refresh to observe central state.",
-            runUrl: "https://github.com/trask/copilot-workflows/actions/runs/20",
-        },
-    });
-    state.phases = [
-        phase,
-        phaseSummary(record(fixture({ stage: "complete" }, { pr: 14 }))),
-        phaseSummary(record(fixture({}, { repo: "example/other", pr: 15 }))),
-    ];
-    const requests = [];
-    const { renderer, nodes, html } = await rendererFixture(async (path) => {
-        requests.push(path);
-        return { ok: true, json: async () => path.includes("history")
-            ? { ...targetHistory([record(fixture())], target), snapshot: state.snapshot } : state };
-    });
-    assert.ok(html.indexOf('id="troubleshooting"') > html.indexOf('id="prs"'));
-    assert.match(html, /<details id="troubleshooting" class="card">/);
-    assert.equal(nodes.get("troubleshooting").open, undefined);
-    assert.ok(nodes.get("prs").children.every((card) => card.children.length === 2));
-    const runs = () => nodes.get("troubleshooting-runs").children;
-    assert.equal(runs().length, 3);
-    assert.equal(runs()[0].firstChild.firstChild.textContent, "#13 Launching another PR");
-    const message = runs()[0].children.find((node) => node.className === "notice");
-    assert.equal(message.textContent, state.prs[1].dispatch.message);
-    assert.equal(message.children[1].textContent, "View launch");
-    assert.equal(message.children[1].href, state.prs[1].dispatch.runUrl);
-    assert.ok(runs().some((row) => row.firstChild.firstChild.textContent === "example/project#14"));
-    assert.ok(runs().some((row) => row.children.some((node) =>
-        node.textContent === "A task is already active on this PR.")));
-    assert.ok(!requests.some((path) => path.includes("history")));
-
-    nodes.get("search").value = "No matching title";
-    renderer.render();
-    assert.equal(nodes.get("pr-count").textContent, "0 / 2");
-    assert.equal(runs().length, 3);
-    nodes.get("troubleshooting").open = true;
-    nodes.get("troubleshooting").events.toggle();
-    const details = runs().find((row) => row.firstChild.firstChild.textContent.startsWith("#12"))
-        .children.find((node) => node.tag === "details");
-    details.open = true;
-    details.events.toggle();
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(requests.filter((path) => path.includes("history")).length, 1);
-    nodes.get("troubleshooting").open = false;
-    renderer.render();
-    const retained = runs().find((row) => row.firstChild.firstChild.textContent.startsWith("#12"))
-        .children.find((node) => node.tag === "details");
-    assert.equal(retained.open, true);
-    retained.events.toggle();
-    assert.equal(requests.filter((path) => path.includes("history")).length, 1);
-});
 
 test("Cancel dispatches the exact displayed identity directly and stays locked pending confirmation", async () => {
     const state = rendererState();
@@ -2189,8 +1975,8 @@ test("Cancel launch uses the exact accepted run receipt and locks duplicate clic
     assert.equal(cancelButton().disabled, true);
     assert.equal(cancelButton()["aria-busy"], "true");
     assert.ok(buttons().some((node) => node["aria-label"] === `${KIND_LABELS.self_review}: Cancelling`));
-    const notice = nodes.get("troubleshooting-runs").firstChild.children.find((node) => node.className === "notice");
-    assert.equal(notice.children.find((node) => node.tag === "a").href, pr.dispatch.runUrl);
+    assert.match(tooltipFor(buttons().find((node) => node["aria-label"]?.endsWith(": Cancelling")))
+        .children.find((node) => node.className === "tooltip-detail").textContent, /Dispatch cancellation requested/);
     pr.dispatch.status = "uncertain";
     renderer.render();
     assert.equal(cancelButton()["aria-busy"], "false");
@@ -2219,7 +2005,6 @@ test("repository selection shows loading before its response and hides old cards
     assert.equal(nodes.get("prs")["aria-busy"], "true");
     assert.equal(nodes.get("prs").children.length, 1);
     assert.equal(nodes.get("prs").firstChild.textContent, "Loading open PRs for example/other...");
-    assert.equal(nodes.get("troubleshooting-runs").firstChild.textContent, "Loading runs for example/other...");
     assert.equal(nodes.get("run-log").firstChild.textContent, "Select Load run log to view tasks in example/other.");
     assert.equal(nodes.get("pr-count").textContent, "Loading...");
     assert.equal(nodes.get("refresh").textContent, "Loading...");
@@ -2227,7 +2012,6 @@ test("repository selection shows loading before its response and hides old cards
     nodes.get("search").events.input();
     assert.equal(nodes.get("repo").value, "example/other");
     assert.equal(nodes.get("prs").firstChild.textContent, "Loading open PRs for example/other...");
-    assert.equal(nodes.get("troubleshooting-runs").firstChild.textContent, "Loading runs for example/other...");
     assert.equal(nodes.get("loading").hidden, false);
     await renderer.refresh();
     assert.deepEqual(selections, [{ repo: "example/other" }]);

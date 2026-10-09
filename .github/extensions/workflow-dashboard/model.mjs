@@ -400,15 +400,6 @@ export function actionSummary(run, summaries) {
     return summarizeAction(run, summaries);
 }
 
-export function failedActionSummary(run, summaries) {
-    if (!Number.isSafeInteger(run.id) || run.id < 1 || run.status !== "completed" ||
-        run.conclusion !== "failure" || typeof run.display_title !== "string" ||
-        !Number.isFinite(Date.parse(run.created_at))) {
-        throw new Error("GitHub returned an invalid failed coordinator run.");
-    }
-    return { ...summarizeAction(run, summaries), conclusion: run.conclusion };
-}
-
 function summarizeAction(run, summaries) {
     const matched = summaries.filter((phase) =>
         [phase.workerId, phase.coordinatorId, phase.launchId, phase.sourceId, phase.verificationId].includes(run.id) ||

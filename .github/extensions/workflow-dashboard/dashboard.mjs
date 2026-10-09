@@ -1,6 +1,6 @@
 import { GitHub, CENTRAL } from "./github.mjs";
 import { Checkpoints } from "./state.mjs";
-import { phaseSummary, targetHistory, actionSummary, failedActionSummary, recentTaskLog, RUN_LOG_WINDOW } from "./model.mjs";
+import { phaseSummary, targetHistory, actionSummary, recentTaskLog, RUN_LOG_WINDOW } from "./model.mjs";
 
 export class Dashboard {
     constructor(github = new GitHub(), now = () => Date.now()) {
@@ -16,7 +16,7 @@ export class Dashboard {
         this.auto = true;
         this.pauseReason = null;
         this.value = {
-            phases: [], actions: [], failures: [], warnings: [], loadedAt: null, error: null, loading: false,
+            phases: [], actions: [], warnings: [], loadedAt: null, error: null, loading: false,
             snapshot: null, latency: null, cost: null,
             runLog: [], runLogLoadedAt: null, runLogError: null, runLogWarnings: [], runLogLoading: false,
         };
@@ -87,17 +87,7 @@ export class Dashboard {
         const warm = this.value.loadedAt !== null;
         this.value.loading = true;
         try {
-            const checkpoints = this.checkpoints.load();
-            const reads = await Promise.allSettled([
-                this.github.failedCoordinators(),
-                checkpoints,
-            ]);
-            if (reads[0].status === "fulfilled") {
-                this.value.failures = reads[0].value.map((run) => failedActionSummary(run, []));
-            }
-            const failure = reads.find((read) => read.status === "rejected");
-            if (failure) throw failure.reason;
-            const [failedRuns, snapshot] = reads.map((read) => read.value);
+            const snapshot = await this.checkpoints.load();
             const phases = [];
             const warnings = [];
             for (const record of snapshot.current) {
@@ -119,11 +109,10 @@ export class Dashboard {
             const workerFailure = workers.find((read) => read.status === "rejected");
             if (workerFailure) throw workerFailure.reason;
             const actions = workers.map((read) => read.value);
-            const failures = failedRuns.map((run) => failedActionSummary(run, phases));
             phases.sort((a, b) => (b.started ?? 0) - (a.started ?? 0));
             this.value = {
                 ...this.value,
-                phases, actions, failures, warnings, loadedAt: this.now(), snapshot: snapshot.sha,
+                phases, actions, warnings, loadedAt: this.now(), snapshot: snapshot.sha,
                 error: null, loading: false, latency: this.now() - started, cost: this.github.counted - counted,
             };
             if ([this.github.rate, this.github.graphqlRate].some((rate) =>

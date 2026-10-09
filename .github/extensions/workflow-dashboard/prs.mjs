@@ -279,7 +279,7 @@ export function completionPresentation(phase) {
     if (phase.outcome === "warnings_not_CI_clearance") return {
         label: "CI still failing", detail: "The remaining CI failures were classified as unrelated to this PR.",
     };
-    return { label: "Completed", detail: "Task completed. See run details for the recorded result." };
+    return { label: "Completed", detail: "Task completed." };
 }
 
 export function taskPresentation(pr, kind, workflowReady, actions = []) {
@@ -290,7 +290,7 @@ export function taskPresentation(pr, kind, workflowReady, actions = []) {
     const disabled = Boolean(!workflowReady || pr.actionBlock || pr.dispatch || evidence?.disabled) || !pr.tasks.includes(kind);
     const result = (label, tone = "idle", busy = false) => ({
         label, tone, busy, disabled,
-        detail: dispatch?.message ?? (phase ? completionPresentation(phase)?.detail ?? phase.reason?.replaceAll("_", " ") : null) ??
+        detail: dispatch?.message ?? (phase ? completionPresentation(phase)?.detail ?? phase.error ?? phase.reason?.replaceAll("_", " ") : null) ??
             pr.actionBlock ?? TASK_EFFECTS[kind],
     });
     if (dispatch) {

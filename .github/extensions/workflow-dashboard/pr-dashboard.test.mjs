@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { runInNewContext } from "node:vm";
-import { GitHub, GitHubError, CENTRAL, MAX_RESPONSE, FAILED_COORDINATORS } from "./github.mjs";
+import { GitHub, GitHubError, CENTRAL, MAX_RESPONSE } from "./github.mjs";
 import { PrDashboard, decodeDashboard } from "./pr-dashboard.mjs";
 import { Checkpoints } from "./state.mjs";
 import { REPOSITORIES, DEFAULT_REPOSITORY, LAUNCH_OWNER_ID, dashboardPath, targetParts } from "./repositories.mjs";
@@ -114,7 +114,6 @@ function controller({ records = [], pulls = [pull()], dashboardState = state(), 
         pullEvidence: async (_selected, prs) => new Map(prs.map((pr) => [pr.number, {
             detail: detail({ number: pr.number, head: pr.sha }),
         }])),
-        failedCoordinators: async () => [],
         recentCoordinators: async () => [],
         dispatch: async (inputs) => {
             calls.push(inputs);
@@ -1191,7 +1190,7 @@ test("viewer, PR, ownership and reviewer-dashboard reads start together and sett
     assert.deepEqual(result.prs, []);
 });
 
-test("a complete PR refresh shares five read slots and adds one batched live-status query", async () => {
+test("a complete PR refresh reads only PR data and batched live status", async () => {
     let active = 0;
     let maximum = 0;
     const github = new GitHub(async (args) => {
@@ -1205,9 +1204,7 @@ test("a complete PR refresh shares five read slots and adds one batched live-sta
         else if (path === "user") data = account;
         else if (path === `repos/${repo}/pulls?state=open&per_page=100`) data = [pull()];
         else if (path === dashboardPath(repo)) data = file(state());
-        else if (path === FAILED_COORDINATORS) {
-            data = { total_count: 0, workflow_runs: [] };
-        } else throw new Error(`Unexpected refresh read ${path}`);
+        else throw new Error(`Unexpected refresh read ${path}`);
         return { code: 0, stdout: `HTTP/2.0 200 OK\r\n\r\n${JSON.stringify(data)}` };
     });
     const canvas = new PrDashboard(github, () => 2000000);
@@ -1216,9 +1213,9 @@ test("a complete PR refresh shares five read slots and adds one batched live-sta
         return canvas.checkpoints.snapshot;
     };
     const result = await canvas.refresh();
-    assert.equal(maximum, 5);
-    assert.equal(github.requests, 6);
-    assert.equal(result.cost, 6);
+    assert.equal(maximum, 4);
+    assert.equal(github.requests, 5);
+    assert.equal(result.cost, 5);
     assert.equal(result.error, null);
     assert.equal(result.prError, null);
     assert.equal(result.workflowReady, true);
@@ -1528,20 +1525,18 @@ test("uncertain accepted-launch cancellation stays locked and is never automatic
     assert.equal(calls, 1);
 });
 
-test("a confirmed failed launch unlocks a fresh explicit launch and retains its failure link", async () => {
+test("a confirmed failed launch unlocks a fresh explicit launch", async () => {
     const c = controller();
     await c.canvas.refresh();
     await c.canvas.launch({ target, kind: "self_review", confirmed: true });
     const failed = launchRun({ status: "completed", conclusion: "failure",
         created_at: "1970-01-01T00:33:20Z" });
     c.setRun(failed);
-    c.github.failedCoordinators = async () => [failed];
     const snapshot = await c.canvas.refresh();
     const pr = snapshot.prs[0];
     assert.equal(pr.dispatch, null);
     assert.equal(pr.actionBlock, null);
     assert.equal(pr.canCancelDispatch, false);
-    assert.match(snapshot.failures[0].url, /\/actions\/runs\/20\/attempts\/1$/);
     assert.equal(taskPresentation(pr, "self_review", true).label, "Run");
     assert.equal(taskPresentation(pr, "self_review", true).busy, false);
     assert.equal(taskPresentation(pr, "self_review", true).disabled, false);

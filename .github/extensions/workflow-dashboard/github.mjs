@@ -50,7 +50,6 @@ function connection(value) {
     }
     return value;
 }
-export const FAILED_COORDINATORS = `repos/${CENTRAL}/actions/workflows/coordinator.yml/runs?event=workflow_dispatch&status=failure&per_page=20`;
 
 export class GitHubError extends Error {
     constructor(message, retryAt = null) {
@@ -122,7 +121,6 @@ export function parseResponse(stdout) {
 }
 
 function safePath(path) {
-    if (path === FAILED_COORDINATORS) return path;
     if (path === "user" || REPOSITORIES.some((repo) => path === dashboardPath(repo))) return path;
     for (const repo of REPOSITORIES) {
         if (path === `repos/${repo}/pulls` || new RegExp(`^repos/${repo}/pulls/[1-9][0-9]{0,7}$`).test(path)) return path;
@@ -258,15 +256,6 @@ export class GitHub {
             while (this.cache.size > 100) this.cache.delete(this.cache.keys().next().value);
         }
         return value;
-    }
-
-    async failedCoordinators() {
-        const { data } = await this.get(FAILED_COORDINATORS);
-        if (!Array.isArray(data.workflow_runs) || data.workflow_runs.length > 20 ||
-            !Number.isSafeInteger(data.total_count) || data.total_count < 0) {
-            throw new GitHubError("GitHub returned an invalid recent coordinator failure listing.");
-        }
-        return data.workflow_runs;
     }
 
     async recentCoordinators(since) {
