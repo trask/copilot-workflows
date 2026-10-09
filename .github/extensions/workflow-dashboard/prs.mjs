@@ -16,7 +16,7 @@ const ROUTES = {
 };
 
 export const TASK_EFFECTS = {
-    copilot_review: "Fix valid Copilot findings, push changes, and reply to and resolve bot threads. Repeat review until clean.",
+    copilot_review: "Fix valid Copilot findings in code or stale PR description text, then reply to and resolve bot threads. Push source fixes and repeat review until clean.",
     self_review: "Review this PR and push fixes until review is clean.",
     pr_conflict_resolver: "Merge the base branch into this PR and push the resolved merge. Does not merge the PR.",
     ci_fix: "Investigate failing checks and push fixes. May rerun failed jobs.",

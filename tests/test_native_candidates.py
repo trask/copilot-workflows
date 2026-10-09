@@ -55,6 +55,33 @@ class NativeCandidateTests(unittest.TestCase):
                              candidate["finding_commits"])
             self.assertEqual(b"values.length\n", git(["show", "candidate:" + ROOT_PATH], verified))
 
+    def test_description_only_result_packages_and_verifies_without_candidate_commits(self):
+        with tempfile.TemporaryDirectory() as root:
+            repository, output = Path(root, "target"), Path(root, "output")
+            repository.mkdir()
+            output.mkdir()
+            git(["init", "--quiet"], repository)
+            head = baseline(repository / ".git")
+            request = personal_request(head)
+            request["metadata"] = {"title": "Images", "body": "Keep tar.gz extraction."}
+            git(["checkout", "--quiet", "--detach", head], repository)
+            value = semantic(request, "no_change", disposition="description_updated")
+            value["proposal"] = {"title": "Images", "body": "Use ZIP archives."}
+            (output / "result.json").write_bytes(canonical(value))
+            (output / "diagnostics.txt").write_bytes(b"Archive support and history confirm ZIP is intended.")
+            package(request, repository, output)
+            self.assertEqual(b"", (output / "candidate.bundle").read_bytes())
+            def fetch(directory):
+                git(["-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-tags",
+                     str(repository), head], directory)
+            payload = zipped({path.name: path.read_bytes() for path in output.iterdir()})
+            report = verify(payload, request, run(), {"id": 33, "digest": "server"}, fetch)
+            self.assertEqual(value, report["dispositions"])
+            self.assertFalse(report["candidate"]["changed"])
+            self.assertEqual([], report["candidate"]["commits"])
+            self.assertEqual({}, report["candidate"]["finding_commits"])
+            self.assertEqual(head, report["candidate"]["commit"])
+
     def test_native_commits_cannot_change_author_or_omit_attribution(self):
         for options in ({"author": "someone@invalid"}, {"trailer": ""}):
             with self.subTest(options=options), tempfile.TemporaryDirectory() as root:

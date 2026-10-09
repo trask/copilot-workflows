@@ -10,7 +10,9 @@ from unittest.mock import Mock, patch
 
 from loop.candidates import semantic
 from loop.coordinator import cancel, quiescent
-from loop.effects import pending, reply_body
+from loop.effects import initialize, pending, reply_body
+from loop.api import APIError
+from loop.freeze import freeze
 from loop.live import advance, start
 from loop.policy import AUTHOR_ID, Rejected, digest
 from loop.publication import acceptance, import_candidate
@@ -18,7 +20,7 @@ from loop.verify import git
 from tests.support import batch, semantic as result
 from tests import test_live as fixtures
 from tests.test_live import Publisher, Read, personal_request, stored
-from tests.test_loop import GOOD_PATCH, SHA, baseline
+from tests.test_loop import GOOD_PATCH, REVISION, SHA, baseline
 
 SECOND = b"""diff --git a/Foo.java b/Foo.java
 --- a/Foo.java
@@ -70,6 +72,103 @@ class EffectTests(unittest.TestCase):
 
     def step(self, store, name, state, read, publisher):
         return advance(store, name, state, None, read, publisher, 100)
+
+    def description_context(self, changed=False):
+        _, _, state, read, publisher = self.context(changed)
+        req = state["request"]
+        req["metadata"] = {"title": read.pr["title"], "body": read.pr["body"]}
+        state["report"]["request_digest"] = digest(req)
+        value = state["report"]["dispositions"]
+        value["request_digest"] = digest(req)
+        value["proposal"] = {"title": req["metadata"]["title"], "body": "The implementation uses ZIP archives."}
+        finding = next(item for item in value["findings"] if item["key"] == "inline:20")
+        finding.update(disposition="description_updated", commit=None,
+                       analysis="Archive support and commit history confirm ZIP is intended. Corrected stale prose.")
+        state["report"]["candidate"]["finding_commits"].pop("inline:20", None)
+        state["publication_intent"]["acceptance"] = acceptance(state)
+        store, name = stored(state)
+        return store, name, state, read, publisher
+
+    def test_copilot_freezes_description_as_context(self):
+        read = Read()
+        req = freeze(read, 1, REVISION, 100, read.req["repo"])
+        self.assertEqual({"title": read.pr["title"], "body": read.pr["body"]}, req["metadata"])
+
+    def test_description_correction_precedes_replies_and_fresh_review(self):
+        for changed in (False, True):
+            store, name, state, read, publisher = self.description_context(changed)
+            state = self.step(store, name, state, read, publisher)
+            self.assertEqual("published", state["stage"])
+            self.assertEqual("confirmed", state["task_intent"]["status"])
+            self.assertEqual(state["expected_sha"], publisher.assertion_identity)
+            self.assertEqual(state["report"]["dispositions"]["proposal"]["body"], read.pr["body"])
+            self.assertEqual("Original", read.pr["title"])
+            self.assertEqual([], state["effects"])
+            state = self.step(store, name, state, read, publisher)
+            for _ in range(4):
+                state = self.step(store, name, state, read, publisher)
+            self.assertEqual("waiting_review", state["stage"])
+            self.assertEqual(["PATCH", "POST", "POST", "POST"], [post[1] for post in publisher.posts])
+            self.assertTrue(publisher.posts[1][2]["body"].startswith("PR description updated. No code change."))
+            self.assertEqual(1, len(state["publications"]))
+
+    def test_description_proposals_need_matching_decisions_and_frozen_metadata(self):
+        _, _, state, _, _ = self.description_context()
+        semantic(state["report"]["dispositions"], state["request"])
+        for mutation in ("missing_proposal", "no_decision", "unchanged_body", "changed_title", "no_metadata", "blocked"):
+            req, value = copy.deepcopy(state["request"]), copy.deepcopy(state["report"]["dispositions"])
+            if mutation == "missing_proposal":
+                value.pop("proposal")
+            elif mutation == "no_decision":
+                value["findings"][1]["disposition"] = "not_warranted"
+            elif mutation == "unchanged_body":
+                value["proposal"]["body"] = req["metadata"]["body"]
+            elif mutation == "changed_title":
+                value["proposal"]["title"] = "Unrelated title edit"
+            elif mutation == "no_metadata":
+                req.pop("metadata")
+                value["request_digest"] = digest(req)
+            else:
+                value["outcome"] = "blocked"
+                value["findings"][0]["disposition"] = "blocked"
+            with self.subTest(mutation=mutation), self.assertRaises(Rejected):
+                semantic(value, req)
+
+    def test_description_drift_or_cancellation_prevents_PATCH(self):
+        for mutation in ("metadata", "head", "cancel"):
+            store, name, state, read, publisher = self.description_context()
+            if mutation == "metadata":
+                read.pr["body"] = "Human edit"
+            elif mutation == "head":
+                read.pr["head"]["sha"] = REVISION
+            else:
+                cancel(store, name, state["request"]["request_id"], state["generation"], 100)
+            with self.subTest(mutation=mutation), self.assertRaises(Rejected):
+                self.step(store, name, state, read, publisher)
+            self.assertEqual([], publisher.posts)
+
+    def test_interrupted_description_PATCH_reconciles_without_retry(self):
+        for applied in (False, True):
+            store, name, state, read, publisher = self.description_context()
+            original = publisher.call
+            def interrupted(path, method="GET", data=None):
+                if applied:
+                    original(path, method, data)
+                else:
+                    publisher.posts.append((path, method, copy.deepcopy(data)))
+                raise APIError(503, "Lost PATCH response")
+            with patch.object(publisher, "call", side_effect=interrupted), self.assertRaises(APIError):
+                self.step(store, name, state, read, publisher)
+            state = store.entries[name]
+            self.assertEqual("task_effect_intent", state["stage"])
+            self.assertEqual("uncertain", state["task_intent"]["status"])
+            state = advance(store, name, state, None, read, publisher, 1000)
+            self.assertEqual("published" if applied else "blocked", state["stage"])
+            self.assertEqual(1, len(publisher.posts))
+    def test_description_threads_cannot_claim_unpublished_correction(self):
+        _, _, state, _, _ = self.description_context()
+        with self.assertRaisesRegex(Rejected, "confirmed description"):
+            initialize(state)
 
     def test_publish_reply_resolve_review_order_with_no_code_explanation(self):
         store, name, state, read, publisher = self.context()

@@ -121,7 +121,7 @@ def probe_target(api, number, revision, now=None, repo=None, actor_id=AUTHOR_ID,
                 "Incomplete self-review merge-base identity")
         target.update(base_ref=base["ref"], base_sha=base_sha,
                       merge_base_sha=comparison["merge_base_commit"]["sha"])
-    if loop_kind == "pr_description":
+    if loop_kind in {"copilot_review", "pr_description"}:
         target["metadata"] = {"title": pr["title"], "body": pr["body"] or ""}
     now = int(time.time()) if now is None else now
     from loop.candidates import PROTOCOL

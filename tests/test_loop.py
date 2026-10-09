@@ -35,7 +35,7 @@ BOT = {"id": BOT_ID, "node_id": BOT_NODE, "type": "Bot",
 
 def pr():
     repo = {"id": REPOSITORIES[TARGET], "full_name": TARGET, "private": False}
-    return {"number": 1, "state": "open", "merged": False,
+    return {"number": 1, "state": "open", "merged": False, "title": "Original", "body": "Original body",
             "user": {"id": AUTHOR_ID, "type": "User", "login": "launch-owner"},
             "head": {"sha": SHA, "ref": "trask-fix", "repo": repo.copy()},
             "base": {"ref": "main", "repo": repo.copy()}}

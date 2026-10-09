@@ -9,7 +9,7 @@ from loop.publication import evidence
 
 def payload(request, result):
     kind = loop_kind(request)
-    if kind == "pr_description":
+    if kind in {"copilot_review", "pr_description"}:
         return result["proposal"]
     if kind == "pr_review":
         return {"commit_id": request["frozen_sha"], "comments": result["comments"]}
@@ -35,41 +35,52 @@ def review_matches(api, request, review, expected):
 def guard_task(store, name, state, read, publisher):
     from loop.live import guard
     guard(store, name, state, read, int(time.time()))
-    publisher.identity(state["request"])
-    from loop.recommendations import check_diff
-    check_diff(read, state["request"], state["report"]["dispositions"].get("input_identity"))
+    publisher.identity(dict(state["request"], frozen_sha=state["expected_sha"]))
+    if loop_kind(state["request"]) != "copilot_review":
+        from loop.recommendations import check_diff
+        check_diff(read, state["request"], state["report"]["dispositions"].get("input_identity"))
 
 
 def publish_task(store, name, state, central, read, publisher, now, verified=None):
     import tempfile
     from loop.live import cas, owner
     request = state["request"]
-    if verified is None:
+    kind = loop_kind(request)
+    if kind == "copilot_review":
+        from loop.publication import acceptance
+        accepted = acceptance(state)
+        require(state["stage"] == "published"
+                and state["publication_intent"]["status"] == "confirmed"
+                and state["publication_intent"]["acceptance"] == accepted
+                and state["expected_sha"] == accepted["candidate_commit"],
+                "Review description correction requires confirmed candidate publication")
+    elif verified is None:
         with tempfile.TemporaryDirectory(prefix="trusted-task-") as directory:
             accepted, _ = evidence(central, state, directory)
     else:
         accepted = verified[0]
     result = state["report"]["dispositions"]
-    kind = loop_kind(request)
     guard_task(store, name, state, read, publisher)
-    if kind == "pr_description":
-        live = check_target(read, request)
+    if kind in {"copilot_review", "pr_description"}:
+        live = check_target(read, dict(request, frozen_sha=state["expected_sha"]))
         require({"title": live["title"], "body": live["body"] or ""} == request["metadata"],
                 "PR metadata changed after freeze")
     if kind == "ci_fix":
         from loop.ci import same_attempts
         same_attempts(read, request)
-    if result["outcome"] == "no_change":
+    if result["outcome"] == "no_change" and kind != "copilot_review":
         return cas(store, name, state, stage="complete", reason="verified_no_change",
                    task_completion={"outcome": "no_change", "acceptance": accepted})
     body = payload(request, result)
-    intent = {"claim": uuid.uuid4().hex, "kind": {"pr_description": "metadata",
+    intent = {"claim": uuid.uuid4().hex, "kind": {"copilot_review": "metadata", "pr_description": "metadata",
               "pr_review": "pending_review", "ci_fix": "rerun"}[kind],
               "request_digest": digest(request), "generation": state["generation"],
               "target": [request["repo"], request["pr"]], "acceptance": accepted,
               "payload": body, "recorded_at": now, "owner": owner(), "status": "uncertain"}
+    if kind == "copilot_review":
+        intent["head"] = state["expected_sha"]
     root = f"repos/{request['repo']}/pulls/{request['pr']}"
-    if kind == "pr_description":
+    if kind in {"copilot_review", "pr_description"}:
         endpoint, method = root, "PATCH"
     elif kind == "pr_review":
         existing = pending_reviews(publisher, request)
@@ -88,8 +99,8 @@ def publish_task(store, name, state, central, read, publisher, now, verified=Non
     state = cas(store, name, state, stage="task_effect_intent", task_intent=intent,
                 next_check_at=now + 300)
     guard_task(store, name, state, read, publisher)
-    if kind == "pr_description":
-        live = check_target(read, request)
+    if kind in {"copilot_review", "pr_description"}:
+        live = check_target(read, dict(request, frozen_sha=state["expected_sha"]))
         require({"title": live["title"], "body": live["body"] or ""} == request["metadata"],
                 "PR metadata changed before PATCH")
     elif kind == "pr_review":
@@ -121,6 +132,10 @@ def confirm_task(store, name, state, read, now):
             "Stale or unbound task reconciliation")
     guard(store, name, state, read, now)
     kind = loop_kind(request)
+    if kind == "copilot_review":
+        require(intent["kind"] == "metadata" and intent["head"] == state["expected_sha"]
+                and intent["payload"] == state["report"]["dispositions"]["proposal"],
+                "Review description intent changed")
     if kind == "ci_fix":
         run = read.call(f"repos/{request['repo']}/actions/runs/{intent['run_id']}")
         require(run["head_sha"] == request["frozen_sha"] and run["id"] == intent["run_id"],
@@ -131,11 +146,15 @@ def confirm_task(store, name, state, read, now):
                        task_intent=effect, ci_reruns=state.get("ci_reruns", []) + [effect],
                        ci_reobserve=True, next_check_at=now + 300)
         require(run["run_attempt"] == intent["attempt"], "Unexpected additional manual/automated retry")
-    elif kind == "pr_description":
-        from loop.recommendations import check_diff
-        check_diff(read, request, state["report"]["dispositions"].get("input_identity"))
-        live = check_target(read, request)
+    elif kind in {"copilot_review", "pr_description"}:
+        if kind == "pr_description":
+            from loop.recommendations import check_diff
+            check_diff(read, request, state["report"]["dispositions"].get("input_identity"))
+        live = check_target(read, dict(request, frozen_sha=state["expected_sha"]))
         if {"title": live["title"], "body": live["body"] or ""} == intent["payload"]:
+            if kind == "copilot_review":
+                return cas(store, name, state, stage="published",
+                           task_intent=dict(intent, status="confirmed"), next_check_at=now)
             return cas(store, name, state, stage="complete", reason="exact_metadata_confirmed",
                        task_intent=dict(intent, status="confirmed"),
                        task_completion={"outcome": "metadata_updated", "proposal": intent["payload"]})

@@ -25,6 +25,8 @@ def semantic(value, request):
     extra = {"copilot_review": {"findings"}, "pr_description": {"proposal"},
              "pr_review": {"comments"}, "pr_consistency": {"consistency"},
              "ci_fix": {"diagnoses", "rerun_run"}}.get(kind, set())
+    if kind == "copilot_review" and "proposal" in value:
+        extra |= {"proposal"}
     exact(value, {"schema", "request_digest", "outcome"}
           | ({"input_identity"} if direct_inputs(request) else set()) | extra)
     require(type(value["schema"]) is int and value["schema"] == 2
@@ -78,14 +80,23 @@ def semantic(value, request):
             require(isinstance(item["key"], str) and item["key"] in expected
                     and item["key"] not in seen, "Missing, duplicate, or foreign finding")
             seen.add(item["key"])
-            require(item["disposition"] in {"fixed", "not_warranted", "blocked"},
+            require(item["disposition"] in {"fixed", "description_updated", "not_warranted", "blocked"},
                     "Invalid disposition")
             prose(item["analysis"])
             decisions.add(item["disposition"])
             require((type(item["commit"]) is int and item["commit"] > 0)
                     if item["disposition"] == "fixed" else item["commit"] is None,
                     "Only fixed findings select a candidate commit")
-        require(value["outcome"] != "no_change" or decisions <= {"not_warranted"},
+        require(("description_updated" in decisions) == ("proposal" in value),
+                "Description decisions require a matching proposal")
+        if "proposal" in value:
+            from loop.recommendations import proposal
+            proposal(value["proposal"])
+            require("metadata" in request and value["outcome"] != "blocked"
+                    and value["proposal"]["title"] == request["metadata"]["title"]
+                    and value["proposal"]["body"] != request["metadata"]["body"],
+                    "Review description correction requires changed body and unchanged title")
+        require(value["outcome"] != "no_change" or decisions <= {"not_warranted", "description_updated"},
                 "False no-change")
         require(value["outcome"] != "blocked" or "blocked" in decisions, "Blocked without blocker")
         require(value["outcome"] == "blocked" or "blocked" not in decisions,

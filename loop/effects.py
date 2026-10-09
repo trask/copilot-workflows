@@ -43,7 +43,12 @@ def initialize(state):
         require(bot(finding.get("root_author")) and finding.get("thread_context") is not None,
                 "Missing frozen original bot conversation")
         decision = decisions[finding["key"]]
-        require(decision["disposition"] in {"fixed", "not_warranted"}, "Blocked thread decision")
+        require(decision["disposition"] in {"fixed", "description_updated", "not_warranted"},
+                "Blocked thread decision")
+        if decision["disposition"] == "description_updated":
+            require(state.get("task_intent", {}).get("status") == "confirmed"
+                    and state["task_intent"]["payload"] == state["report"]["dispositions"]["proposal"],
+                    "Thread reply requires confirmed description correction")
         effects.append({"key": finding["key"], "root": finding["comment_id"],
                         "thread": finding["thread_id"], "status": "pending"})
     return effects
@@ -54,7 +59,9 @@ def reply_body(state, effect):
                     if item["key"] == effect["key"])
     mapping = state["report"]["candidate"]["finding_commits"]
     lead = ("Addressed in " + mapping[effect["key"]] + "."
-            if decision["disposition"] == "fixed" else "No code change.")
+            if decision["disposition"] == "fixed" else
+            "PR description updated. No code change."
+            if decision["disposition"] == "description_updated" else "No code change.")
     return (lead + "\n\n" + decision["analysis"] +
             f"\n\n<!-- copilot-loop:{digest(state['request'])}:{effect['root']}:"
             f"{effect['reply']['claim']} -->")
