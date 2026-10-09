@@ -160,6 +160,16 @@ function link(text, url) {
     node.href = url;
     node.target = "_blank";
     node.rel = "noopener noreferrer";
+    node.addEventListener("click", async (event) => {
+        if (event.button !== 0 || !event.ctrlKey && !event.metaKey) return;
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+            await api("/api/open-external", "POST", { url });
+        } catch (failure) {
+            error(failure.message);
+        }
+    }, true);
     node.addEventListener("contextmenu", (event) => showLinkMenu(event, node));
     return node;
 }

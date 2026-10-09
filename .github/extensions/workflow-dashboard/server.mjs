@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 
 const assets = new Map([
     ["/", ["index.html", "text/html; charset=utf-8"]],
@@ -10,6 +11,27 @@ const assets = new Map([
     ["/repositories.mjs", ["repositories.mjs", "text/javascript; charset=utf-8"]],
     ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
 ]);
+
+export function openExternal(value, execute = execFile, platform = process.platform) {
+    let url;
+    try {
+        url = new URL(value);
+    } catch {
+        throw new Error("External links require an HTTP or HTTPS URL.");
+    }
+    if (!["http:", "https:"].includes(url.protocol)) throw new Error("External links require an HTTP or HTTPS URL.");
+    const windows = platform === "win32";
+    const command = windows ? "powershell.exe" : platform === "darwin" ? "open" : "xdg-open";
+    const args = windows ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+        "$ErrorActionPreference = 'Stop'; Start-Process -FilePath $env:COPILOT_EXTERNAL_URL"] : [url.href];
+    return new Promise((resolve, reject) => {
+        execute(command, args, { windowsHide: true, timeout: 10000,
+            env: { ...process.env, COPILOT_EXTERNAL_URL: url.href } }, (error) => {
+            if (error) reject(new Error("Could not open the link in your external browser."));
+            else resolve();
+        });
+    });
+}
 
 async function body(req) {
     if (req.headers["content-type"]?.split(";")[0].trim() !== "application/json") {
@@ -40,7 +62,7 @@ async function body(req) {
     return input;
 }
 
-export async function startServer(dashboard) {
+export async function startServer(dashboard, openLink = openExternal) {
     const viewer = randomUUID();
     const loaded = new Map();
     for (const [path, [file, type]] of assets) {
@@ -82,6 +104,17 @@ export async function startServer(dashboard) {
                 const hours = url.searchParams.get("hours");
                 const state = await dashboard.refreshRunLog(hours === null ? undefined : Number(hours));
                 json(state.runLogError ? 502 : 200, state);
+            } else if (req.method === "POST" && url.pathname === "/api/open-external") {
+                if (req.headers.origin !== origin) {
+                    json(403, { error: "Canvas actions require the canvas's exact origin." });
+                    return;
+                }
+                const input = await body(req);
+                if (Object.keys(input).length !== 1 || typeof input.url !== "string") {
+                    throw new Error("Provide exactly one external link URL.");
+                }
+                await openLink(input.url);
+                json(200, { opened: true });
             } else if (req.method === "POST" && url.pathname === "/api/visibility") {
                 const visible = url.searchParams.get("visible");
                 if (!["true", "false"].includes(visible)) json(400, { error: "Visibility must be true or false." });
