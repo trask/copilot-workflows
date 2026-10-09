@@ -114,13 +114,15 @@ export class PrDashboard extends Dashboard {
         const warm = this.prLoadedAt !== null;
         this.refreshState = super.state();
         this.value.loading = true;
+        const reads = Promise.allSettled([
+            this.github.get("user").then((response) => viewer(response.data)),
+            this.github.pulls(this.repository),
+            this.github.get(dashboardPath(this.repository)).then((response) => decodeDashboard(response.data)),
+            this.github.ownPullNumbers(this.repository),
+        ]);
+        const workflow = super.update();
         try {
-            const [account, livePulls, reviewerDashboard, ownPulls] = await Promise.allSettled([
-                this.github.get("user").then((response) => viewer(response.data)),
-                this.github.pulls(this.repository),
-                this.github.get(dashboardPath(this.repository)).then((response) => decodeDashboard(response.data)),
-                this.github.ownPullNumbers(this.repository),
-            ]);
+            const [account, livePulls, reviewerDashboard, ownPulls] = await reads;
             if (account.status === "rejected") throw account.reason;
             if (livePulls.status === "rejected") throw livePulls.reason;
             if (ownPulls.status === "rejected") throw ownPulls.reason;
@@ -137,9 +139,14 @@ export class PrDashboard extends Dashboard {
             });
             const incomplete = prs.filter((pr) => !["current", "draft"].includes(pr.dashboardStatus)).length;
             if (incomplete) warnings.push(`${incomplete} PR(s) have missing, failed or invalid dashboard classifications. They remain in their ownership view unless Waiting on reviewers is selected.`);
+            if (!warm) {
+                this.viewer = account.value;
+                this.prs = prs;
+                this.prWarnings = warnings;
+            }
             const [liveStatus] = await Promise.allSettled([
                 this.github.pullEvidence(this.repository, prs.filter((pr) => pr.mine)),
-                super.update(),
+                workflow,
             ]);
             for (const pr of prs) {
                 if (!pr.mine) continue;
@@ -176,11 +183,14 @@ export class PrDashboard extends Dashboard {
                 this.pauseReason = "Refresh took more than 10 seconds.";
             }
         } catch (error) {
+            await workflow;
             this.prError = error.message;
             this.value.loading = false;
             this.auto = false;
             this.pauseReason = "Automatic refresh paused after a failed PR read.";
         } finally {
+            await workflow;
+            this.value.loading = false;
             this.refreshState = null;
         }
         return this.state();

@@ -142,7 +142,8 @@ function setBusy(value, repository = null) {
 function renderPulls() {
     hideTooltip();
     const cards = $("prs");
-    if (loadingRepository) {
+    if (loadingRepository && (state.repository !== loadingRepository ||
+        !state.prs.length && !state.prLoadedAt)) {
         $("pr-count").textContent = "Loading...";
         cards.replaceChildren(element("p", `Loading open PRs for ${loadingRepository}...`, "empty"));
         return;
@@ -521,6 +522,19 @@ async function load(path, repository = null) {
         renderPulls();
         renderTroubleshooting();
     }
+    const version = stateVersion;
+    let polling = false;
+    const timer = !state?.prLoadedAt || repository ? setInterval(async () => {
+        if (polling || !visible()) return;
+        polling = true;
+        try {
+            await readState(version);
+        } catch (failure) {
+            if (version === stateVersion) error(failure.message);
+        } finally {
+            polling = false;
+        }
+    }, 1000) : null;
     let failureMessage = null;
     try {
         state = await api(path, "POST", repository ? { repo: repository } : undefined);
@@ -528,6 +542,7 @@ async function load(path, repository = null) {
     } catch (failure) {
         failureMessage = failure.message;
     } finally {
+        if (timer !== null) clearInterval(timer);
         setBusy(false);
         render();
         if (failureMessage) error(failureMessage);
@@ -557,17 +572,21 @@ $("auto").addEventListener("change", async () => {
 for (const id of ["mine", "others", "reviewers", "search"]) $(id).addEventListener("input", render);
 $("repo").addEventListener("change", () => load("/api/repository", $("repo").value));
 
+async function readState(version = stateVersion) {
+    const next = await api("/api/state");
+    if (!visible() || version !== stateVersion ||
+        loadingRepository && next.repository !== loadingRepository) return;
+    if (JSON.stringify(next) !== JSON.stringify(state)) {
+        state = next;
+        render();
+    }
+}
+
 async function heartbeat() {
     try {
         await api(`/api/visibility?visible=${visible()}`, "POST");
         if (!visible() || busy) return;
-        const version = stateVersion;
-        const next = await api("/api/state");
-        if (!visible() || busy || version !== stateVersion) return;
-        if (JSON.stringify(next) !== JSON.stringify(state)) {
-            state = next;
-            render();
-        }
+        await readState();
     } catch (failure) {
         error(failure.message);
     }

@@ -464,6 +464,62 @@ test("state pins commit/tree/blob identities, defers archives, and caches immuta
     assert.equal(client.calls.filter((path) => path.startsWith("blobs/")).length, 2);
 });
 
+test("current checkpoint blobs share three read slots and retain tree order", async () => {
+    const client = stateClient();
+    const tree = client.objects.get("trees/" + sha("d"));
+    for (let iteration = 2; iteration <= 5; iteration++) {
+        const item = gitBlob(fixture({ iteration }));
+        item.entry.path = `pr-v2-123-${iteration}.json`;
+        tree.tree.push(item.entry);
+        client.objects.set("blobs/" + item.entry.sha, item.blob);
+    }
+    const releases = [];
+    const github = new GitHub(async (args) => {
+        const key = args.at(-1).split("/git/")[1];
+        if (key.startsWith("blobs/")) await new Promise((resolve) => releases.push(resolve));
+        return response(client.objects.get(key));
+    });
+    const pending = new Checkpoints(github).load();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(releases.length, 3);
+    assert.equal(github.activeReads, 3);
+    for (const release of releases.slice().reverse()) release();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(releases.length, 5);
+    for (const release of releases.slice(3).reverse()) release();
+    const snapshot = await pending;
+    assert.deepEqual(snapshot.current.map((item) => item.name),
+        tree.tree.filter((entry) => entry.path.startsWith("pr-")).map((entry) => entry.path));
+    assert.equal(github.activeReads, 0);
+});
+
+test("a failed checkpoint read waits for other blobs and does not publish a partial snapshot", async () => {
+    const client = stateClient();
+    const item = gitBlob(fixture({ iteration: 2 }));
+    item.entry.path = "pr-v2-123-13.json";
+    client.objects.get("trees/" + sha("d")).tree.push(item.entry);
+    const get = client.github.get;
+    let release;
+    client.github.get = async (path) => {
+        if (path.endsWith(item.entry.sha)) {
+            await new Promise((resolve) => release = resolve);
+            return { data: item.blob };
+        }
+        if (path.includes("/blobs/")) throw new Error("Checkpoint unavailable");
+        return get(path);
+    };
+    const store = new Checkpoints(client.github);
+    let done = false;
+    const pending = assert.rejects(store.load(), /Checkpoint unavailable/).then(() => done = true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(typeof release, "function");
+    assert.equal(done, false);
+    assert.equal(store.snapshot, null);
+    release();
+    await pending;
+    assert.equal(store.snapshot, null);
+});
+
 test("absent state is explicit empty history, detects initialization, and clears removed state", async () => {
     const client = stateClient();
     const refs = client.objects.get("matching-refs/heads/review-loop-state");
@@ -1024,7 +1080,7 @@ test("loopback serves assets and read-only endpoints; cross-origin data reads an
     assert.equal((await stale.json()).phases.length, 1);
 });
 
-async function rendererFixture(fetch) {
+async function rendererFixture(fetch, timers = { setInterval() {}, clearInterval() {} }) {
     class Node {
         constructor(tag = "") {
             this.tag = tag; this.children = []; this.events = {}; this.style = {}; this.value = ""; this.isConnected = true;
@@ -1060,7 +1116,7 @@ async function rendererFixture(fetch) {
     const window = { events: {}, addEventListener(name, action) { this.events[name] = action; } };
     const script = await readFile(new URL("app.mjs", import.meta.url), "utf8");
     const renderer = await runInNewContext(`(async () => { ${script.replace(/^import .+;\r?$/gm, "")} return { render, heartbeat, refresh }; })()`, {
-        KIND_LABELS, filterPulls, taskPresentation, completionPresentation, TASK_EFFECTS, document, window, setInterval() {}, fetch,
+        KIND_LABELS, filterPulls, taskPresentation, completionPresentation, TASK_EFFECTS, document, window, ...timers, fetch,
     });
     return { renderer, nodes, document, window, html };
 }
@@ -1788,6 +1844,54 @@ test("repository selection shows loading before its response and hides old cards
     assert.equal(nodes.get("prs")["aria-busy"], "false");
     assert.equal(nodes.get("refresh").textContent, "Refresh");
     for (const id of ["repo", "refresh", "auto"]) assert.equal(nodes.get(id).disabled, false);
+});
+
+test("loading polls local state to show PR cards with disabled tasks and discards late responses", async () => {
+    let current = rendererState();
+    const intervals = new Map();
+    const cleared = [];
+    let release;
+    let releaseState;
+    let delayState = false;
+    let reads = 0;
+    const { nodes, document } = await rendererFixture(async (path) => {
+        if (path === "/api/repository") return new Promise((resolve) => release = resolve);
+        if (path === "/api/state") {
+            reads++;
+            if (delayState) return new Promise((resolve) => releaseState = resolve);
+        }
+        return { ok: true, json: async () => structuredClone(current) };
+    }, {
+        setInterval(callback, delay) { intervals.set(delay, callback); return delay; },
+        clearInterval(timer) { cleared.push(timer); },
+    });
+    nodes.get("repo").value = "example/other";
+    const pending = nodes.get("repo").events.change();
+    current = { ...rendererState("example/other"), loading: true, prLoadedAt: null, workflowReady: false };
+    current.prs[0].actionBlock = "Refresh before starting work.";
+    document.hidden = true;
+    const before = reads;
+    await intervals.get(1000)();
+    assert.equal(reads, before);
+    document.hidden = false;
+    await intervals.get(1000)();
+    assert.equal(nodes.get("prs").firstChild.firstChild.firstChild.textContent, "#12 PR in example/other");
+    assert.equal(nodes.get("pr-count").textContent, "1 / 1");
+    assert.equal(nodes.get("loading").hidden, false);
+    assert.ok(taskButtons(nodes.get("prs").firstChild).every((button) => button.disabled));
+    delayState = true;
+    const late = intervals.get(1000)();
+    await new Promise((resolve) => setImmediate(resolve));
+    await intervals.get(1000)();
+    assert.equal(reads, before + 2);
+    release({ ok: true, json: async () => rendererState("example/other") });
+    await pending;
+    assert.deepEqual(cleared, [1000]);
+    releaseState({ ok: true, json: async () => current });
+    await late;
+    assert.equal(nodes.get("loading").hidden, true);
+    assert.equal(nodes.get("repo").disabled, false);
+    assert.ok(taskButtons(nodes.get("prs").firstChild).some((button) => !button.disabled));
 });
 
 test("late heartbeat responses cannot replace a pending or completed repository switch", async () => {

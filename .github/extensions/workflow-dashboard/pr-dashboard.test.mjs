@@ -528,9 +528,43 @@ test("the canvas remains loading until live evidence has settled", async () => {
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(c.canvas.value.loading, false);
     assert.equal(c.canvas.state().loading, true);
+    assert.equal(c.canvas.state().prs[0].title, pull().title);
+    assert.equal(c.canvas.state().viewer.id, account.id);
+    assert.equal(c.canvas.state().prLoadedAt, null);
+    assert.equal(c.canvas.state().workflowReady, false);
+    assert.match(c.canvas.state().prs[0].actionBlock, /Refresh/);
+    assert.equal(taskPresentation(c.canvas.state().prs[0], "self_review", false).disabled, true);
     assert.equal(c.canvas.refresh(), pending);
     release(new Map([[12, { detail: detail() }]]));
     assert.equal((await pending).loading, false);
+});
+
+test("workflow reads overlap the initial PR listing and cards appear before workflow status settles", async () => {
+    const c = controller();
+    const load = c.canvas.checkpoints.load;
+    let releasePulls;
+    let releaseWorkflow;
+    c.github.pulls = () => new Promise((resolve) => releasePulls = resolve);
+    c.canvas.checkpoints.load = async () => {
+        await new Promise((resolve) => releaseWorkflow = resolve);
+        return load();
+    };
+    const pending = c.canvas.refresh();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(typeof releasePulls, "function");
+    assert.equal(typeof releaseWorkflow, "function");
+    assert.deepEqual(c.canvas.state().prs, []);
+    releasePulls([pull()]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(c.canvas.state().prs.length, 1);
+    assert.equal(c.canvas.state().loading, true);
+    assert.equal(c.canvas.state().prLoadedAt, null);
+    assert.equal(c.canvas.state().workflowReady, false);
+    releaseWorkflow();
+    const result = await pending;
+    assert.equal(result.loading, false);
+    assert.equal(result.workflowReady, true);
+    assert.equal(result.prs[0].actionBlock, null);
 });
 
 test("refresh preserves previous PR evidence and workflow state until the replacement is ready", async () => {
@@ -746,6 +780,12 @@ test("viewer, PR, ownership and reviewer-dashboard reads start together and sett
     const get = c.github.get;
     const reads = [];
     let release;
+    let releaseWorkflow;
+    const load = c.canvas.checkpoints.load;
+    c.canvas.checkpoints.load = async () => {
+        await new Promise((resolve) => releaseWorkflow = resolve);
+        return load();
+    };
     c.github.get = async (path) => {
         reads.push(path);
         if (path === "user") throw new Error("Viewer read unavailable");
@@ -767,10 +807,15 @@ test("viewer, PR, ownership and reviewer-dashboard reads start together and sett
     assert.equal(done, false);
     assert.equal(c.canvas.refresh(), first);
     release([pull()]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(done, false);
+    releaseWorkflow();
     const result = await first;
     assert.match(result.prError, /Viewer read unavailable/);
     assert.equal(result.prLoadedAt, null);
-    assert.equal(result.workflowReady, false);
+    assert.equal(result.workflowReady, true);
+    assert.equal(result.auto, false);
+    assert.equal(result.pauseReason, "Automatic refresh paused after a failed PR read.");
     assert.deepEqual(result.prs, []);
 });
 

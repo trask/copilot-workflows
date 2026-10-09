@@ -52,10 +52,12 @@ export class Checkpoints {
             check(!entries.has(item.path), "State tree contains duplicate checkpoint paths.");
             entries.set(item.path, item);
         }
-        const current = [];
-        for (const entry of entries.values()) {
-            if (entry.path.startsWith("pr-")) current.push({ name: entry.path, state: await this.blob(entry) });
-        }
+        const reads = await Promise.allSettled([...entries.values()]
+            .filter((entry) => entry.path.startsWith("pr-"))
+            .map(async (entry) => ({ name: entry.path, state: await this.blob(entry) })));
+        const failed = reads.find((read) => read.status === "rejected");
+        if (failed) throw failed.reason;
+        const current = reads.map((read) => read.value);
         const retained = new Set([...entries.values()].map((entry) => entry.sha));
         for (const key of this.blobs.keys()) if (!retained.has(key)) this.blobs.delete(key);
         this.snapshot = { sha, entries, current, history: null };
