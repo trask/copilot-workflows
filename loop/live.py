@@ -603,7 +603,13 @@ def watch_ci_fix(store, name, state, read, now):
     require(fresh["base_ref"] == request["base_ref"]
             and fresh["frozen_sha"] == state["expected_sha"], "CI repair source/base branch drift")
     fresh["ci_evidence"] = collect(read, fresh, request["publication"]["required_checks"])
-    require(fresh["ci_evidence"]["decision"] == "failed", "CI changed before diagnosis freeze")
+    if fresh["ci_evidence"]["decision"] != "failed":
+        ci = fresh["ci_evidence"]
+        if ci["decision"] == "passed":
+            return cas(store, name, state, stage="complete", reason="exact_target_CI_passed",
+                       ci=ci, task_completion={"outcome": "CI_passed"})
+        return cas(store, name, state, stage="waiting_ci", ci=ci, next_check_at=now + 300,
+                   reason="CI_changed_before_diagnosis", ci_reobserve=True)
     publication = dict(request["publication"], generation=state["generation"] + 1)
     fresh.update(mode="publish", publication=publication, budgets=request["budgets"].copy())
     if request.get("launch_run"):
@@ -611,7 +617,7 @@ def watch_ci_fix(store, name, state, read, now):
     value = checkpoint(fresh)
     value.update(stage="source_pending" if staged_source(fresh) else "ready", generation=state["generation"] + 1,
                  phase=state["phase"], iteration=state["iteration"], publications=state["publications"],
-                 effects=[], ci=ci, ci_reruns=state.get("ci_reruns", []),
+                 effects=[], ci=fresh["ci_evidence"], ci_reruns=state.get("ci_reruns", []),
                  ci_warnings=state.get("ci_warnings", []))
     def next_pass(current_state):
         require(current_state == state, "Cancelled or replaced CI freeze")

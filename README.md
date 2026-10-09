@@ -23,6 +23,10 @@ The sandbox permits Mise's version metadata service at `mise-versions.jdx.dev` a
 | Draft review | `pr_review` | One correctness review of the actual GitHub PR diff. Create one viewer-owned pending review on changed-line anchors, never submit or approve it |
 | Align with existing code | `pr_consistency` | Compare changed code with nearby examples and applicable instructions, report needed/avoidable/unclear differences and publish avoidable fixes only |
 
+Fix CI reobserves checks that become pending during diagnosis freeze and completes
+when the latest exact-head evidence passes, without consuming a worker pass.
+Conflict workers return `outcome: "merge"` for their two-parent candidate.
+
 For example, launch a description task:
 
 ```bash

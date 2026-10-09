@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import json
 import runpy
 import tempfile
 import unittest
@@ -32,6 +33,24 @@ class WorkerOutputTests(unittest.TestCase):
                 self.files(directory, changed)
                 with self.assertRaises(Rejected):
                     worker_output.check_output(req, Path(directory))
+
+    def test_documented_conflict_result_uses_the_packager_merge_outcome(self):
+        worker = (Path(__file__).resolve().parents[1] /
+                  ".github" / "workflows" / "copilot-worker.md").read_text(encoding="utf-8")
+        example = worker.split("For a completed conflict resolution,", 1)[1].split("```json\n", 1)[1]
+        value = json.loads(example.split("\n```", 1)[0])
+        req = task_request("pr_conflict_resolver")
+        req.update(input_mode="direct", inputs={"identity": {"pr_diff_sha256": "a" * 64}})
+        value["request_digest"] = digest(req)
+        value["input_identity"] = req["inputs"]["identity"]
+        self.assertEqual("merge", value["outcome"])
+        with tempfile.TemporaryDirectory() as directory:
+            self.files(directory, value, b"native merge bundle")
+            worker_output.check_output(req, Path(directory))
+            value["outcome"] = "fixes"
+            self.files(directory, value, b"native merge bundle")
+            with self.assertRaisesRegex(Rejected, "Unknown worker outcome"):
+                worker_output.check_output(req, Path(directory))
 
     def test_failed_description_shape_is_rejected_and_frozen_metadata_passes(self):
         req = task_request("pr_description")

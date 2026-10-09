@@ -1416,6 +1416,46 @@ class CIRepairTests(unittest.TestCase):
         self.assertEqual(0, waiting["iteration"])
         self.assertIsNone(waiting["intent"])
 
+    def test_ci_changes_during_diagnosis_freeze_do_not_block_or_consume_a_worker(self):
+        for decision in ("pending", "passed"):
+            with self.subTest(decision=decision):
+                req, read = self.context()
+                state = checkpoint(req)
+                state.update(stage="waiting_ci", iteration=1, publications=[], effects=[])
+                store, name = stored(state)
+                observations = []
+                def observe(*args, **kwargs):
+                    if len(observations) == 2:
+                        read.checks[0].update(
+                            status="in_progress" if decision == "pending" else "completed",
+                            conclusion=None if decision == "pending" else "success")
+                        read.runs[0].update(
+                            status="in_progress" if decision == "pending" else "completed",
+                            conclusion=None if decision == "pending" else "success")
+                    evidence = collect(*args, **kwargs)
+                    observations.append(evidence)
+                    return evidence
+                with patch("loop.ci.collect", side_effect=observe):
+                    updated = watch_ci_fix(store, name, state, read, 100)
+                self.assertEqual(["failed", "failed", decision],
+                                 [item["decision"] for item in observations])
+                self.assertEqual(observations[-1], updated["ci"])
+                self.assertEqual(state["request"], updated["request"])
+                self.assertEqual(state["generation"], updated["generation"])
+                self.assertEqual(1, updated["iteration"])
+                self.assertIsNone(updated["intent"])
+                if decision == "passed":
+                    self.assertEqual("complete", updated["stage"])
+                    self.assertEqual("CI_passed", updated["task_completion"]["outcome"])
+                else:
+                    self.assertEqual("waiting_ci", updated["stage"])
+                    self.assertTrue(updated["ci_reobserve"])
+                    self.assertEqual(400, updated["next_check_at"])
+                    read.checks[0].update(status="completed", conclusion="success")
+                    read.runs[0].update(status="completed", conclusion="success")
+                    complete = watch_ci_fix(store, name, updated, read, 400)
+                    self.assertEqual("complete", complete["stage"])
+
     def test_failed_ci_next_pass_keeps_the_phase_revision_pin(self):
         req, read = self.context()
         req["workflow_ref"] = revision_ref(REVISION)

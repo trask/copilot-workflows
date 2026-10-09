@@ -216,9 +216,10 @@ write the result before the 20-minute worker limit.
 - `pr_conflict_resolver`: merge frozen `base_sha` into frozen `frozen_sha`.
   Read both histories first. Preserve both sides' intent and repair resulting
   incompatibilities, including in files Git merged without textual conflicts.
-  Contradictory intent or incomplete history is blocked. Return one merge commit
-  with head first and base second, `no_change` if the base is already incorporated,
-  or `blocked`. Never rebase or land the PR.
+  Contradictory intent or incomplete history is blocked. Return `merge` with one
+  merge commit, head first and base second, `no_change` if the base is already
+  incorporated, or `blocked`. Never return `fixes` for this task. Never rebase
+  or land the PR.
 - `ci_fix`: diagnose each exact-head failure in `inputs.ci_evidence`, using its
   local logs and check evidence. Fix PR-attributable causes; unrelated failures
   need evidence. Return `fixes`, `no_change`, `rerun` or `blocked`. Diagnose every
@@ -289,6 +290,13 @@ For example, a completed self-review with no changes returns:
 
 ```json
 {"schema":2,"request_digest":"<frozen digest>","input_identity":{},"outcome":"clean"}
+```
+
+For a completed conflict resolution, use `merge` and copy the acquired input
+identity from `inputs.identity`:
+
+```json
+{"schema":2,"request_digest":"<frozen digest>","input_identity":{"pr_diff_sha256":"<acquired diff sha256>"},"outcome":"merge"}
 ```
 
 Package and check the result from the central workspace:
