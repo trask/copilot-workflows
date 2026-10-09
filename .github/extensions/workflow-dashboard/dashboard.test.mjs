@@ -1353,6 +1353,8 @@ test("compact run-log rows show PR titles and exact changes regardless of author
     renderer.render();
     assert.equal(nodes.get("prs").firstChild.textContent, "No open PRs match these filters.");
     assert.equal(nodes.get("run-log").children.length, 2);
+    assert.equal(nodes.get("run-log-count").hidden, false);
+    assert.equal(nodes.get("run-log-count").textContent, 2);
     const row = nodes.get("run-log").firstChild;
     assert.equal(row.firstChild.firstChild.textContent, "#12 PR in example/project");
     assert.equal(row.children.length, 2);
@@ -1379,7 +1381,7 @@ test("run-log controls fetch only on demand, leave PR controls usable and retry 
     let current = { ...rendererState(), runLog: [], runLogLoadedAt: null, runLogError: null, runLogLoading: false };
     let release;
     let reads = 0;
-    const { renderer, nodes } = await rendererFixture(async (path) => {
+    const { renderer, nodes, html } = await rendererFixture(async (path) => {
         if (path === "/api/run-log") {
             reads++;
             return new Promise((resolve) => release = resolve);
@@ -1389,12 +1391,15 @@ test("run-log controls fetch only on demand, leave PR controls usable and retry 
     assert.equal(reads, 0);
     assert.equal(nodes.get("load-run-log").textContent, "Load run log");
     assert.equal(nodes.get("run-log-count").textContent, "");
+    assert.equal(nodes.get("run-log-count").hidden, true);
+    assert.match(html, /<span id="run-log-count"[^>]*\bhidden\b/);
     const pending = nodes.get("load-run-log").events.click();
     assert.equal(reads, 1);
     await nodes.get("load-run-log").events.click();
     assert.equal(reads, 1);
     assert.equal(nodes.get("load-run-log").disabled, true);
     assert.equal(nodes.get("load-run-log").textContent, "Loading run log...");
+    assert.equal(nodes.get("run-log-count").hidden, true);
     assert.equal(nodes.get("run-log")["aria-busy"], "true");
     assert.equal(nodes.get("loading").hidden, true);
     assert.equal(nodes.get("prs")["aria-busy"], "false");
@@ -1404,6 +1409,8 @@ test("run-log controls fetch only on demand, leave PR controls usable and retry 
     await pending;
     assert.equal(nodes.get("load-run-log").disabled, false);
     assert.equal(nodes.get("load-run-log").textContent, "Refresh run log");
+    assert.equal(nodes.get("run-log-count").hidden, false);
+    assert.equal(nodes.get("run-log-count").textContent, 0);
     assert.equal(nodes.get("run-log")["aria-busy"], "false");
     await renderer.refresh();
     assert.equal(reads, 1);
@@ -1412,6 +1419,8 @@ test("run-log controls fetch only on demand, leave PR controls usable and retry 
     release({ ok: false, status: 502, json: async () => structuredClone(current) });
     await failed;
     assert.match(nodes.get("run-log-error").textContent, /stale.*Archive unreadable/);
+    assert.equal(nodes.get("run-log-count").hidden, false);
+    assert.equal(nodes.get("run-log-count").textContent, 0);
     assert.equal(nodes.get("error").hidden, true);
     assert.equal(nodes.get("load-run-log").disabled, false);
     const retry = nodes.get("load-run-log").events.click();
@@ -1423,7 +1432,7 @@ test("run-log controls fetch only on demand, leave PR controls usable and retry 
 });
 
 test("a late run-log response cannot replace a repository switch", async () => {
-    let current = rendererState();
+    let current = { ...rendererState(), runLog: [], runLogLoadedAt: 2000000 };
     let release;
     const { nodes } = await rendererFixture(async (path) => {
         if (path === "/api/run-log") return new Promise((resolve) => release = resolve);
@@ -1431,14 +1440,18 @@ test("a late run-log response cannot replace a repository switch", async () => {
         return { ok: true, json: async () => structuredClone(current) };
     });
     const log = nodes.get("load-run-log").events.click();
+    assert.equal(nodes.get("run-log-count").hidden, false);
     nodes.get("repo").value = "example/other";
-    await nodes.get("repo").events.change();
+    const switching = nodes.get("repo").events.change();
+    assert.equal(nodes.get("run-log-count").hidden, true);
+    await switching;
     release({ ok: true, json: async () => ({ ...rendererState(), runLogLoadedAt: 2000000 }) });
     await log;
     assert.equal(nodes.get("repo").value, "example/other");
     assert.equal(nodes.get("prs").firstChild.firstChild.firstChild.textContent, "#12 PR in example/other");
     assert.equal(nodes.get("load-run-log").textContent, "Load run log");
     assert.equal(nodes.get("load-run-log").disabled, false);
+    assert.equal(nodes.get("run-log-count").hidden, true);
     assert.match(nodes.get("run-log").firstChild.textContent, /Select Load run log/);
 });
 
