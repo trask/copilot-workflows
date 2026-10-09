@@ -269,10 +269,10 @@ function renderRunLog() {
         ? `Run log is ${state.runLogLoadedAt ? "stale" : "unavailable"}. ${state.runLogError}` : "";
     $("run-log-warnings").hidden = switching || !state.runLogWarnings?.length;
     $("run-log-warnings").textContent = switching ? "" : (state.runLogWarnings ?? []).join(" ");
-    $("run-log-count").textContent = state.runLogLoadedAt ? (state.runLog ?? []).length : "";
+    $("run-log-count").hidden = Boolean(switching) || !state.runLogLoadedAt;
+    $("run-log-count").textContent = $("run-log-count").hidden ? "" : (state.runLog ?? []).length;
     log.replaceChildren();
     if (switching) {
-        $("run-log-count").textContent = "";
         log.append(element("p", `Select Load run log to view tasks in ${loadingRepository}.`, "empty"));
         return;
     }
