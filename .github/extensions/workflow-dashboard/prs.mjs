@@ -246,7 +246,7 @@ export function actionEvidence(pr, kind) {
         actionLabel: "Refresh Copilot review",
     };
     return result("No Copilot feedback",
-        "No Copilot feedback to address. This does not mean the PR is approved.", "idle", true);
+        "No Copilot feedback to address.", "idle", true);
 }
 
 export function actionBlock(pr, viewer, phase, ready, dispatch) {

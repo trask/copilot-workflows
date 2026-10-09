@@ -506,6 +506,7 @@ test("zero-finding Copilot summaries and informational sections do not enable fe
     const pr = { ...normalizePull(pull(), repo, state(), account), tasks: ["copilot_review"], evidence };
     assert.equal(taskPresentation(pr, "copilot_review", true).disabled, true);
     assert.equal(actionEvidence(pr, "copilot_review").label, "No Copilot feedback");
+    assert.equal(actionEvidence(pr, "copilot_review").detail, "No Copilot feedback to address.");
 });
 
 test("only submitted verified current-head review bodies count, and unknown text remains actionable", () => {
