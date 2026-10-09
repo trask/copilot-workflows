@@ -189,16 +189,29 @@ class WaiterTests(unittest.TestCase):
             self.assertEqual("waiting_review" if isinstance(error, APIError) and error.status == 503
                              else "blocked", store.entries[first]["stage"])
 
-    def test_expired_and_retired_phases_do_not_keep_the_waiter_running(self):
+    def test_cancelled_and_retired_phases_do_not_keep_the_waiter_running(self):
         store, _ = phases(2)
         states = list(store.entries.values())
-        states[0]["request"]["deadline"] = 400
+        states[0]["stage"] = "cancelled"
         states[1]["stage"] = "waiting_capability"
         before = copy.deepcopy(states[1])
         with patch("loop.waiter.summary"), patch("sys.stderr"):
             self.assertFalse(poll(Controls(), store, 400, REVISION, {}))
-        self.assertEqual("exhausted", next(iter(store.entries.values()))["stage"])
+        self.assertEqual("cancelled", next(iter(store.entries.values()))["stage"])
         self.assertEqual(before, list(store.entries.values())[1])
+
+    def test_ci_pending_for_days_can_finish_and_wake_the_coordinator(self):
+        store, reads = phases(stage="waiting_ci")
+        api, checked = Controls(), {}
+        reads[1].checks[0].update(status="in_progress", conclusion=None)
+        with patch("loop.waiter.target_api", return_value=Reads(reads)):
+            self.assertTrue(poll(api, store, 3 * 86400, REVISION, checked))
+            self.assertEqual([], api.calls)
+            reads[1].checks[0].update(status="completed", conclusion="success")
+            self.assertTrue(poll(api, store, 3 * 86400 + 300, REVISION, checked))
+        self.assertEqual("waiting_ci", next(iter(store.entries.values()))["stage"])
+        self.assertEqual(1, len(api.calls))
+        self.assertEqual("POST", api.calls[0][1])
 
     def test_rate_limited_probe_preserves_phase_and_propagates_reset_before_more_reads(self):
         store, _ = phases()

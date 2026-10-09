@@ -189,6 +189,10 @@ class RevisionTests(unittest.TestCase):
         for state, revision in zip(store.entries.values(), (REVISION, "c" * 40)):
             state["request"]["workflow_revision"] = revision
             state["request"]["workflow_ref"] = pin_revision(api, revision)
+        first = next(iter(store.entries.values()))
+        first["request"]["budgets"]["deadline_seconds"] = 7200
+        first["request"]["deadline"] = 300
+        first["request"]["publication"]["continuation_deadline"] = 300
         before = copy.deepcopy(store.entries)
         api.calls.clear()
         self.assertTrue(poll(api, store, 400, "f" * 40, {}))

@@ -79,14 +79,12 @@ def select_publisher(api, target, kind="copilot_review"):
 
 
 def choose_verification(store, now=None, api=None, only=None):
-    now = int(time.time()) if now is None else now
     _, _, entries = store.snapshot()
     for name, state in sorted(entries.items()):
         if only is not None and name != only:
             continue
         if (name.startswith("pr-v2-") and state.get("schema") == 2
-                and state["stage"] == "verify_pending"
-                and now < state["request"]["deadline"]):
+                and state["stage"] == "verify_pending"):
             pipeline_budget(state)
             request = state["request"]
             if (execution_ref(state) != "main"
@@ -129,13 +127,6 @@ def choose_live(store, now, api=None, only=None):
         if state["stage"] not in LIVE_STAGES:
             continue
         pipeline_budget(state)
-        if now >= state["request"]["deadline"]:
-            def expired(current):
-                require(current == state, "Concurrent live deadline transition")
-                current.update(stage="exhausted", reason="elapsed_deadline")
-                return current
-            summary(store.update(name, expired))
-            continue
         if state["next_check_at"] > now:
             continue
         request = state["request"]
@@ -185,7 +176,6 @@ def prepare(api, store, args):
         source = download_source(api, state, "frozen-source")
         output("source_bundle", str(source / "source.bundle"))
     request = acquire_inputs(target_api(api, request["repo"], request["head_repo"]), request, Path.cwd())
-    require(int(time.time()) < request["deadline"], "Request deadline passed")
     Path("frozen-request.json").write_bytes(canonical(request))
     Path("frozen-digest.txt").write_text(digest(request), encoding="ascii")
     output("digest", digest(request))
@@ -205,7 +195,6 @@ def verify_pending(api, store, args):
         require(git(["rev-parse", "HEAD"], Path.cwd()).decode().strip()
                 == verification_revision(state),
                 "Verifier did not check out the authorized trusted revision")
-        require(int(time.time()) < request["deadline"], "Verification deadline passed")
         check_target(target_api(api, request["repo"], request["head_repo"]), request)
         fetch = None
         source = None
@@ -276,13 +265,6 @@ def _finalize(api, store, args):
     name, state = get_state(store, int(args.pr), args.request_id, args.repo)
     require(state["stage"] == "verify_pending" and state["generation"] == int(args.generation),
             "Cancelled or stale finalization")
-    if int(time.time()) >= state["request"]["deadline"]:
-        def exhausted(current):
-            require(current == state, "Checkpoint changed during deadline finalization")
-            current.update(stage="exhausted", reason="elapsed_deadline")
-            return current
-        summary(store.update(name, exhausted))
-        return
     path = Path("verification-report.json")
     if not path.exists():
         def failed(current):
@@ -393,8 +375,8 @@ def attach_source(api, store, args):
     name, state = get_state(store, int(args.pr), args.request_id, args.repo)
     require(state["stage"] == "source_pending" and state["generation"] == int(args.generation)
             and state["source_claim"] == {"run_id": int(os.environ["GITHUB_RUN_ID"]),
-                                         "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"])}
-            and int(time.time()) < state["request"]["deadline"], "Stale source attachment")
+                                         "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"])},
+            "Stale source attachment")
     supported_checkpoint(state)
     owned(state)
     manifest = parse_json(Path("source-package", "manifest.json").read_bytes())
@@ -422,10 +404,8 @@ def recover_coordinator(api, store, args, revision, now):
             and not prior.get("coordinator_recovery") and not prior.get("reconciliation")
             and not prior.get("report") and not prior.get("publications") and not prior.get("effects")
             and not prior.get("publication_intent") and not prior.get("task_intent")
-            and not prior.get("review_request")
-            and now < request["deadline"]
-            and now < request["publication"]["continuation_deadline"],
-            "Recovery requires an exact unexpired unfinished result without publication effects")
+            and not prior.get("review_request"),
+            "Recovery requires an exact unfinished result without publication effects")
     executions_quiescent(api, prior)
     runs = matching_runs(api, request)
     require(len(runs) == 1, "Recovery requires exactly one completed worker")
@@ -599,7 +579,7 @@ def main():
                         stage_source(api, store, name, state)
                     selection = name
                     break
-                elif state["stage"] != "verify_pending" or now >= state["request"]["deadline"]:
+                elif state["stage"] != "verify_pending":
                     reconcile(store, name, api, now)
     if args.operation in {"launch", "reconcile-publication", "recover-coordinator", "tick"}:
         verification = choose_verification(store, api=api, only=selection)

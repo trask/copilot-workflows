@@ -338,7 +338,7 @@ function phaseCard(phase, currentSha) {
     for (const value of [
         KIND_LABELS[phase.kind] ?? words(phase.kind),
         `Head ${short(phase.sha)}`, `Started ${date(phase.started)}`,
-        ...(["active", "waiting"].includes(phase.category) ? [
+        ...(["active", "waiting"].includes(phase.category) && Number.isFinite(phase.deadline) ? [
             `Deadline ${date(phase.deadline)}${phase.deadline < Date.now() ? " · overdue" : ""}`,
         ] : []),
     ]) meta.append(element("span", value));

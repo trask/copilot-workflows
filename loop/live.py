@@ -159,21 +159,18 @@ def start(store, api, request, previous_id, previous_generation, publisher_avail
                 "A fresh phase requires a new request identity")
     require(pipeline_limit(request) == DEFAULTS["max_iterations"],
             "A new phase requires the current freshly frozen request budget")
-    require(request["frozen_at"] <= now < request["deadline"], "New phase freeze expired")
+    require(request["frozen_at"] <= now, "New phase freeze is in the future")
     generation = 1 if prior is None else prior["generation"] + 1
     require(auth_mode in {"disabled", "fine_grained_pat"},
             "Choose an explicit supported publisher credential mode")
     require(isinstance(required_check, list) and len(required_check) <= 100
             and all(isinstance(name, str) and 0 < len(name) <= 200 for name in required_check),
             "Invalid frozen target CI selection")
-    request = dict(request, mode="publish",
-                   deadline=min(request["deadline"], now + DEFAULTS["deadline_seconds"]),
-                   publication={
+    request = dict(request, mode="publish", publication={
         "profile": PROFILE, "auth_mode": auth_mode, "generation": generation,
         "authorized_actor_id": request["authorized_actor_id"],
         "required_checks": required_check,
         "phase": uuid.uuid4().hex, "authorized_at": now,
-        "continuation_deadline": now + DEFAULTS["deadline_seconds"],
         "max_pipelines": request["budgets"]["max_iterations"],
     })
     value = checkpoint(request)
@@ -224,9 +221,8 @@ def authorize_publication_reconciliation(store, central, read, previous_id, gene
             and prior["stage"] == "blocked"
             and prior["reason"] == "blocked_uncertain_publication_requires_operator"
             and not prior.get("reconciliation") and not prior["publications"] and not prior["effects"]
-            and 0 < prior["iteration"] <= maximum and now < request["deadline"]
-            and now < request["publication"]["continuation_deadline"],
-            "Only an exact unexpired blocked publication intent can be reconciled once")
+            and 0 < prior["iteration"] <= maximum,
+            "Only an exact blocked publication intent can be reconciled once")
     intent = prior["publication_intent"]
     candidate = intent["candidate"]
     require(candidate == prior["report"]["candidate"] and candidate["changed"] is True
@@ -318,10 +314,8 @@ def current(store, name):
 
 def guard(store, name, state, read, now, sha=None):
     pipeline_budget(state)
-    require(current(store, name) == state and state["stage"] not in TERMINAL
-            and now < state["request"]["deadline"]
-            and now < state["request"]["publication"]["continuation_deadline"],
-            "Cancelled, expired, replaced or stale mutation intent")
+    require(current(store, name) == state and state["stage"] not in TERMINAL,
+            "Cancelled, replaced or stale mutation intent")
     check_target(read, dict(state["request"], frozen_sha=sha or state["expected_sha"]))
     ref = read.call(f"repos/{state['request']['head_repo']}/git/ref/heads/{state['request']['head_ref']}")
     require(ref["object"]["sha"] == (sha or state["expected_sha"]),
@@ -523,8 +517,7 @@ def watch_review(store, name, state, read, now):
         return cas(store, name, state, stage="blocked", reason="repeated_findings",
                    fresh_review=review, ci=ci)
     publication = dict(state["request"]["publication"], generation=state["generation"] + 1)
-    request.update(mode="publish", budgets=state["request"]["budgets"].copy(), publication=publication,
-                   deadline=state["request"]["deadline"])
+    request.update(mode="publish", budgets=state["request"]["budgets"].copy(), publication=publication)
     if state["request"].get("launch_run"):
         request["launch_run"] = state["request"]["launch_run"]
     value = checkpoint(request)
@@ -565,8 +558,7 @@ def watch_self(store, name, state, read, now):
                 and fresh["frozen_sha"] == state["expected_sha"],
                 "Self-review head/base branch changed before next pass")
         publication = dict(request["publication"], generation=state["generation"] + 1)
-        fresh.update(mode="publish", budgets=request["budgets"].copy(),
-                     publication=publication, deadline=request["deadline"])
+        fresh.update(mode="publish", budgets=request["budgets"].copy(), publication=publication)
         if request.get("launch_run"):
             fresh["launch_run"] = request["launch_run"]
         value = checkpoint(fresh)
@@ -641,8 +633,7 @@ def watch_ci_fix(store, name, state, read, now):
     fresh["ci_evidence"] = collect(read, fresh, request["publication"]["required_checks"])
     require(fresh["ci_evidence"]["decision"] == "failed", "CI changed before diagnosis freeze")
     publication = dict(request["publication"], generation=state["generation"] + 1)
-    fresh.update(mode="publish", publication=publication, budgets=request["budgets"].copy(),
-                 deadline=request["deadline"])
+    fresh.update(mode="publish", publication=publication, budgets=request["budgets"].copy())
     if request.get("launch_run"):
         fresh["launch_run"] = request["launch_run"]
     value = checkpoint(fresh)
@@ -660,8 +651,6 @@ def advance(store, name, state, central, read, publisher, now):
     personal(state["request"])
     pipeline_budget(state)
     require(state["stage"] in STAGES, "No live transition for this checkpoint")
-    if now >= state["request"]["deadline"]:
-        return cas(store, name, state, stage="exhausted", reason="elapsed_deadline")
     if state["stage"] == "publication_intent":
         require(current(store, name) == state, "Cancelled or replaced publication reconciliation")
     else:
@@ -773,11 +762,9 @@ def main():
             denied = isinstance(error, APIError) and error.status in {401, 403, 404, 422}
             if denied:
                 uncertain = False
-            expired = int(time.time()) >= latest["request"]["deadline"]
             cas(store, name, latest,
-                stage="exhausted" if expired else latest["stage"] if uncertain else "blocked",
-                reason=("elapsed_deadline" if expired else
-                        "live_operation_requires_reconciliation" if uncertain else
+                stage=latest["stage"] if uncertain else "blocked",
+                reason=("live_operation_requires_reconciliation" if uncertain else
                         "publisher_permission_rejected" if denied else
                         "live_operation_rejected"),
                 error=type(error).__name__ + ": " + str(error)[:1000],

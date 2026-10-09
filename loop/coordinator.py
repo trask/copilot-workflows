@@ -117,7 +117,7 @@ def dispatch(store, name, api, now):
         require(state["request"].get("freeze_status") != "not_frozen",
                 "Unfrozen access gates cannot dispatch")
         maximum = pipeline_budget(state)
-        if now >= state["request"]["deadline"] or state["iteration"] >= maximum:
+        if state["iteration"] >= maximum:
             state.update(stage="exhausted", reason="budget_exhausted")
             return state
         ref = workflow_ref(state["request"])
@@ -192,14 +192,12 @@ def reconcile(store, name, api, now):
         return state
     pipeline_budget(state)
     request = state["request"]
-    runs = matching_runs(api, request) if state["intent"] and now < request["deadline"] else []
+    runs = matching_runs(api, request) if state["intent"] else []
 
     def operation(current):
         if current["generation"] != state["generation"] or current["stage"] in TERMINAL:
             return current
-        if now >= request["deadline"]:
-            current.update(stage="exhausted", reason="elapsed_deadline")
-        elif len(runs) > 1:
+        if len(runs) > 1:
             current.update(stage="blocked", reason="duplicate_run_identity",
                            report={"run_ids": [r["id"] for r in runs]})
         elif current["stage"] == "source_pending":
@@ -284,7 +282,6 @@ def cancel(store, name, previous_id, previous_generation, now=None):
 
 
 def record_result(store, name, expected, report, artifacts, now=None):
-    now = int(time.time()) if now is None else now
     def operation(state):
         require(state["schema"] == state["request"]["schema"] == 2,
                 "Legacy results are read-only")
@@ -292,10 +289,6 @@ def record_result(store, name, expected, report, artifacts, now=None):
                 and state["run"] == expected["run"]
                 and state["request"] == expected["request"], "Cancelled or stale verification result")
         pipeline_budget(state)
-        if now >= state["request"]["deadline"]:
-            state.update(stage="exhausted", reason="elapsed_deadline",
-                         report=report, artifacts=artifacts)
-            return state
         require(report.get("schema") == 2 and report.get("verification") == "verified"
                 and report["publication_eligible"] is False
                 and not {"validation", "validation_claim", "objective_validation"} & report.keys()

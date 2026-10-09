@@ -405,22 +405,17 @@ class EffectTests(unittest.TestCase):
         self.assertFalse(pending(state))
         self.assertEqual(1, len(publisher.posts))
 
-    def test_expired_wrong_owner_and_stale_generation_never_mutate(self):
-        for change in ("expired", "owner", "generation"):
+    def test_wrong_owner_and_stale_generation_never_mutate(self):
+        for change in ("owner", "generation"):
             store, name, state, read, publisher = self.context()
             state = self.step(store, name, state, read, publisher)
-            if change == "expired":
-                state = advance(store, name, state, None, read, publisher,
-                                state["request"]["deadline"])
-                self.assertEqual("exhausted", state["stage"])
+            if change == "owner":
+                state["coordinator_run"] = {"id": 100, "attempt": 1, "revision": SHA}
+                store.entries[name] = copy.deepcopy(state)
             else:
-                if change == "owner":
-                    state["coordinator_run"] = {"id": 100, "attempt": 1, "revision": SHA}
-                    store.entries[name] = copy.deepcopy(state)
-                else:
-                    store.entries[name]["generation"] += 1
-                with self.subTest(change=change), self.assertRaises(Rejected):
-                    self.step(store, name, state, read, publisher)
+                store.entries[name]["generation"] += 1
+            with self.subTest(change=change), self.assertRaises(Rejected):
+                self.step(store, name, state, read, publisher)
             self.assertEqual([], publisher.posts)
 
     def test_cancellation_keeps_reply_intent_and_prevents_resolution(self):

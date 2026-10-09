@@ -18,7 +18,6 @@ REQUEST = re.compile(r"[0-9a-f]{32}\Z")
 TERMINAL = {"preview_complete", "shadow_complete", "blocked", "failed", "cancelled", "exhausted", "clean", "complete"}
 DEFAULTS = {
     "max_iterations": 5,
-    "deadline_seconds": 7200,
     "worker_timeout_minutes": 30,
     "retention_days": 14,
     "propagation_seconds": 120,
@@ -125,17 +124,17 @@ def pipeline_limit(request):
                     and diff_anchors(evidence["text"])[0] == evidence["anchors"],
                     "Incomplete authoritative PR diff binding")
     budgets = request.get("budgets")
-    require(isinstance(budgets, dict) and set(budgets) == set(DEFAULTS),
+    require(isinstance(budgets, dict)
+            and set(budgets) in (set(DEFAULTS), set(DEFAULTS) | {"deadline_seconds"}),
             "Missing or malformed frozen request budgets")
     maximum = budgets["max_iterations"]
     require(type(maximum) is int and maximum == DEFAULTS["max_iterations"]
             and all(type(budgets[key]) is int and budgets[key] == value
-                    for key, value in DEFAULTS.items() if key != "max_iterations"),
+                    for key, value in DEFAULTS.items() if key != "max_iterations")
+            and ("deadline_seconds" not in budgets
+                 or type(budgets["deadline_seconds"]) is int and budgets["deadline_seconds"] == 7200),
             "Unsupported frozen request budgets")
-    require(type(request.get("frozen_at")) is int and type(request.get("deadline")) is int
-            and request["frozen_at"] < request["deadline"]
-            <= request["frozen_at"] + budgets["deadline_seconds"],
-            "Invalid frozen request deadline")
+    require(type(request.get("frozen_at")) is int, "Invalid frozen request timestamp")
     if request.get("mode") == "publish":
         publication = request.get("publication")
         require(isinstance(publication, dict)
@@ -145,11 +144,8 @@ def pipeline_limit(request):
         require(type(publication.get("max_pipelines")) is int
                 and publication["max_pipelines"] == maximum,
                 "Inconsistent frozen publication pipeline budget")
-        require(type(publication.get("authorized_at")) is int
-                and type(publication.get("continuation_deadline")) is int
-                and request["deadline"] <= publication["continuation_deadline"]
-                <= publication["authorized_at"] + budgets["deadline_seconds"],
-                "Invalid frozen publication deadline")
+        require(type(publication.get("authorized_at")) is int,
+                "Invalid frozen publication timestamp")
     return maximum
 
 

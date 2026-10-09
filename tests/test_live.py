@@ -127,7 +127,7 @@ def personal_request(sha=SHA, max_pipelines=5):
                      "profile": PROFILE, "auth_mode": "fine_grained_pat", "generation": 6,
                      "authorized_actor_id": AUTHOR_ID,
                      "required_checks": [CI_CHECK], "phase": "1" * 32,
-                     "authorized_at": 100, "continuation_deadline": 7300,
+                     "authorized_at": 100,
                      "max_pipelines": max_pipelines,
                  })
     value["findings"] = [{
@@ -362,7 +362,7 @@ class ProtocolTests(unittest.TestCase):
                          "fine_grained_pat", [CI_CHECK], True, 100)
         self.assertEqual("ready", ready["stage"])
         self.assertEqual(5, ready["request"]["budgets"]["max_iterations"])
-        self.assertEqual(state["request"]["deadline"], ready["request"]["deadline"])
+        self.assertEqual(state["request"]["budgets"], ready["request"]["budgets"])
         self.assertNotEqual(state["request"]["publication"]["phase"],
                             ready["request"]["publication"]["phase"])
         self.assertEqual(5, ready["request"]["publication"]["max_pipelines"])
@@ -374,9 +374,10 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual([CI_CHECK], configured["request"]["publication"]["required_checks"])
         self.assertEqual(5, configured["request"]["publication"]["max_pipelines"])
         store, _ = stored(state)
-        with self.assertRaises(Rejected):
-            start(store, FakeAPI(), new, "d" * 32, 6, True,
-                  "fine_grained_pat", [CI_CHECK], True, 8000)
+        _, delayed = start(store, FakeAPI(), new, "d" * 32, 6, True,
+                           "fine_grained_pat", [CI_CHECK], True, 3 * 86400)
+        self.assertEqual("ready", delayed["stage"])
+        self.assertEqual(3 * 86400, delayed["request"]["publication"]["authorized_at"])
         for key, value in [("effects", [{"uncertain": True}]),
                            ("publication_intent", {"status": "uncertain"}),
                            ("capability", {"probe": True})]:
@@ -571,17 +572,15 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(Rejected):
             cas(store, name, dict(state, generation=99), stage="ready")
 
-    def test_deadlines_exhaust_every_live_stage_and_never_launch_publisher(self):
+    def test_live_stages_remain_selectable_after_days(self):
         from loop.live import STAGES
         for stage in STAGES:
             state = live_state(stage=stage)
             store, name = stored(state)
-            with patch("loop.cli.output") as output:
-                choose_live(store, 8000)
-            self.assertEqual("exhausted", store.entries[name]["stage"])
-            output.assert_not_called()
-            store, name = stored(state)
-            self.assertEqual("exhausted", advance(store, name, state, None, Read(), None, 8000)["stage"])
+            with patch("loop.cli.output") as output, patch("loop.cli.publisher_secret", return_value=SECRET):
+                self.assertEqual(name, choose_live(store, 3 * 86400))
+            self.assertEqual(state, store.entries[name])
+            self.assertIn(("live", "true"), [call.args for call in output.call_args_list])
 
 
 
@@ -620,23 +619,35 @@ class AcceptanceTests(unittest.TestCase):
             with self.assertRaises(APIError):
                 confirm_push(store, name, state, read, 200)
         self.assertEqual(state, store.entries[name])
-        expired = advance(store, name, state, None, read, None, 8000)
-        self.assertEqual("exhausted", expired["stage"])
-        self.assertEqual(state["publication_intent"], expired["publication_intent"])
-        self.assertEqual(1, expired["iteration"])
+
+    def test_publication_after_days_still_confirms_the_exact_candidate(self):
+        state, _ = self.context()
+        candidate = state["report"]["candidate"]
+        store, name = stored(state)
+        read = Read()
+        publisher = Publisher(read)
+        def pushed(*_args):
+            read.pr["head"]["sha"] = candidate["commit"]
+        with patch("loop.live.evidence", return_value=({"profile": PROFILE}, candidate)), \
+                patch("loop.live.authenticated_push", side_effect=pushed) as push, \
+                patch("loop.live.time.time", return_value=3 * 86400):
+            published = advance(store, name, state, Mock(), read, publisher, 3 * 86400)
+        push.assert_called_once()
+        self.assertEqual("published", published["stage"])
+        self.assertEqual("confirmed", published["publication_intent"]["status"])
+        self.assertEqual(candidate["commit"], published["expected_sha"])
+        self.assertEqual(3 * 86400, published["publications"][0]["confirmed_at"])
 
     def test_explicit_recovery_only_confirms_exact_existing_published_intent(self):
         self.recovery_case()
 
-    def restart_case(self, expired=False):
+    def restart_case(self):
         state, manifest = self.context()
         state.update(stage="blocked", reason="blocked_uncertain_publication_requires_operator",
                      intent={"id": "d" * 32},
                      coordinator_run={"id": 100, "attempt": 1, "revision": REVISION},
                      source_claim={"run_id": 77, "run_attempt": 1})
         state["request"]["launch_run"] = {"id": 77, "attempt": 1, "actor_id": AUTHOR_ID}
-        if expired:
-            state["request"]["deadline"] = 399
         state["report"]["request_digest"] = manifest["request_digest"] = digest(state["request"])
         state["report"]["dispositions"]["request_digest"] = digest(state["request"])
         state["publication_intent"] = {
@@ -660,7 +671,7 @@ class AcceptanceTests(unittest.TestCase):
         central.call.side_effect = call
         central.pages.return_value = [server[24]]
         new = dict(personal_request(max_pipelines=5), request_id="e" * 32,
-                   workflow_revision="f" * 40, frozen_at=1200, frozen_at_iso=iso(1200), deadline=8400,
+                   workflow_revision="f" * 40, frozen_at=1200, frozen_at_iso=iso(1200),
                    launch_run={"id": 102, "attempt": 1, "actor_id": AUTHOR_ID}, mode="shadow")
         new.pop("publication")
         environment = {
@@ -674,9 +685,9 @@ class AcceptanceTests(unittest.TestCase):
         }
         return state, new, central, server, environment
 
-    def test_unpublished_restart_is_new_work_not_a_retry_even_after_old_deadline(self):
-        for expired, status in [(False, "uncertain"), (True, "uncertain"), (False, "acknowledged")]:
-            old, new, central, _, environment = self.restart_case(expired)
+    def test_unpublished_restart_is_new_work_not_a_retry(self):
+        for status in ("uncertain", "acknowledged"):
+            old, new, central, _, environment = self.restart_case()
             if status == "acknowledged":
                 old["publication_intent"]["status"] = status
                 old["reason"] = "publication_API_propagation_timeout"
@@ -698,7 +709,6 @@ class AcceptanceTests(unittest.TestCase):
             self.assertNotIn("publication_intent", fresh)
             self.assertNotEqual(old["phase"], fresh["phase"])
             self.assertEqual(5, fresh["request"]["publication"]["max_pipelines"])
-            self.assertEqual(8400, fresh["request"]["deadline"])
             self.assertEqual("request-" + "d" * 32 + ".json", fresh["restart"]["archive"])
             self.assertEqual(new["launch_run"], fresh["restart"]["launch_run"])
             self.assertEqual(old["publication_intent"]["candidate"]["commit"],
@@ -937,7 +947,7 @@ class AcceptanceTests(unittest.TestCase):
                 patch("loop.live.artifact_metadata", return_value=(artifact, [artifact])), \
                 patch("loop.live.object_bounds", create=True), self.assertRaises(Rejected):
             authorize_publication_reconciliation(store, central, read, "d" * 32, 6, REVISION, 400, FIXTURE, 1)
-        for mutation in ("cancelled", "expired", "already_reconciled", "other_head",
+        for mutation in ("cancelled", "already_reconciled", "other_head",
                          "other_tree", "rerun", "changed_artifact", "changed_acceptance"):
             value = copy.deepcopy(state)
             target = Read()
@@ -946,8 +956,6 @@ class AcceptanceTests(unittest.TestCase):
             originals[0]["digest"] = "sha256:" + "1" * 64
             if mutation == "cancelled":
                 value["stage"] = "cancelled"
-            elif mutation == "expired":
-                value["request"]["deadline"] = 399
             elif mutation == "already_reconciled":
                 value["reconciliation"] = {"execution_revision": "f" * 40}
             elif mutation == "other_head":
@@ -1146,7 +1154,7 @@ class ReviewTests(unittest.TestCase):
                 self.assertEqual("ready", result["stage"])
                 self.assertEqual(state["iteration"], result["iteration"])
                 self.assertEqual(state["phase"], result["phase"])
-                self.assertEqual(state["request"]["deadline"], result["request"]["deadline"])
+                self.assertEqual(state["request"]["budgets"], result["request"]["budgets"])
                 self.assertEqual(state["request"]["workflow_ref"], result["request"]["workflow_ref"])
                 self.assertEqual(state["publications"], result["publications"])
                 self.assertIn("inline:20", {f["key"] for f in result["request"]["findings"]})
@@ -1699,7 +1707,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(1, result["iteration"])
         self.assertEqual(7, result["generation"])
         self.assertNotEqual(state["request"]["request_id"], result["request"]["request_id"])
-        self.assertEqual(state["request"]["deadline"], result["request"]["deadline"])
+        self.assertEqual(state["request"]["budgets"], result["request"]["budgets"])
         self.assertEqual(state["request"]["publication"]["phase"], result["request"]["publication"]["phase"])
         exhausted = dict(state, iteration=5)
         store, name = stored(exhausted)
@@ -1733,7 +1741,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual("ready", result["stage"])
         self.assertEqual(7, result["generation"])
         self.assertEqual(1, result["iteration"])
-        self.assertEqual(state["request"]["deadline"], result["request"]["deadline"])
+        self.assertEqual(state["request"]["budgets"], result["request"]["budgets"])
         authorize.assert_any_call("users/copilot-pull-request-reviewer%5Bbot%5D", "GET", None)
         self.assertEqual([], publisher.posts)
         for path in ("users/other", "users/copilot-pull-request-reviewer%5Bbot%5D/extra",
@@ -1770,7 +1778,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual("ready", result["stage"])
         self.assertEqual(999, result["request"]["pr_author_id"])
         self.assertEqual(owner, result["request"]["commit_author"])
-        self.assertEqual(state["request"]["deadline"], result["request"]["deadline"])
+        self.assertEqual(state["request"]["budgets"], result["request"]["budgets"])
         read.call.assert_any_call(f"user/{AUTHOR_ID}")
         self.assertEqual([], publisher.posts)
         with self.assertRaisesRegex(Rejected, "Publisher read outside"):

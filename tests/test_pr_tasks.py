@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 from loop.api import API, APIError
 from loop.candidates import semantic
 from loop.ci import collect, diagnoses, same_attempts
-from loop.coordinator import cancel, checkpoint, quiescent
+from loop.coordinator import cancel, checkpoint, dispatch, quiescent
 from loop.freeze import freeze
 from loop.inputs import acquire
 from loop.live import advance, start, watch_ci_fix, watch_single
@@ -1275,14 +1275,35 @@ class CIRepairTests(unittest.TestCase):
         state.update(stage="waiting_ci", iteration=1, publications=[], effects=[])
         store, name = stored(state)
         read.base_tip = "f" * 40
-        ready = watch_ci_fix(store, name, state, read, 100)
+        ready = watch_ci_fix(store, name, state, read, 3 * 86400)
         self.assertEqual("ready", ready["stage"])
         self.assertEqual(read.base_tip, ready["request"]["base_sha"])
         self.assertEqual(req["frozen_sha"], ready["request"]["frozen_sha"])
-        self.assertEqual(req["deadline"], ready["request"]["deadline"])
         self.assertEqual(req["budgets"], ready["request"]["budgets"])
         self.assertEqual(1, ready["iteration"])
         self.assertEqual(state["phase"], ready["phase"])
+
+    def test_ci_after_days_can_complete_or_dispatch_the_next_fix(self):
+        for conclusion in ("success", "failure"):
+            req, read = self.context()
+            state = checkpoint(req)
+            state.update(stage="waiting_ci", iteration=1, publications=[], effects=[])
+            store, name = stored(state)
+            read.checks[0]["conclusion"] = conclusion
+            read.runs[0]["conclusion"] = conclusion
+            with self.subTest(conclusion=conclusion):
+                result = advance(store, name, state, Mock(), read, None, 3 * 86400)
+                self.assertEqual(1, result["iteration"])
+                self.assertEqual(state["phase"], result["phase"])
+                self.assertEqual(req["budgets"], result["request"]["budgets"])
+                if conclusion == "success":
+                    self.assertEqual("complete", result["stage"])
+                    self.assertEqual("CI_passed", result["task_completion"]["outcome"])
+                else:
+                    self.assertEqual("ready", result["stage"])
+                    dispatched = dispatch(store, name, FakeAPI(), 3 * 86400)
+                    self.assertEqual("dispatched", dispatched["stage"])
+                    self.assertEqual(2, dispatched["iteration"])
 
     def test_failed_checks_allow_diagnosis_and_nonblocking_checks_allow_clearance(self):
         req, read = self.context()

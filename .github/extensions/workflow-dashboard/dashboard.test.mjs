@@ -21,7 +21,7 @@ const fixture = (updates = {}, request = {}) => ({
     run: { id: 101, attempt: 1, conclusion: null },
     request: {
         schema: 2, protocol: "reviewable-v1", repo: "example/project", head_repo: "example/fork", pr: 12,
-        request_id: requestId("a"), frozen_at: 1000, deadline: 8200, frozen_sha: sha("a"),
+        request_id: requestId("a"), frozen_at: 1000, frozen_sha: sha("a"),
         loop_kind: "copilot_review", mode: "publish", budgets: { max_iterations: 5 },
         publication: { authorized_at: 1000 }, ...request,
     },

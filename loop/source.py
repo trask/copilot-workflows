@@ -68,7 +68,7 @@ def gated_request(repo, number, revision, now):
         "head_ref": None, "frozen_sha": None, "freeze_status": "not_frozen",
         "workflow_revision": revision, "request_id": uuid.uuid4().hex,
         "frozen_at": now, "frozen_at_iso": iso(now),
-        "deadline": now + DEFAULTS["deadline_seconds"], "budgets": DEFAULTS.copy(),
+        "budgets": DEFAULTS.copy(),
         "baseline_review_ids": [], "findings": [],
     }
 
@@ -137,7 +137,6 @@ def snapshot_identity(directory, sha, request=None):
 
 def acquire_source(directory, request, fetch=None):
     public_request(request)
-    require(int(time.time()) < request["deadline"], "Source acquisition deadline passed")
     git_dir = git(["rev-parse", "--git-dir"], directory).decode().strip()
     shallow_path = Path(directory) / git_dir / "shallow"
     if fetch is None:

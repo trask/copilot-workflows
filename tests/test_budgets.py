@@ -5,8 +5,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 from loop.api import APIError
-from loop.cli import choose_live
-from loop.coordinator import (checkpoint, dispatch, due, record_result)
+from loop.cli import choose_live, choose_verification
+from loop.coordinator import (checkpoint, dispatch, due, reconcile, record_result)
 from loop.freeze import freeze
 from loop.live import publish, start, watch_review
 from loop.policy import (DEFAULTS, Rejected, iso, pipeline_budget, pipeline_limit)
@@ -26,7 +26,6 @@ class BudgetTests(unittest.TestCase):
     def test_new_freeze_and_personal_phase_allow_five_total_including_initial(self):
         fresh = freeze(Read(), 1, REVISION, 100, FIXTURE)
         self.assertEqual(5, fresh["budgets"]["max_iterations"])
-        self.assertEqual(7300, fresh["deadline"])
         old = checkpoint(fresh)
         old.update(stage="blocked", reason="validation_unqualified")
         store, _ = stored(old)
@@ -36,7 +35,6 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(5, pipeline_budget(phase))
         self.assertEqual(5, phase["request"]["publication"]["max_pipelines"])
         self.assertEqual(0, phase["iteration"])
-        self.assertEqual(7400, phase["request"]["deadline"])
 
     def test_five_dispatches_and_fresh_findings_exhaust_without_sixth(self):
         state = live_state(personal_request(max_pipelines=5), "ready")
@@ -45,7 +43,7 @@ class BudgetTests(unittest.TestCase):
         store, name = stored(state)
         api = FakeAPI()
         for count in range(1, 6):
-            state = dispatch(store, name, api, 110 + count)
+            state = dispatch(store, name, api, 8000 * count)
             self.assertEqual("dispatched", state["stage"])
             self.assertEqual(count, state["iteration"])
             state.update(stage="waiting_review", review_request={
@@ -57,11 +55,10 @@ class BudgetTests(unittest.TestCase):
                 id=12 + count, body=NONCLEAN.replace("Include the final array element",
                                                    f"Finding after pipeline {count}"),
                 submitted_at=iso(200))]
-            state = watch_review(store, name, state, read, 400 + count)
+            state = watch_review(store, name, state, read, 8000 * count + 300)
             self.assertEqual(count, state["iteration"])
             self.assertEqual(original["budgets"], state["request"]["budgets"])
-            self.assertEqual(original["deadline"], state["request"]["deadline"])
-            for key in ("phase", "max_pipelines", "continuation_deadline"):
+            for key in ("phase", "max_pipelines"):
                 self.assertEqual(original["publication"][key], state["request"]["publication"][key])
             self.assertEqual("exhausted" if count == 5 else "ready", state["stage"])
         before = copy.deepcopy(state)
@@ -128,7 +125,7 @@ class BudgetTests(unittest.TestCase):
 
     def test_invalid_frozen_budgets_never_dispatch_or_publish(self):
         for change in ("missing", "missing_max", "extra", "zero", "six", "string", "boolean",
-                       "disagree", "missing_publication_max", "deadline_extension"):
+                       "disagree", "missing_publication_max"):
             state = live_state(personal_request(max_pipelines=5), "ready")
             req = state["request"]
             if change == "missing":
@@ -144,8 +141,6 @@ class BudgetTests(unittest.TestCase):
                 req["publication"]["max_pipelines"] = 2
             elif change == "missing_publication_max":
                 req["publication"].pop("max_pipelines")
-            else:
-                req["publication"]["continuation_deadline"] += 1
             store, name = stored(state)
             api = FakeAPI()
             with self.subTest(change=change):
@@ -157,6 +152,25 @@ class BudgetTests(unittest.TestCase):
                         publish(store, name, state, Mock(), Read(), Publisher(Read()), 400)
                     evidence.assert_not_called()
                 self.assertEqual([], api.calls)
+
+    def test_completed_worker_is_verified_and_accepted_after_days(self):
+        state = live_state(personal_request(), "ready")
+        state.update(iteration=0, run=None, intent=None, next_check_at=100)
+        store, name = stored(state)
+        api = FakeAPI([run()])
+        dispatched = dispatch(store, name, api, 100)
+        complete = reconcile(store, name, api, 3 * 86400)
+        self.assertEqual("verify_pending", complete["stage"])
+        self.assertEqual(dispatched["iteration"], complete["iteration"])
+        with patch("loop.cli.output") as output:
+            self.assertEqual(name, choose_verification(store, 3 * 86400))
+        self.assertIn(("verify", "true"), [call.args for call in output.call_args_list])
+        report = verified_result(complete["request"])
+        report["verification_run"] = {"id": 99, "attempt": 1}
+        accepted = record_result(store, name, complete, report, [], 3 * 86400)
+        self.assertEqual("publish_pending", accepted["stage"])
+        self.assertEqual(1, accepted["iteration"])
+        self.assertEqual(report, accepted["report"])
 
     def test_invalid_or_inconsistent_consumed_counts_fail_explicitly(self):
         for count in (None, -1, True, "4", 4.0, 6):

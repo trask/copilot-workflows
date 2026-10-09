@@ -48,7 +48,7 @@ export function checkedRecord(record) {
     if (!r || !repository(r.repo) || !Number.isSafeInteger(r.pr) || r.pr < 1 || r.pr >= 100000000 ||
         typeof r.request_id !== "string" || !REQUEST.test(r.request_id) || typeof s.stage !== "string" ||
         !Number.isInteger(s.iteration) || s.iteration < 0 || s.iteration > 100 ||
-        !Number.isInteger(r.frozen_at) || !Number.isInteger(r.deadline) ||
+        !Number.isInteger(r.frozen_at) || r.deadline !== undefined && !Number.isInteger(r.deadline) ||
         r.budgets?.max_iterations !== undefined && !Number.isInteger(r.budgets.max_iterations) ||
         ![r.frozen_sha, s.expected_sha].every((value) => value === null || value === undefined ||
             typeof value === "string" && SHA.test(value)) ||

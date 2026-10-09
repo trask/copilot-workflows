@@ -94,9 +94,6 @@ def poll(api, store, now, revision, checked):
             print(f"READ ONLY {name}: {type(error).__name__}: {error}", file=sys.stderr)
             continue
         try:
-            if now >= state["request"]["deadline"]:
-                summary(cas(store, name, state, stage="exhausted", reason="elapsed_deadline"))
-                continue
             if execution_ref(state) == "main" and revision != execution_revision(state):
                 summary(cas(store, name, state, stage="blocked",
                             reason="trusted_revision_changed_before_waiter"))

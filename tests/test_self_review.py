@@ -250,7 +250,6 @@ class SelfReviewTests(unittest.TestCase):
         state = next(iter(store.entries.values()))
         self.assertEqual(120, state["request"]["frozen_at"])
         self.assertEqual(120, state["request"]["publication"]["authorized_at"])
-        self.assertEqual(7320, state["request"]["deadline"])
         self.assertEqual("ready", state["stage"])
 
     def test_worker_semantics_are_exact_digest_bound_and_separate(self):
@@ -296,7 +295,7 @@ class SelfReviewTests(unittest.TestCase):
         self.assertEqual(candidate["commit"], result["request"]["frozen_sha"])
         self.assertEqual(MERGE_BASE, result["request"]["merge_base_sha"])
         self.assertEqual(1, result["iteration"])
-        self.assertEqual(state["request"]["deadline"], result["request"]["deadline"])
+        self.assertEqual(state["request"]["budgets"], result["request"]["budgets"])
         self.assertEqual(state["request"]["workflow_ref"], result["request"]["workflow_ref"])
         self.assertEqual(state["request"]["publication"]["phase"], result["phase"])
         self.assertEqual(state["request"]["publication"]["phase"],
@@ -406,7 +405,7 @@ class SelfReviewTests(unittest.TestCase):
         self.assertEqual("ready", result["stage"])
         self.assertEqual(read.base_tip, result["request"]["base_sha"])
         self.assertEqual(state["expected_sha"], result["request"]["frozen_sha"])
-        self.assertEqual(state["request"]["deadline"], result["request"]["deadline"])
+        self.assertEqual(state["request"]["budgets"], result["request"]["budgets"])
         self.assertEqual(state["request"]["budgets"], result["request"]["budgets"])
         self.assertEqual(state["iteration"], result["iteration"])
         self.assertEqual(state["phase"], result["phase"])
@@ -661,14 +660,13 @@ class ManualPhaseTests(unittest.TestCase):
                     old.update(stage=stage, iteration=5, effects=[], publications=[{"sha": SHA}])
                     store, name = stored(old)
                     fresh = self_request(False) if new_kind == "self_review" else personal_request(max_pipelines=5)
-                    fresh = dict(fresh, mode="shadow", request_id="e" * 32, frozen_at=8000, deadline=15200)
+                    fresh = dict(fresh, mode="shadow", request_id="e" * 32, frozen_at=8000)
                     fresh.pop("publication", None)
                     before = copy.deepcopy(old)
                     with self.subTest(old=old_kind, new=new_kind, stage=stage):
                         _, result = start(store, FakeAPI(), fresh, "", 0, True,
                                           "fine_grained_pat", [CI_CHECK], True, 8000)
                         self.assertEqual(0, result["iteration"])
-                        self.assertEqual(15200, result["request"]["deadline"])
                         self.assertEqual(5, pipeline_budget(result))
                         self.assertNotEqual(old["phase"], result["phase"])
                         self.assertEqual(new_kind, loop_kind(result["request"]))
@@ -711,7 +709,7 @@ class ManualPhaseTests(unittest.TestCase):
         read.pr["head"]["sha"] = REVISION
         read.reviews.append(review(id=13, commit_id=SHA, submitted_at=iso(200)))
         fresh = dict(self_request(False), request_id="e" * 32, frozen_sha=REVISION,
-                     frozen_at=8000, deadline=15200)
+                     frozen_at=8000)
         before = copy.deepcopy(old)
         store, name = stored(old)
         _, result = start(store, FakeAPI(), fresh, "", 0, True,

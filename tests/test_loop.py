@@ -49,7 +49,7 @@ def review(body="A finding", **kwargs):
 def request():
     return dict(eligible(pr()), schema=2, protocol="reviewable-v1", request_id="d" * 32, workflow_revision=REVISION,
                 commit_author={"id": AUTHOR_ID, "login": "launch-owner"},
-                frozen_at=10, frozen_at_iso="1970-01-01T00:00:10Z", deadline=7210,
+                frozen_at=10, frozen_at_iso="1970-01-01T00:00:10Z",
                 budgets=DEFAULTS.copy(),
                 findings=[{"key": "review:12", "body": "A finding"}],
                 baseline_review_ids=[12])
@@ -246,7 +246,7 @@ class ProtocolTests(unittest.TestCase):
         name = checkpoint_name(FIXTURE, 1, REPOSITORIES[FIXTURE])
         store.entries[name] = copy.deepcopy(old)
         new = dict(req, request_id="e" * 32, workflow_revision="f" * 40,
-                   frozen_at=500, deadline=7700)
+                   frozen_at=500)
         return store, FakeAPI([run()]), old, new, name
 
 
@@ -286,11 +286,11 @@ class ProtocolTests(unittest.TestCase):
         stopped = copy.deepcopy(store.entries[name])
         with self.assertRaises(Rejected):
             launch(store, request(), "shadow", True, api=api)
-        retry = dict(request(), request_id="e" * 32, frozen_at=500, deadline=7700)
+        retry = dict(request(), request_id="e" * 32, frozen_at=500)
         _, changed = launch(store, retry, "shadow", True, api=api)
         self.assertEqual("ready", changed["stage"])
         self.assertEqual(0, changed["iteration"])
-        self.assertEqual(7700, changed["request"]["deadline"])
+        self.assertEqual(500, changed["request"]["frozen_at"])
         self.assertNotEqual(stopped["phase"], changed["phase"])
         self.assertEqual(1, stopped["iteration"])
 
@@ -376,27 +376,12 @@ class ProtocolTests(unittest.TestCase):
             store, api = MemoryState(), FakeAPI([dict(run(), conclusion=conclusion)])
             name, _ = launch(store, request(), "shadow", True)
             dispatch(store, name, api, 11)
-            reconcile(store, name, api, 311)
+            reconcile(store, name, api, 3 * 86400)
             self.assertEqual(expected, store.entries[name]["stage"])
-        store, api = MemoryState(), FakeAPI()
-        name, _ = launch(store, request(), "shadow", True)
-        dispatch(store, name, api, 7211)
-        self.assertEqual("exhausted", store.entries[name]["stage"])
 
     def test_wrong_workflow_revision_rejected(self):
         with self.assertRaises(Rejected):
             run_binding(dict(run(), head_sha="f" * 40), request())
-
-    def test_expired_verification_is_never_launched_and_becomes_exhausted(self):
-        store = MemoryState()
-        state = checkpoint(request())
-        state.update(stage="verify_pending", iteration=1, run={"id": 24, "attempt": 1})
-        store.entries["pr-v2-210933087-1.json"] = state
-        with patch("loop.cli.output") as emit:
-            choose_verification(store, 7211)
-            emit.assert_not_called()
-        reconcile(store, "pr-v2-210933087-1.json", FakeAPI(), 7211)
-        self.assertEqual("exhausted", store.entries["pr-v2-210933087-1.json"]["stage"])
 
     def test_stale_head_in_finalize_persists_terminal_block(self):
         req = request()
