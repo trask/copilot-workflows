@@ -1810,6 +1810,39 @@ test("clear Copilot feedback removes a stopped run's red styling and error detai
     assert.equal(pr.phase.reason, "unknown_fresh_review_body");
 });
 
+test("failed conflict tooltips separate the last attempt from current conflict status", async () => {
+    const state = rendererState();
+    const pr = state.prs[0];
+    pr.evidence = { sha: pr.sha, conflicts: "yes" };
+    pr.phase = { kind: "pr_conflict_resolver", sha: pr.sha, stage: "failed", reason: "worker_failure" };
+    const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
+    const button = () => taskButtons(nodes.get("prs").firstChild)
+        .find((node) => node["aria-label"].startsWith("Resolve conflicts:"));
+    assert.equal(button()["aria-label"], "Resolve conflicts: Last attempt failed");
+    assert.equal(button()["data-tone"], "attention");
+    assert.equal(button().disabled, false);
+    assert.deepEqual(tooltipFor(button()).children.map((node) => [node.className, node.textContent]), [
+        ["tooltip-status", "Last attempt failed"],
+        ["tooltip-detail", "This PR still has merge conflicts with its target branch."],
+        ["tooltip-action", "This action brings changes from the target branch into your PR branch, resolves conflicts, and pushes the result. Your PR stays open."],
+    ]);
+    assert.equal(pr.phase.reason, "worker_failure");
+
+    pr.evidence.conflicts = "no";
+    renderer.render();
+    assert.equal(button().disabled, true);
+    assert.deepEqual(tooltipFor(button()).children.map((node) => node.textContent), [
+        "Last attempt failed", "No merge conflicts to resolve.",
+    ]);
+
+    pr.evidence = { sha: pr.sha, error: "Live conflict status could not be read." };
+    renderer.render();
+    assert.equal(button().disabled, false);
+    assert.deepEqual(tooltipFor(button()).children.map((node) => node.textContent), [
+        "Last attempt failed", "Live conflict status could not be read.", TASK_EFFECTS.pr_conflict_resolver,
+    ]);
+});
+
 test("disabled red tasks open readable details and the recorded run without dispatching", async () => {
     const state = rendererState();
     const pr = state.prs[0];
