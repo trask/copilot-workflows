@@ -16,7 +16,7 @@ from unittest.mock import Mock, patch
 
 from loop.api import API, APIError
 from loop.cli import choose_verification, finalize
-from loop.coordinator import (cancel, checkpoint, dispatch, reconcile, record_result, run_binding)
+from loop.coordinator import (cancel, checkpoint, dispatch, due, reconcile, record_result, run_binding)
 from loop.freeze import select_findings, unresolved_ids
 from loop.policy import (AUTHOR_ID, BOT_ID, BOT_NODE, CENTRAL, DEFAULTS, Rejected, bot, checkpoint_name, digest, dispositions, eligible, parse_target, publication_gate, unchanged)
 from loop.state import Conflict, State
@@ -489,6 +489,9 @@ class ProtocolTests(unittest.TestCase):
         read.assert_called_once()
         self.assertEqual("publish_pending", store.entries[name]["stage"])
         self.assertEqual("pending_fresh_trusted_personal_acceptance", store.entries[name]["reason"])
+        self.assertEqual(100, store.entries[name]["next_check_at"])
+        self.assertFalse(due(store.entries[name], 99))
+        self.assertTrue(due(store.entries[name], 100))
 
 class PublisherTests(unittest.TestCase):
     def context(self):

@@ -282,6 +282,8 @@ def cancel(store, name, previous_id, previous_generation, now=None):
 
 
 def record_result(store, name, expected, report, artifacts, now=None):
+    now = int(time.time()) if now is None else now
+
     def operation(state):
         require(state["schema"] == state["request"]["schema"] == 2,
                 "Legacy results are read-only")

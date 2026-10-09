@@ -169,6 +169,7 @@ class BudgetTests(unittest.TestCase):
         report["verification_run"] = {"id": 99, "attempt": 1}
         accepted = record_result(store, name, complete, report, [], 3 * 86400)
         self.assertEqual("publish_pending", accepted["stage"])
+        self.assertEqual(3 * 86400, accepted["next_check_at"])
         self.assertEqual(1, accepted["iteration"])
         self.assertEqual(report, accepted["report"])
 
