@@ -18,7 +18,7 @@ const ROUTES = {
 export const TASK_EFFECTS = {
     copilot_review: "Fix valid Copilot findings in code or stale PR description text, then reply to and resolve bot threads. Push source fixes and repeat review until clean.",
     self_review: "Review this PR and push fixes until review is clean. Correct the description if needed.",
-    pr_conflict_resolver: "Merge the base branch into this PR and push the resolved merge. Correct the description if needed. Does not merge the PR.",
+    pr_conflict_resolver: "This action brings changes from the target branch into your PR branch, resolves conflicts, and pushes the result. Your PR stays open.",
     ci_fix: "Investigate failing checks and push fixes. Correct the description if needed. May rerun failed jobs.",
     pr_description: "Update the PR title and description if needed.",
     pr_simplify: "Simplify this PR's code without changing behavior, then push changes. Correct the description if needed.",
@@ -318,6 +318,13 @@ export function taskPresentation(pr, kind, workflowReady, actions = []) {
     if (completion) {
         return evidence && (kind !== "copilot_review" || !evidence.disabled)
             ? idle() : result(completion.label, "complete");
+    }
+    if (kind === "pr_conflict_resolver" && phase.stage === "failed") {
+        return {
+            ...result("Last attempt failed", "attention"),
+            detail: pr.actionBlock ?? (evidence.label === "Conflicts"
+                ? "This PR still has merge conflicts with its target branch." : evidence.detail),
+        };
     }
     const terminal = {
         clean: ["Clean", "complete"], complete: ["Completed", "complete"],
