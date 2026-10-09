@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import os
 import runpy
 import tempfile
 import unittest
@@ -8,10 +9,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from loop import worker_output
-from loop.policy import LOOP_KINDS, Rejected, canonical, digest
+from loop.policy import LOOP_KINDS, Rejected, canonical, commit_author, digest
+from loop.verify import git
 from tests.support import semantic as review_result
-from tests.test_loop import GOOD_PATCH
-from tests.test_pr_tasks import result, task_request
+from tests.test_loop import GOOD_PATCH, baseline
+from tests.test_pr_tasks import objects, result, task_request
 
 
 class WorkerOutputTests(unittest.TestCase):
@@ -51,6 +53,43 @@ class WorkerOutputTests(unittest.TestCase):
             self.files(directory, value, b"native merge bundle")
             with self.assertRaisesRegex(Rejected, "Unknown worker outcome"):
                 worker_output.check_output(req, Path(directory))
+
+    def test_documented_merge_commit_uses_owner_despite_inherited_bot_identity(self):
+        worker = (Path(__file__).resolve().parents[1] /
+                  ".github" / "workflows" / "copilot-worker.md").read_text(encoding="utf-8")
+        recipe = worker.split("## Return native commits and a small result", 1)[1]
+        recipe = recipe.split("```python\n", 1)[1].split("\n```", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            repository, output = Path(directory, "target"), Path(directory, "output")
+            repository.mkdir()
+            output.mkdir()
+            git(["init", "--quiet"], repository)
+            ancestor = baseline(repository / ".git")
+            head = objects(repository / ".git", {"Foo.java": "new\n"}, [ancestor])
+            base = objects(repository / ".git", {"Foo.java": "old\n", "Incoming.txt": "base\n"},
+                           [ancestor])
+            req = task_request("pr_conflict_resolver")
+            req.update(frozen_sha=head, base_sha=base, merge_base_sha=ancestor)
+            git(["checkout", "--quiet", "--detach", head], repository)
+            git(["config", "user.name", "github-actions[bot]"], repository)
+            git(["config", "user.email", "github-actions[bot]@users.noreply.github.com"], repository)
+            git(["merge", "--no-commit", "--no-ff", base], repository)
+            with patch.dict(os.environ, {
+                    "GIT_AUTHOR_NAME": "github-actions[bot]",
+                    "GIT_AUTHOR_EMAIL": "github-actions[bot]@users.noreply.github.com",
+                    "GIT_COMMITTER_NAME": "github-actions[bot]",
+                    "GIT_COMMITTER_EMAIL": "github-actions[bot]@users.noreply.github.com"}):
+                exec(recipe, {"request": req, "target": repository})
+                (output / "result.json").write_bytes(canonical(result(req, "merge")))
+                (output / "diagnostics.txt").write_bytes(b"Preserved both frozen histories.")
+                worker_output.package(req, repository, output)
+            name, email = commit_author(req)
+            self.assertEqual([name, email, name, email],
+                             git(["show", "-s", "--format=%an%n%ae%n%cn%n%ce",
+                                  "HEAD"], repository).decode().splitlines())
+            self.assertEqual([head, base], git(["show", "-s", "--format=%P",
+                                              "HEAD"], repository).decode().strip().split())
+            self.assertTrue((output / "candidate.bundle").stat().st_size)
 
     def test_failed_description_shape_is_rejected_and_frozen_metadata_passes(self):
         req = task_request("pr_description")

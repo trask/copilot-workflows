@@ -268,10 +268,20 @@ name and email for author and committer, not a target-repository Git identity:
 
 ```python
 from loop.policy import commit_author
+from loop.source import git
+
 name, email = commit_author(request)
-git(["config", "user.name", name], target)
-git(["config", "user.email", email], target)
+message = "Resolve conflicts with the frozen base\n\n" + (
+    "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"
+)
+git(["-c", "user.name=" + name, "-c", "user.email=" + email,
+     "commit", "--quiet", "-m", message], target)
 ```
+
+Use this sanitized Git wrapper for every commit, with a subject appropriate to the
+change. Repository-local `user.name` and `user.email` alone do not override inherited
+Git author/committer environment variables. The wrapper removes those overrides,
+and the command-level configuration selects the frozen identity.
 
 Each commit needs a useful subject and the final trailer:
 
@@ -335,6 +345,8 @@ python3 -m loop.worker_output /tmp/target
 
 For description or other no-source work, omit the target argument.
 The helper creates `loop-output/candidate.bundle` from native commits, or an empty
-bundle for a no-change or blocked result. Correct packaging errors before returning.
+bundle for a no-change or blocked result. It checks every new commit's author and
+committer against the frozen owner before creating the bundle. Correct packaging
+errors before returning.
 Return exactly these three regular files. Packaging does not prove tests passed or
 authorize publication; the trusted publisher independently verifies the Git history.

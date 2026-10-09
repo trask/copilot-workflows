@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from loop.policy import loop_kind, require, source_effect, worker_result
-from loop.verify import FILES, git, parse_json
+from loop.verify import FILES, git, parse_json, verify_commit_author
 
 LIMITS = {"result.json": 256000, "candidate.bundle": None, "diagnostics.txt": 4194304}
 
@@ -20,10 +20,12 @@ def package(request, repository, directory=Path("loop-output")):
         tip = git(["rev-parse", "HEAD"], repository).decode().strip()
         git(["merge-base", "--is-ancestor", request["frozen_sha"], tip], repository)
         require(tip != request["frozen_sha"], "Code outcome requires a new commit")
-        git(["update-ref", "refs/heads/candidate", tip], repository)
         exclusions = ["^" + request["frozen_sha"]]
         if loop_kind(request) == "pr_conflict_resolver":
             exclusions.append("^" + request["base_sha"])
+        for commit in git(["rev-list", "--reverse", tip, *exclusions], repository).decode().splitlines():
+            verify_commit_author(repository, commit, request)
+        git(["update-ref", "refs/heads/candidate", tip], repository)
         git(["bundle", "create", str(bundle), "refs/heads/candidate", *exclusions], repository)
     else:
         if repository is not None and value["outcome"] != "blocked":

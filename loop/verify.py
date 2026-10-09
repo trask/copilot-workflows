@@ -97,6 +97,13 @@ def git(args, cwd, input_data=None, limits=None, allowed=(0,)):
     return proc.stdout
 
 
+def verify_commit_author(directory, commit, request):
+    name, email = commit_author(request)
+    author = git(["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", commit],
+                 directory).decode().strip().split("\0")
+    require(author == [name, email, name, email], "Candidate commit author differs from launch owner")
+
+
 def safe_source_path(path):
     require(isinstance(path, str) and path and "\x00" not in path, "Invalid Git path")
     components = path.replace("\\", "/").split("/")
@@ -171,7 +178,7 @@ def verify_candidate(files, request, fetch_source=None, *, repository_dir=None):
                      "cumulative_patch_sha256": empty_hash, "commits": [], "finding_commits": {},
                      "bundle_sha256": empty_hash}
         return candidate
-    name, email = commit_author(request)
+    commit_author(request)
     with (tempfile.TemporaryDirectory(prefix="review-verify-")
           if repository_dir is None else nullcontext(repository_dir)) as directory:
         git(["init", "--bare", "--quiet"], directory)
@@ -238,9 +245,7 @@ def verify_candidate(files, request, fetch_source=None, *, repository_dir=None):
             parents = git(["show", "-s", "--format=%P", commit], directory).decode().strip().split()
             require(parents == ([head, request["base_sha"]] if merge else [parent]),
                     "Candidate parents differ from the frozen linear or merge history")
-            author = git(["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", commit],
-                         directory).decode().strip().split("\0")
-            require(author == [name, email, name, email], "Candidate commit author differs from launch owner")
+            verify_commit_author(directory, commit, request)
             body = git(["show", "-s", "--format=%B", commit], directory).decode("utf-8").strip()
             require(body.endswith(TRAILER), "Candidate commit lacks Copilot co-author trailer")
             subject = body.splitlines()[0]

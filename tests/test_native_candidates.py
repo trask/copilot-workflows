@@ -85,9 +85,16 @@ class NativeCandidateTests(unittest.TestCase):
     def test_native_commits_cannot_change_author_or_omit_attribution(self):
         for options in ({"author": "someone@invalid"}, {"trailer": ""}):
             with self.subTest(options=options), tempfile.TemporaryDirectory() as root:
-                request, _, payload, fetch = self.candidate(root, **options)
+                with patch("loop.worker_output.verify_commit_author"):
+                    request, _, payload, fetch = self.candidate(root, **options)
                 with self.assertRaisesRegex(Rejected, "author|co-author"):
                     verify(payload, request, run(), {"id": 33, "digest": "server"}, fetch)
+
+    def test_packager_rejects_wrong_commit_identity_before_creating_bundle(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(Rejected, "author differs from launch owner"):
+                self.candidate(root, author="github-actions[bot]@users.noreply.github.com")
+            self.assertFalse(Path(root, "output", "candidate.bundle").exists())
 
     def test_publication_does_not_accept_a_model_authored_patch_artifact(self):
         request = personal_request()
