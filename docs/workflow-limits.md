@@ -1,6 +1,6 @@
 # Workflow budgets and deadlines
 
-Task phases have no overall elapsed-time deadline. Confirmed CI and review waits do not consume a time budget, but worker counts, individual execution timeouts, reconciliation windows and artifact expiration still limit progress.
+Task phases have no overall elapsed-time deadline. Fix CI's CI waits and Copilot-review waits do not consume a time budget, but worker counts, individual execution timeouts, reconciliation windows and artifact expiration still limit progress. Other tasks do not wait for target CI.
 
 This inventory covers repository-defined limits, including the generated worker configuration. GitHub platform limits and the target repository's CI timeouts apply separately. Each phase uses its pinned automation revision, so an older phase can have different limits.
 

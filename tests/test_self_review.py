@@ -321,17 +321,17 @@ class SelfReviewTests(unittest.TestCase):
         self.assertEqual(SHA, clean["expected_sha"])
         self.assertEqual([], publisher.posts)
 
-    def test_clean_waits_for_exact_ci_and_missing_failed_unknown_ci_stop(self):
-        for decision in ("pending", "failed", "missing", "none", "unknown"):
+    def test_clean_pass_finishes_with_pending_or_failed_ci(self):
+        for stage, conclusion in (("published", "failure"), ("waiting_ci", None)):
             state, read = published_state()
+            state["stage"] = stage
+            read.checks[0].update(status="in_progress" if conclusion is None else "completed",
+                                 conclusion=conclusion)
             store, name = stored(state)
-            with self.subTest(decision=decision), patch("loop.live.exact_ci", return_value={"decision": decision}):
+            with self.subTest(stage=stage):
                 result = advance(store, name, state, Mock(), read, Publisher(read), 100)
-                self.assertEqual("waiting_ci" if decision == "pending" else "blocked", result["stage"])
-                if decision == "pending":
-                    with patch("loop.live.exact_ci", return_value={"decision": "passed"}):
-                        result = advance(store, name, result, Mock(), read, Publisher(read), 400)
-                    self.assertEqual("clean", result["stage"])
+                self.assertEqual("clean", result["stage"])
+                self.assertEqual("explicit_self_review", result["reason"])
 
     def test_fifth_fixes_remain_published_but_cannot_declare_clean(self):
         state, read = published_state(True)
@@ -385,14 +385,11 @@ class SelfReviewTests(unittest.TestCase):
                 advance(store, name, state, Mock(), read, Publisher(read), 100)
             self.assertEqual(state, store.entries[name])
 
-    def test_base_tip_advancing_after_ci_collection_keeps_exact_head_clearance(self):
+    def test_base_tip_advancing_keeps_exact_head_review_clearance(self):
         state, read = published_state()
         store, name = stored(state)
-        def ci(*_args):
-            read.base_tip = "f" * 40
-            return {"decision": "passed"}
-        with patch("loop.live.exact_ci", side_effect=ci):
-            result = advance(store, name, state, Mock(), read, Publisher(read), 100)
+        read.base_tip = "f" * 40
+        result = advance(store, name, state, Mock(), read, Publisher(read), 100)
         self.assertEqual("clean", result["stage"])
         self.assertEqual(state["expected_sha"], result["expected_sha"])
         self.assertEqual(state["request"], result["request"])
@@ -830,7 +827,7 @@ class MixedWaiterTests(unittest.TestCase):
         api = Controls()
         with patch("loop.waiter.target_api", return_value=MixedReads(reads)):
             self.assertTrue(poll(api, store, 400, REVISION, {}))
-        self.assertCountEqual([FIXTURE + "#3", FIXTURE + "#6"],
+        self.assertCountEqual([FIXTURE + "#" + str(number) for number in (2, 3, 4, 6, 8, 10)],
                               [body["inputs"]["target"] for _, method, body in api.calls if method == "POST"])
         later, _ = phases(11, "verify_pending")
         name = next(name for name, state in later.entries.items() if state["request"]["pr"] == 11)

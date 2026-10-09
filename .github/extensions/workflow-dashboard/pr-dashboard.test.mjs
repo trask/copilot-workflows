@@ -7,7 +7,7 @@ import { GitHub, GitHubError, CENTRAL, MAX_RESPONSE, FAILED_COORDINATORS } from 
 import { PrDashboard, decodeDashboard } from "./pr-dashboard.mjs";
 import { Checkpoints } from "./state.mjs";
 import { REPOSITORIES, DEFAULT_REPOSITORY, LAUNCH_OWNER_ID, dashboardPath, targetParts } from "./repositories.mjs";
-import { actionBlock, actionEvidence, filterPulls, normalizeEvidence, normalizePull, taskChoices, taskPresentation, TASK_EFFECTS } from "./prs.mjs";
+import { actionBlock, actionEvidence, completionPresentation, filterPulls, normalizeEvidence, normalizePull, taskChoices, taskPresentation, TASK_EFFECTS } from "./prs.mjs";
 import { startServer } from "./server.mjs";
 import { KIND_LABELS } from "./kinds.mjs";
 
@@ -343,6 +343,12 @@ test("CI check selection uses workflow sequence and preserves distinct workflows
         { __typename: "StatusContext", context: "Build", state: "ERROR", createdAt: "2026-10-07T21:00:00Z" },
         { __typename: "StatusContext", context: "Build", state: "SUCCESS", createdAt: "2026-10-07T22:00:00Z" },
     ] }), sha).ci, "passing");
+});
+
+test("clean review completion describes review clearance separately from CI", () => {
+    assert.deepEqual(completionPresentation({ kind: "self_review", stage: "clean" }), {
+        label: "Clean", detail: "Review is clean for the recorded commit. CI is separate.",
+    });
 });
 
 test("Fix CI shows current evidence instead of a terminal repair outcome without rewriting history", () => {

@@ -12,7 +12,6 @@ from loop.control import busy
 from loop.live import cas, execution_revision, observed_review_request
 from loop.policy import (CENTRAL, DEFAULTS, TERMINAL, Rejected, bot, check_target, loop_kind, pipeline_budget,
                          require, supported_checkpoint, timestamp)
-from loop.reviews import exact_ci
 from loop.source import target_api
 from loop.state import State
 from loop.verify import git
@@ -43,12 +42,11 @@ def ready(api, state, now):
     require(stage in {"waiting_review", "waiting_ci"}, "Unsupported waiter stage")
     check_target(read, dict(state["request"], frozen_sha=state["expected_sha"]))
     if stage == "waiting_ci":
-        if loop_kind(state["request"]) == "ci_fix":
-            from loop.ci import collect
-            return collect(read, dict(state["request"], frozen_sha=state["expected_sha"]),
-                           state["request"]["publication"]["required_checks"])["decision"] != "pending"
-        return exact_ci(read, state["request"]["repo"], state["expected_sha"],
-                        state["request"]["publication"]["required_checks"])["decision"] != "pending"
+        if loop_kind(state["request"]) != "ci_fix":
+            return True
+        from loop.ci import collect
+        return collect(read, dict(state["request"], frozen_sha=state["expected_sha"]),
+                       state["request"]["publication"]["required_checks"])["decision"] != "pending"
     intent = state["review_request"]
     reviews = read.pages(f"repos/{state['request']['repo']}/pulls/{state['request']['pr']}/reviews")
     fresh = [review for review in reviews if bot(review.get("user"))

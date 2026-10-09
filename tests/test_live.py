@@ -1196,23 +1196,19 @@ class ReviewTests(unittest.TestCase):
         store, name = stored(state)
         self.assertEqual("repeated_findings", watch_review(store, name, state, read, 400)["reason"])
 
-    def test_novel_feedback_cannot_bypass_an_exhausted_budget_or_failed_ci(self):
-        for gate in ("budget", "ci"):
-            state = live_state(stage="waiting_review")
-            state["seen_inline_findings"] = inline_fingerprints(state["request"]["findings"])
-            state["review_request"] = {"baseline_review_ids": [12], "recorded_at": 100, "sha": SHA}
-            read = Read()
-            read.reviews.append(review(id=13, body=NONCLEAN + MISSED, submitted_at=iso(200)))
-            if gate == "budget":
-                state["iteration"] = 5
-            else:
-                read.checks[0]["conclusion"] = "failure"
-            store, name = stored(state)
-            with self.subTest(gate=gate), patch("loop.live.freeze") as freeze_next:
-                result = watch_review(store, name, state, read, 400)
-                self.assertEqual("remaining_findings_pipeline_budget" if gate == "budget"
-                                 else "target_ci_failed", result["reason"])
-                freeze_next.assert_not_called()
+    def test_novel_feedback_cannot_bypass_an_exhausted_budget(self):
+        state = live_state(stage="waiting_review")
+        state["seen_inline_findings"] = inline_fingerprints(state["request"]["findings"])
+        state["review_request"] = {"baseline_review_ids": [12], "recorded_at": 100, "sha": SHA}
+        state["iteration"] = 5
+        read = Read()
+        read.reviews.append(review(id=13, body=NONCLEAN + MISSED, submitted_at=iso(200)))
+        read.checks[0]["conclusion"] = "failure"
+        store, name = stored(state)
+        with patch("loop.live.freeze") as freeze_next:
+            result = watch_review(store, name, state, read, 400)
+        self.assertEqual("remaining_findings_pipeline_budget", result["reason"])
+        freeze_next.assert_not_called()
 
     def test_reused_root_fingerprint_survives_new_head_and_body_summary_wording(self):
         from loop.reviews import inline_fingerprints
@@ -1543,12 +1539,11 @@ class ReviewTests(unittest.TestCase):
                 publisher = Mock()
                 result = advance(store, name, state, FakeAPI(), read, publisher, 400)
                 self.assertEqual("clean", result["stage"])
-                self.assertEqual("fresh_review_and_exact_target_CI", result["reason"])
+                self.assertEqual("fresh_review", result["reason"])
                 self.assertEqual(1, result["iteration"])
-                self.assertEqual("passed", result["ci"]["decision"])
                 self.assertEqual([], publisher.mock_calls)
 
-    def test_no_finding_human_review_still_requires_closed_verified_threads_and_passing_ci(self):
+    def test_no_finding_human_review_requires_closed_verified_threads_not_ci(self):
         read, req = Read(), personal_request()
         read.comments[0]["commit_id"] = REVISION
         read.reviews.append(review(id=13, body=HUMAN_REVIEW + RESOLVED, submitted_at=iso(200)))
@@ -1563,7 +1558,7 @@ class ReviewTests(unittest.TestCase):
 
         state = live_state(stage="waiting_review")
         state["review_request"] = {"recorded_at": 100, "baseline_review_ids": [12]}
-        for ci, expected in (("pending", "waiting_ci"), ("failed", "blocked"), ("missing", "blocked")):
+        for ci in ("pending", "failed", "missing"):
             read = Read()
             read.resolved = True
             read.reviews.append(review(id=13, body=HUMAN_REVIEW + RESOLVED, submitted_at=iso(200)))
@@ -1576,9 +1571,8 @@ class ReviewTests(unittest.TestCase):
             store, name = stored(state)
             with self.subTest(ci=ci):
                 result = watch_review(store, name, state, read, 400)
-                self.assertEqual(expected, result["stage"])
+                self.assertEqual("clean", result["stage"])
                 self.assertEqual("clean", result["fresh_review"]["decision"])
-                self.assertEqual(ci, result["ci"]["decision"])
                 self.assertEqual(1, result["iteration"])
 
     def test_fresh_review_requires_submitted_exact_head_verified_bot_and_propagation(self):
@@ -1648,22 +1642,22 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual("passed", exact_ci(api, FIXTURE, SHA, [CI_CHECK])["decision"])
         self.assertTrue(any("page=2" in path for path in api.paths))
 
-    def test_review_watcher_continues_after_nonblocking_ci_results(self):
-        for conclusion in ("skipped", "neutral"):
+    def test_review_watcher_continues_with_findings_despite_pending_or_failed_ci(self):
+        for conclusion in (None, "failure"):
             with self.subTest(conclusion=conclusion):
                 state = live_state(stage="waiting_review")
                 state["review_request"] = {"baseline_review_ids": [12], "recorded_at": 100, "sha": SHA}
                 read = Read()
                 read.reviews = [review(id=13, body=NONCLEAN, submitted_at=iso(200))]
-                read.checks[0]["conclusion"] = conclusion
-                self.assertEqual("passed", exact_ci(read, FIXTURE, SHA, [CI_CHECK])["decision"])
+                read.checks[0].update(status="in_progress" if conclusion is None else "completed",
+                                      conclusion=conclusion)
                 store, name = stored(state)
                 result = watch_review(store, name, state, read, 400)
                 self.assertEqual("ready", result["stage"])
                 self.assertEqual(1, result["iteration"])
 
-    def test_review_watcher_waits_for_active_ci_before_missing_or_unknown_results(self):
-        state = live_state(stage="waiting_review")
+    def test_saved_review_ci_wait_resumes_review_work_while_ci_is_pending(self):
+        state = live_state(stage="waiting_ci")
         state["review_request"] = {"baseline_review_ids": [12], "recorded_at": 100, "sha": SHA}
         state["request"]["publication"]["required_checks"] += ["optional job", "dependent job"]
         read = Read()
@@ -1672,20 +1666,11 @@ class ReviewTests(unittest.TestCase):
         read.checks.append(dict(read.checks[0], id=334, name="optional job",
                                 status="completed", conclusion=None))
         store, name = stored(state)
-        result = watch_review(store, name, state, read, 400)
-        self.assertEqual("waiting_ci", result["stage"])
-        self.assertEqual("pending", result["ci"]["decision"])
-        self.assertEqual(["pending", "unknown", "missing"],
-                         [check["decision"] for check in result["ci"]["checks"]])
-        read.checks[0].update(status="completed", conclusion="success")
-        self.assertEqual("unknown", exact_ci(
-            read, FIXTURE, SHA, state["request"]["publication"]["required_checks"])["decision"])
-        read.checks[0].update(status="in_progress", conclusion=None)
-        read.checks[1]["conclusion"] = "failure"
-        self.assertEqual("failed", exact_ci(
-            read, FIXTURE, SHA, state["request"]["publication"]["required_checks"])["decision"])
+        result = advance(store, name, state, FakeAPI(), read, Mock(), 400)
+        self.assertEqual("ready", result["stage"])
+        self.assertEqual(7, result["generation"])
 
-    def test_clean_requires_postpush_ci_nonclean_advances_only_remaining_bounded_pipeline(self):
+    def test_clean_finishes_without_ci_nonclean_advances_only_remaining_bounded_pipeline(self):
         state = live_state(stage="waiting_review")
         state["review_request"] = {"baseline_review_ids": [12], "recorded_at": 100, "sha": SHA}
         read = Read()
@@ -1696,7 +1681,7 @@ class ReviewTests(unittest.TestCase):
         read.checks = []
         store, name = stored(state)
         result = watch_review(store, name, state, read, 400)
-        self.assertEqual("target_ci_missing", result["reason"])
+        self.assertEqual("clean", result["stage"])
         read = Read()
         read.reviews = [review(id=13, body=NONCLEAN, submitted_at=iso(200))]
         store, name = stored(state)

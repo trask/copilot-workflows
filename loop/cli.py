@@ -525,7 +525,7 @@ def main():
                 store, api, request, args.previous_request, int(args.previous_generation or "0"),
                 os.environ.get("PUBLISHER_AVAILABLE") == "true",
                 os.environ.get("PUBLICATION_AUTH_MODE", ""),
-                [] if args.loop_kind in {"pr_description", "pr_review"} else select_checks(target_api(api, repo), request),
+                select_checks(target_api(api, repo), request) if args.loop_kind == "ci_fix" else [],
                 os.environ.get("INFERENCE_AVAILABLE") == "true", now,
                 restart_unpublished=args.restart_unpublished,
                 read=target_api(api, repo, request["head_repo"]))

@@ -231,7 +231,7 @@ export function actionBlock(pr, viewer, phase, ready, dispatch) {
 
 export function completionPresentation(phase) {
     if (phase.historical || phase.unknownStage || !["complete", "clean"].includes(phase.stage)) return null;
-    if (phase.stage === "clean") return { label: "Clean", detail: "Review is clean and CI passed for the recorded commit." };
+    if (phase.stage === "clean") return { label: "Clean", detail: "Review is clean for the recorded commit. CI is separate." };
     if (phase.kind === "pr_review") {
         if (phase.outcome === "no_change") return {
             label: "No findings", detail: "No new findings. No pending review was created.",

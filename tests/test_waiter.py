@@ -16,18 +16,25 @@ from loop.policy import CENTRAL, Rejected, canonical, checkpoint_name, iso
 from loop.state import Conflict, State
 from loop.waiter import main, poll, ready, run as wait, wake
 from tests.test_live import CLEAN, FIXTURE, Read, live_state, personal_request
-from tests.test_loop import FakeAPI, MemoryState, REVISION, review, run
+from tests.test_loop import FakeAPI, GOOD_PATCH, MemoryState, REVISION, review, run
 
 
 ENV = {"GITHUB_RUN_ID": "99", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": REVISION}
 
 
-def phases(count=1, stage="waiting_review"):
+def phases(count=1, stage="waiting_review", kind="copilot_review"):
     store = MemoryState()
     reads = {}
     for number in range(1, count + 1):
         request = personal_request(sha=f"{number + 100:040x}")
         request.update(pr=number, request_id=f"{number:032x}", head_ref=f"fix-{number}")
+        if kind != "copilot_review":
+            request.update(loop_kind=kind, base_ref="main", base_sha=REVISION,
+                           merge_base_sha=REVISION, pr_diff={
+                               "text": GOOD_PATCH.decode(),
+                               "sha256": hashlib.sha256(GOOD_PATCH).hexdigest(),
+                               "anchors": {"Foo.java": [1]},
+                           })
         state = live_state(request, stage)
         state["review_request"] = {"sha": request["frozen_sha"], "recorded_at": 100,
                                    "baseline_review_ids": [12], "baseline_run_ids": [200]}
@@ -143,15 +150,25 @@ class WaiterTests(unittest.TestCase):
             self.assertTrue(ready(Controls(), state, 370))
 
     def test_pending_ci_does_not_spawn_a_waiting_pr_runner(self):
-        store, reads = phases(stage="waiting_ci")
+        store, reads = phases(stage="waiting_ci", kind="ci_fix")
         state = next(iter(store.entries.values()))
-        reads[1].checks[0].update(status="in_progress", conclusion=None)
-        with patch("loop.waiter.target_api", return_value=Reads(reads)):
+        with patch("loop.waiter.target_api", return_value=Reads(reads)), \
+                patch("loop.ci.collect", return_value={"decision": "pending"}) as collect:
             self.assertFalse(ready(Controls(), state, 400))
-            reads[1].checks[0].update(status="completed", conclusion="failure")
+            collect.return_value = {"decision": "failed"}
             self.assertTrue(ready(Controls(), state, 400))
-            reads[1].checks = []
+            collect.return_value = {"decision": "missing"}
             self.assertTrue(ready(Controls(), state, 400))
+
+    def test_saved_non_repair_ci_waits_wake_while_ci_is_pending(self):
+        for kind in ("copilot_review", "self_review", "pr_simplify"):
+            store, reads = phases(stage="waiting_ci", kind=kind)
+            reads[1].checks[0].update(status="in_progress", conclusion=None)
+            api = Controls()
+            with self.subTest(kind=kind), patch("loop.waiter.target_api", return_value=Reads(reads)):
+                self.assertTrue(poll(api, store, 400, REVISION, {}))
+                self.assertEqual(1, len(api.calls))
+                self.assertEqual("POST", api.calls[0][1])
 
     def test_uncertain_request_is_confirmed_or_times_out_without_reposting(self):
         store, reads = phases(stage="review_request_intent")
@@ -201,13 +218,13 @@ class WaiterTests(unittest.TestCase):
         self.assertEqual(before, list(store.entries.values())[1])
 
     def test_ci_pending_for_days_can_finish_and_wake_the_coordinator(self):
-        store, reads = phases(stage="waiting_ci")
+        store, reads = phases(stage="waiting_ci", kind="ci_fix")
         api, checked = Controls(), {}
-        reads[1].checks[0].update(status="in_progress", conclusion=None)
-        with patch("loop.waiter.target_api", return_value=Reads(reads)):
+        with patch("loop.waiter.target_api", return_value=Reads(reads)), \
+                patch("loop.ci.collect", return_value={"decision": "pending"}) as collect:
             self.assertTrue(poll(api, store, 3 * 86400, REVISION, checked))
             self.assertEqual([], api.calls)
-            reads[1].checks[0].update(status="completed", conclusion="success")
+            collect.return_value = {"decision": "passed"}
             self.assertTrue(poll(api, store, 3 * 86400 + 300, REVISION, checked))
         self.assertEqual("waiting_ci", next(iter(store.entries.values()))["stage"])
         self.assertEqual(1, len(api.calls))

@@ -18,7 +18,7 @@ from loop.policy import (AUTHOR_ID, CENTRAL, DEFAULTS, PROFILE, REQUEST, TERMINA
 from loop.publication import (PublisherAPI,
                               authenticated_push, chain, evidence, personal, plan,
                               reconcile_uncertain_push)
-from loop.reviews import (exact_ci, finding_fingerprint, fresh_collection,
+from loop.reviews import (finding_fingerprint, fresh_collection,
                           inline_fingerprints, missed_fingerprints)
 from loop.state import State
 from loop.verify import artifact_metadata, git
@@ -488,21 +488,14 @@ def watch_review(store, name, state, read, now):
     if review["decision"] == "unknown":
         return cas(store, name, state, stage="blocked", reason="unknown_fresh_review_body",
                    fresh_review=review)
-    ci = exact_ci(read, state["request"]["repo"], state["expected_sha"], state["request"]["publication"]["required_checks"])
     guard(store, name, state, read, now)
-    if ci["decision"] == "pending":
-        return cas(store, name, state, stage="waiting_ci", fresh_review=review, ci=ci,
-                   next_check_at=now + 300)
-    if ci["decision"] != "passed":
-        return cas(store, name, state, stage="blocked", reason="target_ci_" + ci["decision"],
-                   fresh_review=review, ci=ci)
     if review["decision"] == "clean":
-        return cas(store, name, state, stage="clean", reason="fresh_review_and_exact_target_CI",
-                   fresh_review=review, ci=ci)
+        return cas(store, name, state, stage="clean", reason="fresh_review",
+                   fresh_review=review)
     require(review["decision"] == "findings", "Unknown fresh-review decision")
     if state["iteration"] >= maximum:
         return cas(store, name, state, stage="exhausted", reason="remaining_findings_pipeline_budget",
-                   fresh_review=review, ci=ci)
+                   fresh_review=review)
     request = freeze(read, state["request"]["pr"], execution_revision(state), now, state["request"]["repo"])
     inherit_pin(request, state)
     fingerprint = finding_fingerprint(request["findings"])
@@ -515,7 +508,7 @@ def watch_review(store, name, state, read, now):
             or (inline_ids and set(inline_ids) <= seen_inline
                 and not set(missed_ids) - seen_missed)):
         return cas(store, name, state, stage="blocked", reason="repeated_findings",
-                   fresh_review=review, ci=ci)
+                   fresh_review=review)
     publication = dict(state["request"]["publication"], generation=state["generation"] + 1)
     request.update(mode="publish", budgets=state["request"]["budgets"].copy(), publication=publication)
     if state["request"].get("launch_run"):
@@ -571,26 +564,16 @@ def watch_self(store, name, state, read, now):
             return value
         return store.update(name, next_iteration)
     require(result["outcome"] == "clean", "No-change is not self-review clearance")
-    ci = exact_ci(read, request["repo"], state["expected_sha"], request["publication"]["required_checks"])
     guard(store, name, state, read, now)
-    if ci["decision"] == "pending":
-        return cas(store, name, state, stage="waiting_ci", ci=ci, next_check_at=now + 300)
-    if ci["decision"] != "passed":
-        return cas(store, name, state, stage="blocked", reason="target_ci_" + ci["decision"], ci=ci)
-    return cas(store, name, state, stage="clean", reason="explicit_self_review_and_exact_target_CI", ci=ci)
+    return cas(store, name, state, stage="clean", reason="explicit_self_review")
 
 
 def watch_single(store, name, state, read, now):
-    request = state["request"]
-    ci = exact_ci(read, request["repo"], state["expected_sha"], request["publication"]["required_checks"])
     guard(store, name, state, read, now)
     completion = {"outcome": state["report"]["dispositions"]["outcome"],
                   "publication": "pushed" if state["report"]["candidate"]["changed"] else "no_change"}
-    if ci["decision"] == "pending":
-        return cas(store, name, state, stage="waiting_ci", ci=ci,
-                   task_completion=completion, next_check_at=now + 300)
-    return cas(store, name, state, stage="complete", reason="single_pass_complete_CI_" + ci["decision"],
-               task_completion=completion, ci=ci)
+    return cas(store, name, state, stage="complete", reason="single_pass_complete",
+               task_completion=completion)
 
 
 def watch_ci_fix(store, name, state, read, now):

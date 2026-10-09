@@ -430,7 +430,7 @@ class TaskContractsTests(unittest.TestCase):
         with self.assertRaises(Rejected):
             diff_anchors(GOOD_PATCH.decode().replace("+new\n", ""))
 
-    def test_no_change_simplify_and_consistency_finish_independently_of_failed_CI(self):
+    def test_no_change_simplify_and_consistency_finish_with_failed_CI(self):
         for kind in ("pr_simplify", "pr_consistency"):
             req = task_request(kind)
             state = task_state(req, result(req))
@@ -441,9 +441,22 @@ class TaskContractsTests(unittest.TestCase):
             store, name = stored(state)
             complete = watch_single(store, name, state, read, 100)
             self.assertEqual("complete", complete["stage"])
-            self.assertEqual("failed", complete["ci"]["decision"])
             self.assertEqual("no_change", complete["task_completion"]["publication"])
             self.assertNotIn("fresh_review", complete)
+
+    def test_source_tasks_finish_with_pending_ci_including_saved_waits(self):
+        for kind in ("pr_conflict_resolver", "pr_simplify", "pr_consistency"):
+            req = task_request(kind)
+            state = task_state(req, result(req))
+            state.update(stage="waiting_ci", expected_sha=SHA)
+            state["report"]["candidate"] = {"changed": True}
+            read = TaskRead(req)
+            read.checks[0].update(status="in_progress", conclusion=None)
+            store, name = stored(state)
+            with self.subTest(kind=kind):
+                complete = advance(store, name, state, FakeAPI(), read, Mock(), 100)
+                self.assertEqual("complete", complete["stage"])
+                self.assertEqual("pushed", complete["task_completion"]["publication"])
 
     def test_incorporated_base_needs_no_source_or_model(self):
         req = task_request("pr_conflict_resolver")
