@@ -134,7 +134,7 @@ function safePath(path) {
                 (!query.has("page") || /^[1-9][0-9]{0,2}$/.test(query.get("page")))) return path;
         }
     }
-    if (!new RegExp(`^repos/${CENTRAL}/(?:git/(?:(?:ref|matching-refs)/heads/review-loop-state|commits/[0-9a-f]{40}|trees/[0-9a-f]{40}|blobs/[0-9a-f]{40})|actions/runs(?:/[1-9][0-9]*)?)(?:\\?[^\\r\\n]*)?$`).test(path)) {
+    if (!new RegExp(`^repos/${CENTRAL}/(?:git/(?:(?:ref|matching-refs)/heads/review-loop-state|commits/[0-9a-f]{40}|trees/[0-9a-f]{40}|blobs/[0-9a-f]{40})|actions/(?:workflows/coordinator\\.yml/)?runs(?:/[1-9][0-9]*)?)(?:\\?[^\\r\\n]*)?$`).test(path)) {
         throw new GitHubError("Dashboard GitHub read is outside the allowed repository endpoints.");
     }
     return path;
@@ -267,6 +267,24 @@ export class GitHub {
             throw new GitHubError("GitHub returned an invalid recent coordinator failure listing.");
         }
         return data.workflow_runs;
+    }
+
+    async recentCoordinators(since) {
+        const runs = new Map();
+        for (let page = 1; ; page++) {
+            const { data } = await this.get(`repos/${CENTRAL}/actions/workflows/coordinator.yml/runs?per_page=100&page=${page}`);
+            if (!Array.isArray(data.workflow_runs) || data.workflow_runs.length > 100 ||
+                !Number.isSafeInteger(data.total_count) || data.total_count < 0 ||
+                data.workflow_runs.some((run) => !Number.isSafeInteger(run?.id) || run.id < 1 ||
+                    !Number.isFinite(Date.parse(run.created_at)))) {
+                throw new GitHubError("GitHub returned an invalid recent task run listing.");
+            }
+            for (const run of data.workflow_runs) {
+                if (Date.parse(run.created_at) >= since) runs.set(run.id, run);
+            }
+            if (data.workflow_runs.length < 100 ||
+                data.workflow_runs.some((run) => Date.parse(run.created_at) < since)) return [...runs.values()];
+        }
     }
 
     async pulls(repo) {

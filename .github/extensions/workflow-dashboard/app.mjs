@@ -177,7 +177,48 @@ function render() {
     $("warnings").textContent = warnings.join(" ");
     renderLoading();
     renderPulls();
+    renderRunLog();
     renderTroubleshooting();
+}
+
+function renderRunLog() {
+    const log = $("run-log");
+    log.setAttribute("aria-busy", String(busy || Boolean(state.loading)));
+    $("run-log-error").hidden = !state.runLogError;
+    $("run-log-error").textContent = state.runLogError
+        ? `Run log is ${state.runLogLoadedAt ? "stale" : "unavailable"}. ${state.runLogError}` : "";
+    $("run-log-warnings").hidden = !state.runLogWarnings?.length;
+    $("run-log-warnings").textContent = (state.runLogWarnings ?? []).join(" ");
+    $("run-log-count").textContent = (state.runLog ?? []).length;
+    log.replaceChildren();
+    for (const task of state.runLog ?? []) {
+        const row = element("article", null, "run");
+        const heading = element("div", null, "row");
+        heading.append(link(task.target ?? task.title, task.url));
+        const status = task.evidence ? completionPresentation(task)?.label ?? words(task.stage)
+            : task.stage === "completed" ? `Launch ${words(task.conclusion)}` : `Launch ${words(task.stage)}`;
+        heading.append(element("span", status, `badge ${task.category}`));
+        row.append(heading, element("p",
+            `${KIND_LABELS[task.kind] ?? words(task.kind)} · ${date(task.started)}`, "muted"));
+        const links = element("div", null, "links");
+        if (task.runUrl) links.append(link("Launch log", task.runUrl));
+        for (const range of task.changeRanges) {
+            if (range.url) links.append(link(
+                `Changes ${short(range.base)}..${short(range.head)} · ${range.commits} commit${range.commits === 1 ? "" : "s"}`,
+                range.url));
+            else {
+                links.append(link(`Pushed ${short(range.head)}`, range.commitUrl),
+                    element("span", "Commit-range boundary is not recorded.", "muted"));
+            }
+        }
+        row.append(links);
+        if (!task.evidence) row.append(element("p", "No saved task evidence. Publication is not confirmed.", "muted"));
+        else if (!task.changeRanges.length) row.append(element("p", "No confirmed commits pushed.", "muted"));
+        if (task.reason || task.error) row.append(element("p", task.error ?? words(task.reason), "muted"));
+        log.append(row);
+    }
+    if (!log.children.length) log.append(element("p", state.runLogLoadedAt
+        ? "No PR tasks ran in the past 24 hours." : "Run log has not been loaded yet.", "empty"));
 }
 
 function renderTroubleshooting() {

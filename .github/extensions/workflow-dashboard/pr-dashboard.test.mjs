@@ -115,6 +115,7 @@ function controller({ records = [], pulls = [pull()], dashboardState = state(), 
             detail: detail({ number: pr.number, head: pr.sha }),
         }])),
         failedCoordinators: async () => [],
+        recentCoordinators: async () => [],
         dispatch: async (inputs) => {
             calls.push(inputs);
             if (inputs.operation === "launch") currentRun = launchRun({
@@ -957,7 +958,7 @@ test("a complete PR refresh shares five read slots and adds one batched live-sta
         else if (path === "user") data = account;
         else if (path === `repos/${repo}/pulls?state=open&per_page=100`) data = [pull()];
         else if (path === dashboardPath(repo)) data = file(state());
-        else if (path === FAILED_COORDINATORS) {
+        else if (path === FAILED_COORDINATORS || path.includes("/actions/workflows/coordinator.yml/runs?per_page=100")) {
             data = { total_count: 0, workflow_runs: [] };
         } else throw new Error(`Unexpected refresh read ${path}`);
         return { code: 0, stdout: `HTTP/2.0 200 OK\r\n\r\n${JSON.stringify(data)}` };
@@ -969,8 +970,8 @@ test("a complete PR refresh shares five read slots and adds one batched live-sta
     };
     const result = await canvas.refresh();
     assert.equal(maximum, 5);
-    assert.equal(github.requests, 6);
-    assert.equal(result.cost, 6);
+    assert.equal(github.requests, 7);
+    assert.equal(result.cost, 7);
     assert.equal(result.error, null);
     assert.equal(result.prError, null);
     assert.equal(result.workflowReady, true);
@@ -1598,6 +1599,11 @@ test("extension declares shared task handlers and closes checkpoint storage with
     assert.equal(launch.inputSchema.additionalProperties, false);
     await assert.rejects(launch.handler({ input: { target, kind: "self_review", confirmed: false } }), /Confirm/);
     assert.equal((await declaration.actions[0].handler()).prs.length, 1);
+    const recentCoordinators = canvas.github.recentCoordinators;
+    canvas.github.recentCoordinators = async () => { throw new Error("Run log unavailable"); };
+    await assert.rejects(declaration.actions[0].handler(), /Run log unavailable/);
+    assert.equal(canvas.state().workflowReady, true);
+    canvas.github.recentCoordinators = recentCoordinators;
     const first = { instanceId: "first", input: {} };
     const second = { instanceId: "second", input: {} };
     t.after(async () => {

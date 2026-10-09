@@ -36,6 +36,13 @@
       <div id="warnings" class="notice" hidden></div>
       <div id="prs" aria-busy="false"></div>
     </section>
+    <section aria-labelledby="run-log-title">
+      <h2 id="run-log-title">Workflow run log <span id="run-log-count" class="badge"></span></h2>
+      <p class="muted">PR tasks launched or active in the past 24 hours, across all repositories. Changes includes every confirmed push from that task.</p>
+      <p id="run-log-error" class="error" role="alert" hidden></p>
+      <p id="run-log-warnings" class="notice" hidden></p>
+      <div id="run-log" aria-busy="false"></div>
+    </section>
     <section class="troubleshooting" aria-label="Troubleshooting">
       <details id="troubleshooting" class="card">
         <summary>Troubleshooting</summary>

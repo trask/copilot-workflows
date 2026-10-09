@@ -39,16 +39,18 @@ await joinSession({
     canvases: [createCanvas({
         id: "workflow-dashboard",
         displayName: "PR workflows",
-        description: "Browse open repository PRs, see needed work, filter by author or reviewer routing, and run or cancel central Actions tasks.",
+        description: "Browse open PRs, run or cancel tasks, and inspect the past 24 hours of tasks and their pushed commit ranges.",
         inputSchema: { type: "object", properties: { repo: { type: "string", enum: REPOSITORIES } }, additionalProperties: false },
         actions: [
             {
                 name: "refresh",
-                description: "Refresh open PRs, reviewer routing, live action evidence and central task status without starting workflows.",
+                description: "Refresh open PRs, live task status and the 24-hour run log without starting workflows.",
                 inputSchema: emptyInput,
                 handler: async () => {
                     const state = await dashboard.refresh();
-                    if (state.error || state.prError) throw new CanvasError("dashboard_refresh_failed", state.prError || state.error);
+                    if (state.error || state.prError || state.runLogError) {
+                        throw new CanvasError("dashboard_refresh_failed", state.prError || state.error || state.runLogError);
+                    }
                     return state;
                 },
             },

@@ -8,7 +8,7 @@ import { runInNewContext } from "node:vm";
 import { request as httpRequest } from "node:http";
 import { GitHub, GitHubError, CENTRAL, FAILED_COORDINATORS, parseResponse, runGh } from "./github.mjs";
 import { Checkpoints, runGit } from "./state.mjs";
-import { phaseSummary, targetHistory, actionSummary, failedActionSummary, commitLink, compareLink } from "./model.mjs";
+import { phaseSummary, targetHistory, actionSummary, failedActionSummary, commitLink, compareLink, recentTaskLog, RUN_LOG_WINDOW } from "./model.mjs";
 import { Dashboard } from "./dashboard.mjs";
 import { startServer } from "./server.mjs";
 import { KIND_LABELS } from "./kinds.mjs";
@@ -393,7 +393,25 @@ test("recent coordinator failures use one fixed bounded read, not historical pag
         { total_count: 1, workflow_runs: null }, { total_count: -1, workflow_runs: [] },
         { total_count: 21, workflow_runs: Array.from({ length: 21 }, () => failedCoordinator()) },
     ]) await assert.rejects(new GitHub(async () => response(data)).failedCoordinators(), /invalid/);
-    assert.throws(() => github.get(FAILED_COORDINATORS + "&page=2"), /outside/);
+});
+
+test("the run log paginates past polling runs and stops at the 24-hour boundary", async () => {
+    const since = Date.parse("2026-10-08T02:44:33Z");
+    const calls = [];
+    const github = new GitHub(async (args) => {
+        const path = args.at(-1);
+        calls.push(path);
+        const page = Number(new URL(`https://api.github.com/${path}`).searchParams.get("page"));
+        assert.equal(path, `repos/${CENTRAL}/actions/workflows/coordinator.yml/runs?per_page=100&page=${page}`);
+        return response({ total_count: 10000, workflow_runs: Array.from({ length: 100 }, (_, index) => ({
+            id: page * 100 + index, created_at: new Date(since + (page === 3 && index > 0 ? -1 : 1)).toISOString(),
+        })) });
+    });
+    const runs = await github.recentCoordinators(since);
+    assert.equal(runs.length, 201);
+    assert.equal(calls.length, 3);
+    await assert.rejects(new GitHub(async () => response({ total_count: 1,
+        workflow_runs: [{ id: 1, created_at: "missing" }] })).recentCoordinators(since), /invalid recent/);
 });
 
 test("rate limits honor Retry-After or reset and never leak response bodies", async () => {
@@ -699,6 +717,101 @@ test("missing snapshots retain confirmed publication links without inventing ite
     assert.equal(history.phases[0].iterations.length, 1);
 });
 
+const launch = (changes = {}) => ({
+    id: 202, run_attempt: 1, status: "completed", conclusion: "success",
+    display_title: `Review loop launch self_review ${target}`,
+    created_at: new Date(1000000).toISOString(), ...changes,
+});
+
+test("the run log combines confirmed batches across worker passes and retains separate launches", () => {
+    const publications = [
+        { request_id: requestId("a"), sha: sha("c"), effect: "push", confirmed_at: 1100,
+            candidate: { parent: sha("a"), commits: [
+                { commit: sha("b"), subject: "First fix" }, { commit: sha("c"), subject: "Second fix" },
+            ] } },
+        { request_id: requestId("b"), sha: sha("d"), effect: "push", confirmed_at: 1200,
+            candidate: { parent: sha("c"), commits: [{ commit: sha("d"), subject: "Third fix" }] } },
+        { request_id: requestId("c"), sha: sha("d"), effect: "no_change", confirmed_at: 1300 },
+    ];
+    const first = fixture({ publications: publications.slice(0, 1) }, {
+        loop_kind: "self_review", launch_run: { id: 202 },
+    });
+    const latest = fixture({ stage: "clean", iteration: 3, publications }, {
+        loop_kind: "self_review", launch_run: { id: 202 },
+        request_id: requestId("c"), frozen_sha: sha("d"), frozen_at: 1250,
+    });
+    const later = fixture({ phase: requestId("e"), stage: "complete" }, {
+        request_id: requestId("d"), loop_kind: "pr_description", launch_run: { id: 203 },
+        publication: { authorized_at: 1500 }, frozen_at: 1500, frozen_sha: sha("d"),
+    });
+    const log = recentTaskLog([
+        record(first, `request-${requestId("a")}.json`),
+        record(latest, `request-${requestId("c")}.json`), record(later),
+    ], [launch(), launch({ id: 203, display_title: `Review loop launch pr_description ${target}`,
+        created_at: new Date(1500000).toISOString() })], 2000000);
+    assert.equal(log.entries.length, 2);
+    assert.deepEqual(log.warnings, []);
+    const task = log.entries[1];
+    assert.equal(task.stage, "clean");
+    assert.equal(task.runUrl, `https://github.com/${CENTRAL}/actions/runs/202/attempts/1`);
+    assert.equal(task.changeRanges.length, 1);
+    assert.equal(task.changeRanges[0].commits, 3);
+    assert.equal(task.changeRanges[0].url,
+        `https://github.com/example/project/pull/12/changes/${sha("a")}..${sha("d")}`);
+    assert.equal(Object.hasOwn(task, "iterations"), false);
+    assert.deepEqual(log.entries[0].changeRanges, []);
+});
+
+test("the 24-hour log includes boundary launches, ongoing tasks and recent pushes, not unpublished candidates", () => {
+    const now = RUN_LOG_WINDOW + 2000000;
+    const old = fixture({ stage: "complete" });
+    const boundary = fixture({ phase: requestId("b"), stage: "complete",
+        report: { candidate: { commit: sha("c"), parent: sha("a"), changed: true } } }, {
+        request_id: requestId("b"), publication: { authorized_at: 2000 }, frozen_at: 2000,
+    });
+    const recentPush = fixture({ phase: requestId("c"), stage: "failed", publications: [
+        { request_id: requestId("c"), sha: sha("b"), effect: "push", confirmed_at: 2100,
+            candidate: { parent: sha("a") } },
+    ] }, { request_id: requestId("c") });
+    const ongoing = fixture({ phase: requestId("d"), stage: "waiting_ci" }, {
+        request_id: requestId("d"), launch_run: { id: 204 },
+    });
+    const log = recentTaskLog([
+        record(old, "request-old.json"), record(boundary, "request-boundary.json"),
+        record(recentPush, "request-recent.json"), record(ongoing, "pr-ongoing.json"),
+    ], [
+        launch({ id: 301, created_at: new Date(2000000).toISOString(), conclusion: "failure" }),
+        launch({ id: 302, created_at: new Date(1999999).toISOString() }),
+        launch({ id: 303, created_at: new Date(2100000).toISOString(), display_title: "Review loop tick abc" }),
+    ], now);
+    assert.equal(log.entries.length, 4);
+    assert.equal(log.entries.some((entry) => entry.phase === old.phase), false);
+    assert.deepEqual(log.entries.find((entry) => entry.phase === boundary.phase).changeRanges, []);
+    assert.equal(log.entries.find((entry) => entry.phase === recentPush.phase).changeRanges.length, 1);
+    assert.equal(log.entries.find((entry) => entry.phase === ongoing.phase).runUrl,
+        `https://github.com/${CENTRAL}/actions/runs/204/attempts/1`);
+    const failed = log.entries.find((entry) => !entry.evidence);
+    assert.equal(failed.conclusion, "failure");
+    assert.equal(failed.target, target);
+    assert.deepEqual(failed.changeRanges, []);
+});
+
+test("missing and discontinuous publication boundaries do not invent a cumulative range", () => {
+    const publications = [
+        { request_id: requestId("a"), sha: sha("b"), effect: "push", candidate: { parent: sha("a") } },
+        { request_id: requestId("b"), sha: sha("d"), effect: "push", candidate: { parent: sha("c") } },
+        { request_id: requestId("c"), sha: sha("e"), effect: "push" },
+    ];
+    const log = recentTaskLog([record(fixture({ stage: "complete", publications }))], [], 2000000);
+    const ranges = log.entries[0].changeRanges;
+    assert.equal(ranges.length, 3);
+    assert.equal(ranges[0].url, `https://github.com/example/project/pull/12/changes/${sha("a")}..${sha("b")}`);
+    assert.equal(ranges[1].url, `https://github.com/example/project/pull/12/changes/${sha("c")}..${sha("d")}`);
+    assert.equal(ranges[2].url, null);
+    assert.equal(ranges[2].commitUrl, `https://github.com/example/fork/commit/${sha("e")}`);
+    assert.equal(recentTaskLog([record({})], [], 2000000).warnings.length, 1);
+});
+
 test("worker Actions associate by recorded identities and accept completed runs", () => {
     const phase = phaseSummary(record(fixture({}, { launch_run: { id: 202 } })));
     const run = { id: 202, run_attempt: 1, status: "queued", name: "Coordinator" };
@@ -717,6 +830,7 @@ function fakeDashboard(now = () => 2000000) {
             return { data: { id: 101, status: "in_progress" } };
         },
         failedCoordinators: async () => { github.requests++; github.counted++; return []; },
+        recentCoordinators: async () => [],
     };
     const dashboard = new Dashboard(github, now);
     const snapshot = { sha: sha("a"), current: [record(fixture())] };
@@ -732,6 +846,7 @@ test("a fresh state branch absence loads failed launches without inventing histo
         const path = args.at(-1);
         if (path.endsWith("/git/matching-refs/heads/review-loop-state")) return response([]);
         if (path === FAILED_COORDINATORS) return response({ total_count: 1, workflow_runs: [failedCoordinator()] });
+        if (path.includes("/actions/workflows/coordinator.yml/runs?per_page=100")) return response({ total_count: 0, workflow_runs: [] });
         throw new Error(`Unexpected dashboard read ${path}`);
     });
     const dashboard = new Dashboard(github, () => 2000000);
@@ -769,6 +884,32 @@ test("refresh coalesces, keeps stale data on failure, and respects manual/low-ca
     const initialFailure = fakeDashboard();
     initialFailure.checkpoints.load = async () => { throw new Error("state missing"); };
     assert.equal((await initialFailure.refresh()).loadedAt, null);
+});
+
+test("archived run-log evidence refreshes independently and stays explicitly stale after failure", async () => {
+    const dashboard = fakeDashboard();
+    const archived = fixture({ phase: requestId("b"), stage: "complete" }, {
+        request_id: requestId("b"), launch_run: { id: 202 },
+    });
+    dashboard.checkpoints.history = async () => [
+        ...dashboard.checkpoints.snapshot.current, record(archived, "request-archived.json"),
+    ];
+    dashboard.github.recentCoordinators = async () => [
+        launch(), launch({ id: 203, conclusion: "failure" }),
+    ];
+    const first = await dashboard.refresh();
+    assert.equal(first.runLog.length, 3);
+    assert.equal(first.runLogLoadedAt, 2000000);
+    assert.equal(first.runLogError, null);
+    assert.equal(first.phases.length, 1);
+    dashboard.checkpoints.history = async () => { throw new Error("Archive unreadable"); };
+    const stale = await dashboard.refresh();
+    assert.equal(stale.error, null);
+    assert.equal(stale.phases.length, 1);
+    assert.deepEqual(stale.runLog, first.runLog);
+    assert.equal(stale.runLogLoadedAt, first.runLogLoadedAt);
+    assert.match(stale.runLogError, /Archive unreadable/);
+    assert.equal(stale.auto, false);
 });
 
 test("worker reads deduplicate active run IDs and preserve queued, running and completed evidence", async () => {
@@ -977,7 +1118,7 @@ test("history coalesces archive reads, reports failures, and cannot mix with a r
     let release;
     dashboard.checkpoints.history = async () => {
         loads++;
-        await new Promise((resolve) => release = resolve);
+        if (loads === 1) await new Promise((resolve) => release = resolve);
         return dashboard.checkpoints.snapshot.current;
     };
     const one = dashboard.history(target);
@@ -986,7 +1127,7 @@ test("history coalesces archive reads, reports failures, and cannot mix with a r
     release();
     assert.equal((await one).snapshot, (await two).snapshot);
     await refresh;
-    assert.equal(loads, 1);
+    assert.equal(loads, 2);
     dashboard.checkpoints.history = async () => { throw new Error("Missing archive"); };
     await assert.rejects(dashboard.history(target), /Missing archive/);
     assert.equal(dashboard.state().auto, false);
@@ -1109,6 +1250,38 @@ function rendererState(repository = "example/project") {
         }],
     };
 }
+
+test("the run log exposes exact task changes across repositories regardless of PR filters", async () => {
+    const state = rendererState();
+    state.runLogLoadedAt = 2000000;
+    const pushed = recentTaskLog([record(fixture({ stage: "clean", publications: [
+        { request_id: requestId("a"), sha: sha("c"), effect: "push",
+            candidate: { parent: sha("a"), commits: [
+                { commit: sha("b"), subject: "First" }, { commit: sha("c"), subject: "Second" },
+            ] } },
+    ] }, { repo: "example/other", loop_kind: "self_review", launch_run: { id: 202 } }))],
+    [], 2000000).entries[0];
+    state.runLog = [pushed, ...recentTaskLog([], [launch({ conclusion: "failure" })], 2000000).entries];
+    const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
+    nodes.get("search").value = "no matching PR";
+    renderer.render();
+    assert.equal(nodes.get("prs").firstChild.textContent, "No open PRs match these filters.");
+    assert.equal(nodes.get("run-log").children.length, 2);
+    const row = nodes.get("run-log").firstChild;
+    assert.equal(row.firstChild.firstChild.textContent, "example/other#12");
+    const links = row.children.find((node) => node.className === "links");
+    const changes = links.children.find((node) => node.textContent.startsWith("Changes"));
+    assert.equal(changes.href, `https://github.com/example/other/pull/12/changes/${sha("a")}..${sha("c")}`);
+    assert.match(changes.textContent, /2 commits/);
+    const failed = nodes.get("run-log").children[1];
+    assert.equal(failed.firstChild.children[1].textContent, "Launch failure");
+    assert.ok(failed.children.some((node) => /Publication is not confirmed/.test(node.textContent)));
+    state.runLogError = "History read failed";
+    renderer.render();
+    assert.equal(nodes.get("run-log-error").hidden, false);
+    assert.match(nodes.get("run-log-error").textContent, /stale.*History read failed/);
+    assert.equal(nodes.get("run-log").children.length, 2);
+});
 
 test("task tooltips separate status from effects and explain disabled controls without an action", async () => {
     const state = rendererState();

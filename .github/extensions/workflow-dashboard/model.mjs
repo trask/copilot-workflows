@@ -23,6 +23,12 @@ export function compareLink(repo, base, head) {
         ? `https://github.com/${repo}/compare/${base}...${head}` : null;
 }
 
+export function prChangesLink(repo, pr, base, head) {
+    return repository(repo) && Number.isSafeInteger(pr) && pr > 0 &&
+        SHA.test(base) && SHA.test(head) && base !== head
+        ? `https://github.com/${repo}/pull/${pr}/changes/${base}..${head}` : null;
+}
+
 export function runLink(run) {
     return Number.isSafeInteger(run?.id) && run.id > 0
         ? `https://github.com/${CENTRAL}/actions/runs/${run.id}${Number.isInteger(run.attempt) && run.attempt > 0 ? `/attempts/${run.attempt}` : ""}`
@@ -287,6 +293,7 @@ export function targetHistory(records, target) {
         const missingPublications = [...publications.keys()].filter((id) => !requests.has(id));
         phases.push({
             ...phaseSummary(latest), current: items.some((entry) => entry.name.startsWith("pr-")),
+            changeRanges: publicationRanges([...publications.values()], latest.state.request),
             iterations, gaps, missingPublications,
             orphanPublications: missingPublications.map((id) => {
                 const publication = publications.get(id);
@@ -303,6 +310,86 @@ export function targetHistory(records, target) {
         });
     }
     return { target, phases: phases.sort((a, b) => (b.started ?? 0) - (a.started ?? 0)), warnings };
+}
+
+function publicationRanges(publications, request) {
+    const ranges = [];
+    for (const publication of publications.filter((item) => item.effect === "push")) {
+        const base = publication.candidate?.parent ?? null;
+        const head = publication.sha;
+        const commits = publication.candidate?.commits?.length || 1;
+        const previous = ranges.at(-1);
+        if (previous?.url && base === previous.head) {
+            previous.head = head;
+            previous.commits += commits;
+            previous.url = prChangesLink(request.repo, request.pr, previous.base, head);
+            previous.commitUrl = commitLink(request.head_repo ?? request.repo, head);
+        } else ranges.push({
+            base, head, commits, url: prChangesLink(request.repo, request.pr, base, head),
+            commitUrl: commitLink(request.head_repo ?? request.repo, head),
+        });
+    }
+    return ranges;
+}
+
+export const RUN_LOG_WINDOW = 24 * 60 * 60 * 1000;
+
+export function recentTaskLog(records, runs, now) {
+    const since = now - RUN_LOG_WINDOW;
+    const targets = new Map();
+    const warnings = [];
+    for (const record of records) {
+        try {
+            checkedRecord(record);
+            const target = `${record.state.request.repo}#${record.state.request.pr}`;
+            if (!targets.has(target)) targets.set(target, []);
+            targets.get(target).push(record);
+        } catch (error) {
+            warnings.push(error.message);
+        }
+    }
+    const entries = new Map();
+    for (const [target, items] of targets) {
+        for (const phase of targetHistory(items, target).phases) {
+            const activity = items.filter((item) => phaseKey(item.state) === phase.phase).flatMap(({ state: s }) => [
+                time(s.request.frozen_at), time(s.intent?.recorded_at), time(s.cancelled_at),
+                ...(s.publications ?? []).map((publication) => time(publication.confirmed_at)),
+            ]);
+            const lastActivity = Math.max(phase.started ?? 0, ...activity.filter(Number.isFinite));
+            if (lastActivity < since && !["active", "waiting"].includes(phase.category)) continue;
+            entries.set(phase.launchId ?? phase.id, {
+                id: phase.id, phase: phase.phase, target: phase.target, url: phase.url,
+                kind: phase.kind, stage: phase.stage, category: phase.category,
+                started: phase.started, lastActivity, reason: phase.reason, error: phase.error,
+                historical: phase.historical, unknownStage: phase.unknownStage,
+                outcome: phase.outcome, pendingReviewUrl: phase.pendingReviewUrl,
+                reviewCommentCount: phase.reviewCommentCount, changeRanges: phase.changeRanges,
+                runUrl: runLink({ id: phase.launchId, attempt: 1 }), evidence: true,
+            });
+        }
+    }
+    for (const run of runs) {
+        if (!run.display_title?.startsWith("Review loop launch ") || Date.parse(run.created_at) < since) continue;
+        const action = actionSummary(run, []);
+        const match = /^Review loop launch (\S+) ([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([1-9][0-9]{0,7})$/.exec(run.display_title);
+        const entry = entries.get(run.id);
+        if (entry) {
+            entry.started = Date.parse(run.created_at);
+            entry.runUrl = action.url;
+            continue;
+        }
+        const [, kind, repo, number] = match ?? [];
+        entries.set(run.id, {
+            id: `launch:${run.id}`, kind: kind ?? null,
+            target: match ? `${repo}#${number}` : null,
+            url: match && repository(repo) ? `https://github.com/${repo}/pull/${number}` : null,
+            title: action.title, started: Date.parse(run.created_at),
+            runUrl: action.url, stage: run.status, conclusion: run.conclusion,
+            category: run.status === "completed" ? "attention" : "active",
+            changeRanges: [], evidence: false,
+        });
+    }
+    return { entries: [...entries.values()].sort((a, b) => b.started - a.started), warnings };
 }
 
 export function actionSummary(run, summaries) {

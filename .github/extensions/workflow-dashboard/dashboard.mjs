@@ -1,6 +1,6 @@
 import { GitHub, CENTRAL } from "./github.mjs";
 import { Checkpoints } from "./state.mjs";
-import { phaseSummary, targetHistory, actionSummary, failedActionSummary } from "./model.mjs";
+import { phaseSummary, targetHistory, actionSummary, failedActionSummary, recentTaskLog, RUN_LOG_WINDOW } from "./model.mjs";
 
 export class Dashboard {
     constructor(github = new GitHub(), now = () => Date.now()) {
@@ -16,6 +16,7 @@ export class Dashboard {
         this.value = {
             phases: [], actions: [], failures: [], warnings: [], loadedAt: null, error: null, loading: false,
             snapshot: null, latency: null, cost: null,
+            runLog: [], runLogLoadedAt: null, runLogError: null, runLogWarnings: [],
         };
     }
 
@@ -84,14 +85,28 @@ export class Dashboard {
         const warm = this.value.loadedAt !== null;
         this.value.loading = true;
         try {
+            const checkpoints = this.checkpoints.load();
             const reads = await Promise.allSettled([
                 this.github.failedCoordinators(),
-                this.checkpoints.load(),
+                checkpoints,
+                (async () => {
+                    const evidence = await Promise.allSettled([
+                        checkpoints.then((snapshot) => this.checkpoints.history(snapshot)),
+                        this.github.recentCoordinators(started - RUN_LOG_WINDOW),
+                    ]);
+                    const failure = evidence.find((read) => read.status === "rejected");
+                    if (failure) throw failure.reason;
+                    return recentTaskLog(evidence[0].value, evidence[1].value, started);
+                })(),
             ]);
+            if (reads[2].status === "fulfilled") {
+                this.value = { ...this.value, runLog: reads[2].value.entries,
+                    runLogWarnings: reads[2].value.warnings, runLogLoadedAt: started, runLogError: null };
+            } else this.value.runLogError = reads[2].reason.message;
             if (reads[0].status === "fulfilled") {
                 this.value.failures = reads[0].value.map((run) => failedActionSummary(run, []));
             }
-            const failure = reads.find((read) => read.status === "rejected");
+            const failure = reads.slice(0, 2).find((read) => read.status === "rejected");
             if (failure) throw failure.reason;
             const [failedRuns, snapshot] = reads.map((read) => read.value);
             const phases = [];
@@ -118,10 +133,12 @@ export class Dashboard {
             const failures = failedRuns.map((run) => failedActionSummary(run, phases));
             phases.sort((a, b) => (b.started ?? 0) - (a.started ?? 0));
             this.value = {
+                ...this.value,
                 phases, actions, failures, warnings, loadedAt: this.now(), snapshot: snapshot.sha,
                 error: null, loading: false, latency: this.now() - started, cost: this.github.counted - counted,
             };
-            if ([this.github.rate, this.github.graphqlRate].some((rate) =>
+            if (this.value.runLogError) this.pauseReason = "Automatic refresh paused after a failed run-log read.";
+            else if ([this.github.rate, this.github.graphqlRate].some((rate) =>
                 rate && rate.remaining < rate.limit * 0.1)) this.pauseReason = "Less than 10 percent of GitHub capacity remains.";
             else if (warm && this.value.latency > 10000) this.pauseReason = "Refresh took more than 10 seconds.";
             else this.pauseReason = null;
