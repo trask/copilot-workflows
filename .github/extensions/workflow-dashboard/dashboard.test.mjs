@@ -1163,7 +1163,7 @@ test("loopback serves assets and read-only endpoints; cross-origin data reads an
     assert.equal((await stale.json()).phases.length, 1);
 });
 
-async function rendererFixture(fetch, timers = { setInterval() {}, clearInterval() {} }) {
+async function rendererFixture(fetch, timers = { setInterval() {}, clearInterval() {} }, navigator = {}) {
     class Node {
         constructor(tag = "") {
             this.tag = tag; this.children = []; this.events = {}; this.style = {}; this.value = ""; this.isConnected = true;
@@ -1178,28 +1178,37 @@ async function rendererFixture(fetch, timers = { setInterval() {}, clearInterval
         setAttribute(name, value) { this[name] = value; }
         getAttribute(name) { return this[name] ?? null; }
         contains(node) { return this === node || this.children.some((child) => child.contains(node)); }
+        focus() { document.activeElement = this; }
+        select() { document.activeElement = this; }
+        remove() {
+            this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
+            this.isConnected = false;
+        }
         getBoundingClientRect() {
-            return this.className === "task-tooltip" ? { width: 320, height: 100 }
+            return ["task-tooltip", "link-menu"].includes(this.className) ? { width: 320, height: 100 }
                 : { left: 20, top: 100, bottom: 140 };
         }
     }
     const html = await readFile(new URL("index.html", import.meta.url), "utf8");
     assert.doesNotMatch(html, /<dialog\b|method="dialog"|id="troubleshooting"/);
     const nodes = new Map(Array.from(html.matchAll(/\bid="([^"]+)"/g), (match) => [match[1], new Node()]));
+    nodes.get("link-menu").className = "link-menu";
+    nodes.get("link-menu").hidden = true;
+    nodes.get("link-menu").append(nodes.get("copy-link"));
     for (const [input] of html.matchAll(/<input\b[^>]*>/g)) {
         const id = input.match(/\bid="([^"]+)"/)?.[1];
         if (id) nodes.get(id).checked = /\bchecked\b/.test(input);
     }
     const document = {
         hidden: false, getElementById: (id) => nodes.get(id), createElement: (tag) => new Node(tag),
-        activeElement: null, documentElement: { clientWidth: 800, clientHeight: 600 }, events: {},
+        activeElement: null, body: new Node("body"), documentElement: { clientWidth: 800, clientHeight: 600 }, events: {},
         createTextNode: (text) => Object.assign(new Node("#text"), { textContent: text }),
         addEventListener(name, action) { this.events[name] = action; },
     };
     const window = { events: {}, addEventListener(name, action) { this.events[name] = action; } };
     const script = await readFile(new URL("app.mjs", import.meta.url), "utf8");
     const renderer = await runInNewContext(`(async () => { ${script.replace(/^import .+;\r?$/gm, "")} return { render, heartbeat, refresh }; })()`, {
-        KIND_LABELS, filterPulls, taskPresentation, completionPresentation, TASK_EFFECTS, document, window, ...timers, fetch,
+        KIND_LABELS, filterPulls, taskPresentation, completionPresentation, TASK_EFFECTS, document, window, navigator, ...timers, fetch,
     });
     return { renderer, nodes, document, window, html };
 }
@@ -1227,6 +1236,105 @@ function rendererState(repository = "example/project") {
         }],
     };
 }
+
+test("right-click Copy link copies the selected PR URL without navigating or dispatching", async () => {
+    const state = rendererState();
+    const calls = [];
+    const { nodes, document } = await rendererFixture(async (path) => {
+        calls.push(path);
+        return { ok: true, json: async () => state };
+    });
+    let clipboard;
+    document.execCommand = (command) => {
+        assert.equal(command, "copy");
+        assert.equal(document.activeElement.tag, "textarea");
+        clipboard = document.activeElement.textContent;
+        return true;
+    };
+    const prLink = nodes.get("prs").firstChild.firstChild.firstChild;
+    let prevented = false;
+    let stopped = false;
+    prLink.events.contextmenu({
+        clientX: 790, clientY: 590,
+        preventDefault() { prevented = true; }, stopPropagation() { stopped = true; },
+    });
+    assert.equal(prevented, true);
+    assert.equal(stopped, true);
+    assert.equal(nodes.get("link-menu").hidden, false);
+    assert.equal(nodes.get("link-menu").style.left, "472px");
+    assert.equal(nodes.get("link-menu").style.top, "492px");
+    assert.equal(document.activeElement, nodes.get("copy-link"));
+    await nodes.get("copy-link").events.click();
+    assert.equal(clipboard, state.prs[0].url);
+    assert.equal(nodes.get("link-menu").hidden, true);
+    assert.equal(document.activeElement, prLink);
+    assert.equal(document.body.children.length, 0);
+    assert.equal(prLink.target, "_blank");
+    assert.equal(prLink.events.click, undefined);
+    assert.deepEqual(calls, ["/api/visibility?visible=true", "/api/state"]);
+});
+
+test("link menu dismisses on Escape, outside clicks and refresh, and copies run-log links", async () => {
+    const state = rendererState();
+    state.runLogLoadedAt = 2000000;
+    state.runLog = [{
+        number: 12, title: state.prs[0].title, url: state.prs[0].url, stage: "completed",
+        kind: "self_review", changeRanges: [],
+    }];
+    const { renderer, nodes, document, window } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
+    const prLink = nodes.get("prs").firstChild.firstChild.firstChild;
+    const open = (node = prLink) => node.events.contextmenu({
+        clientX: 30, clientY: 140, preventDefault() {}, stopPropagation() {},
+    });
+    open();
+    document.events.keydown({ key: "Escape" });
+    assert.equal(nodes.get("link-menu").hidden, true);
+    assert.equal(document.activeElement, prLink);
+    open();
+    document.events.pointerdown({ target: nodes.get("copy-link") });
+    assert.equal(nodes.get("link-menu").hidden, false);
+    document.events.pointerdown({ target: nodes.get("search") });
+    assert.equal(nodes.get("link-menu").hidden, true);
+    open();
+    renderer.render();
+    assert.equal(nodes.get("link-menu").hidden, true);
+    const logLink = nodes.get("run-log").firstChild.firstChild.firstChild;
+    open(logLink);
+    let clipboard;
+    document.execCommand = () => { clipboard = document.activeElement.textContent; return true; };
+    await nodes.get("copy-link").events.click();
+    assert.equal(clipboard, logLink.href);
+    open(logLink);
+    window.events.blur();
+    assert.equal(nodes.get("link-menu").hidden, true);
+});
+
+test("Copy link falls back to the Clipboard API and surfaces denied clipboard access", async () => {
+    const state = rendererState();
+    let clipboard;
+    let denied = false;
+    const { nodes, document } = await rendererFixture(async () => ({ ok: true, json: async () => state }),
+        undefined, { clipboard: { writeText: async (text) => {
+            if (denied) throw new Error("Permission denied.");
+            clipboard = text;
+        } } });
+    document.execCommand = () => false;
+    const prLink = nodes.get("prs").firstChild.firstChild.firstChild;
+    const open = () => prLink.events.contextmenu({
+        clientX: 30, clientY: 140, preventDefault() {}, stopPropagation() {},
+    });
+    open();
+    await nodes.get("copy-link").events.click();
+    assert.equal(clipboard, prLink.href);
+    assert.equal(document.body.children.length, 0);
+    denied = true;
+    open();
+    await nodes.get("copy-link").events.click();
+    assert.equal(nodes.get("error").hidden, false);
+    assert.equal(nodes.get("error").textContent, "Could not copy link. Permission denied.");
+    assert.equal(nodes.get("link-menu").hidden, true);
+    assert.equal(document.body.children.length, 0);
+});
 
 test("compact run-log rows show PR titles and exact changes regardless of author or search filters", async () => {
     const state = rendererState();

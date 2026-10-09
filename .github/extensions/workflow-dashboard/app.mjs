@@ -10,6 +10,7 @@ let runLogRequest = null;
 let inViewport = true;
 let activeTooltip = null;
 let tooltipId = 0;
+let contextLink = null;
 
 function visible() {
     return !document.hidden && inViewport;
@@ -33,6 +34,66 @@ function hideTooltip() {
     if (activeTooltip) activeTooltip.hidden = true;
     activeTooltip = null;
 }
+
+function hideLinkMenu(restoreFocus = false) {
+    $("link-menu").hidden = true;
+    if (restoreFocus && contextLink?.isConnected) contextLink.focus({ preventScroll: true });
+    contextLink = null;
+}
+
+function showLinkMenu(event, node) {
+    event.preventDefault();
+    event.stopPropagation();
+    hideTooltip();
+    contextLink = node;
+    const menu = $("link-menu");
+    menu.hidden = false;
+    const bounds = node.getBoundingClientRect();
+    const { width, height } = menu.getBoundingClientRect();
+    const viewport = document.documentElement;
+    menu.style.left = `${Math.max(8, Math.min(event.clientX || bounds.left, viewport.clientWidth - width - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(event.clientY || bounds.bottom, viewport.clientHeight - height - 8))}px`;
+    $("copy-link").focus({ preventScroll: true });
+}
+
+async function copyLink(url) {
+    // The canvas iframe's permissions policy can block the Clipboard API.
+    const text = element("textarea", url, "clipboard-text");
+    text.setAttribute("readonly", "");
+    document.body.append(text);
+    let copied;
+    try {
+        text.select();
+        copied = document.execCommand?.("copy");
+    } finally {
+        text.remove();
+    }
+    if (!copied) {
+        if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable.");
+        await navigator.clipboard.writeText(url);
+    }
+}
+
+$("copy-link").addEventListener("click", async () => {
+    const node = contextLink;
+    if (!node) return;
+    try {
+        await copyLink(node.href);
+    } catch (failure) {
+        error(`Could not copy link. ${failure.message}`);
+    } finally {
+        hideLinkMenu();
+        if (node.isConnected) node.focus({ preventScroll: true });
+    }
+});
+document.addEventListener("pointerdown", (event) => {
+    if (!$("link-menu").contains(event.target)) hideLinkMenu();
+});
+document.addEventListener("contextmenu", () => hideLinkMenu());
+$("link-menu").addEventListener("focusout", (event) => {
+    if (!$("link-menu").contains(event.relatedTarget)) hideLinkMenu();
+});
+window.addEventListener("blur", () => hideLinkMenu());
 
 function taskControl(button, status, detail, action) {
     const control = element("span", null, "task-control");
@@ -79,12 +140,19 @@ function taskControl(button, status, detail, action) {
 }
 
 document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") hideTooltip();
+    if (event.key === "Escape") {
+        hideTooltip();
+        hideLinkMenu(true);
+    }
 });
 document.addEventListener("scroll", (event) => {
     if (!activeTooltip?.contains(event.target)) hideTooltip();
+    hideLinkMenu();
 }, true);
-window.addEventListener("resize", hideTooltip);
+window.addEventListener("resize", () => {
+    hideTooltip();
+    hideLinkMenu();
+});
 
 function link(text, url) {
     if (!url || !/^https:\/\/github\.com\//.test(url)) return element("span", text, "muted");
@@ -92,6 +160,7 @@ function link(text, url) {
     node.href = url;
     node.target = "_blank";
     node.rel = "noopener noreferrer";
+    node.addEventListener("contextmenu", (event) => showLinkMenu(event, node));
     return node;
 }
 
@@ -164,6 +233,7 @@ function renderPulls() {
 
 function render() {
     if (!state) return;
+    hideLinkMenu();
     $("auto").checked = state.auto;
     $("pause").hidden = !state.pauseReason;
     $("pause").textContent = state.pauseReason ?? "";

@@ -147,6 +147,8 @@ Live action evidence is matched to the PR head and refreshed independently of sa
 
 PR headings show Draft and Approved labels immediately after the linked title, including both when applicable. Draft uses live GitHub status. Approved means the latest valid saved dashboard reports at least one approval from the repository's configured approver team, not necessarily a CODEOWNER for the changed files or clearance to merge. Missing or failed dashboard data shows no Approved label. Not my PRs also shows the author's username on the right; My PRs omits it. Neither view shows routing or dashboard-status pills.
 
+Right-click a PR title or another canvas link and choose Copy link to copy its URL. Left-click still opens GitHub. Press Escape or click outside the menu to dismiss it. Clipboard failures appear in the canvas error notice.
+
 PR cards show workflow status and task errors in button tooltips, and an Open pending review link when a draft GitHub review is ready. Pending reviews are visible only to you until submitted. Buttons use content-sized widths, 14px task text and 10px gaps, with space for a busy indicator only when needed. Labels wrap only between words. Buttons, including Cancel when available, move onto another row when needed.
 
 The canvas uses existing `gh` authentication for target PR/dashboard reads, central Contents/Actions reads and central Actions write access for dispatch. It never reads Actions secrets or uses local credentials to publish to targets. Only the workflow's configured personal owner can launch tasks; the central publisher still requires its separately configured credentials. No local agent sessions or model calls run in the canvas. Refreshes and iteration summaries use no model tokens.

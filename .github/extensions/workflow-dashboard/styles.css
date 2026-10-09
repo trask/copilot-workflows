@@ -20,6 +20,9 @@ button:hover { background: color-mix(in srgb, var(--text-color-muted, #59636e) 6
 :focus-visible { outline: 2px solid var(--color-focus-outline, #0969da); outline-offset: 3px; }
 a { color: var(--true-color-blue, #0969da); text-decoration: none; }
 a:hover { text-decoration: underline; }
+.link-menu { position: fixed; z-index: 101; padding: 4px; border: 1px solid var(--border-color-default, #d1d9e0); border-radius: 6px; background: var(--background-color-default, #fff); box-shadow: 0 4px 12px #0002; }
+.link-menu button { display: block; width: 100%; border: 0; text-align: left; }
+.clipboard-text { position: fixed; top: 0; left: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; }
 code { font: 12px var(--font-mono, Consolas, monospace); overflow-wrap: anywhere; }
 .counts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 .count { border: 1px solid var(--border-color-default, #d1d9e0); border-radius: 8px; padding: 14px; }
