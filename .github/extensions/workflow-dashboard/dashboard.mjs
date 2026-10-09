@@ -8,6 +8,8 @@ export class Dashboard {
         this.now = now;
         this.checkpoints = new Checkpoints(github);
         this.pending = null;
+        this.runLogPending = null;
+        this.runLogVersion = 0;
         this.historyPending = new Map();
         this.timer = null;
         this.viewers = new Map();
@@ -16,7 +18,7 @@ export class Dashboard {
         this.value = {
             phases: [], actions: [], failures: [], warnings: [], loadedAt: null, error: null, loading: false,
             snapshot: null, latency: null, cost: null,
-            runLog: [], runLogLoadedAt: null, runLogError: null, runLogWarnings: [],
+            runLog: [], runLogLoadedAt: null, runLogError: null, runLogWarnings: [], runLogLoading: false,
         };
     }
 
@@ -89,24 +91,11 @@ export class Dashboard {
             const reads = await Promise.allSettled([
                 this.github.failedCoordinators(),
                 checkpoints,
-                (async () => {
-                    const evidence = await Promise.allSettled([
-                        checkpoints.then((snapshot) => this.checkpoints.history(snapshot)),
-                        this.github.recentCoordinators(started - RUN_LOG_WINDOW),
-                    ]);
-                    const failure = evidence.find((read) => read.status === "rejected");
-                    if (failure) throw failure.reason;
-                    return recentTaskLog(evidence[0].value, evidence[1].value, started);
-                })(),
             ]);
-            if (reads[2].status === "fulfilled") {
-                this.value = { ...this.value, runLog: reads[2].value.entries,
-                    runLogWarnings: reads[2].value.warnings, runLogLoadedAt: started, runLogError: null };
-            } else this.value.runLogError = reads[2].reason.message;
             if (reads[0].status === "fulfilled") {
                 this.value.failures = reads[0].value.map((run) => failedActionSummary(run, []));
             }
-            const failure = reads.slice(0, 2).find((read) => read.status === "rejected");
+            const failure = reads.find((read) => read.status === "rejected");
             if (failure) throw failure.reason;
             const [failedRuns, snapshot] = reads.map((read) => read.value);
             const phases = [];
@@ -137,8 +126,7 @@ export class Dashboard {
                 phases, actions, failures, warnings, loadedAt: this.now(), snapshot: snapshot.sha,
                 error: null, loading: false, latency: this.now() - started, cost: this.github.counted - counted,
             };
-            if (this.value.runLogError) this.pauseReason = "Automatic refresh paused after a failed run-log read.";
-            else if ([this.github.rate, this.github.graphqlRate].some((rate) =>
+            if ([this.github.rate, this.github.graphqlRate].some((rate) =>
                 rate && rate.remaining < rate.limit * 0.1)) this.pauseReason = "Less than 10 percent of GitHub capacity remains.";
             else if (warm && this.value.latency > 10000) this.pauseReason = "Refresh took more than 10 seconds.";
             else this.pauseReason = null;
@@ -150,6 +138,46 @@ export class Dashboard {
             this.pauseReason = "Automatic refresh paused after a failed GitHub read.";
         }
         return this.state();
+    }
+
+    resetRunLog() {
+        this.runLogVersion++;
+        this.value = { ...this.value, runLog: [], runLogLoadedAt: null, runLogError: null,
+            runLogWarnings: [], runLogLoading: false };
+    }
+
+    refreshRunLog() {
+        const version = this.runLogVersion;
+        if (this.runLogPending) {
+            return this.runLogRequestVersion === version ? this.runLogPending
+                : this.runLogPending.then(() => this.refreshRunLog());
+        }
+        this.runLogRequestVersion = version;
+        this.value.runLogLoading = true;
+        this.runLogPending = this.updateRunLog(version).finally(() => {
+            if (version === this.runLogVersion) this.value.runLogLoading = false;
+            this.runLogPending = null;
+        }).then(() => this.state());
+        return this.runLogPending;
+    }
+
+    async updateRunLog(version) {
+        const started = this.now();
+        try {
+            const reads = await Promise.allSettled([
+                this.checkpoints.load({ updateSnapshot: false }).then((snapshot) => this.checkpoints.history(snapshot)),
+                this.github.recentCoordinators(started - RUN_LOG_WINDOW),
+            ]);
+            const failure = reads.find((read) => read.status === "rejected");
+            if (failure) throw failure.reason;
+            const log = recentTaskLog(reads[0].value, reads[1].value, started);
+            if (version === this.runLogVersion) {
+                this.value = { ...this.value, runLog: log.entries, runLogWarnings: log.warnings,
+                    runLogLoadedAt: started, runLogError: null };
+            }
+        } catch (error) {
+            if (version === this.runLogVersion) this.value.runLogError = error.message;
+        }
     }
 
     history(target) {

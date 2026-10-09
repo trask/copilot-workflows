@@ -476,6 +476,11 @@ test("state fetches a fresh shallow pinned snapshot and defers archives until hi
     await store.history(snapshot);
     assert.equal(reads.filter((path) => path.startsWith("request-")).length, 1);
     await commit({ "pr-v2-123-12.json": fixture({ stage: "complete" }) });
+    const selected = store.snapshot;
+    const logSnapshot = await store.load({ updateSnapshot: false });
+    assert.equal(store.snapshot, selected);
+    assert.equal(logSnapshot.current[0].state.stage, "complete");
+    assert.equal((await store.history(logSnapshot)).length, 2);
     const updated = await store.load();
     assert.notEqual(updated.sha, snapshot.sha);
     assert.equal(updated.current[0].state.stage, "complete");
@@ -886,30 +891,72 @@ test("refresh coalesces, keeps stale data on failure, and respects manual/low-ca
     assert.equal((await initialFailure.refresh()).loadedAt, null);
 });
 
-test("archived run-log evidence refreshes independently and stays explicitly stale after failure", async () => {
+test("run-log reads are on demand, coalesce, stay stale on failure and retry without pausing PR refresh", async () => {
     const dashboard = fakeDashboard();
     const archived = fixture({ phase: requestId("b"), stage: "complete" }, {
         request_id: requestId("b"), launch_run: { id: 202 },
     });
-    dashboard.checkpoints.history = async () => [
-        ...dashboard.checkpoints.snapshot.current, record(archived, "request-archived.json"),
-    ];
-    dashboard.github.recentCoordinators = async () => [
-        launch(), launch({ id: 203, conclusion: "failure" }),
-    ];
-    const first = await dashboard.refresh();
+    let archives = 0;
+    let runs = 0;
+    const history = async () => {
+        archives++;
+        return [...dashboard.checkpoints.snapshot.current, record(archived, "request-archived.json")];
+    };
+    dashboard.checkpoints.history = history;
+    dashboard.github.recentCoordinators = async () => {
+        runs++;
+        return [launch(), launch({ id: 203, conclusion: "failure" })];
+    };
+    const initial = await dashboard.refresh();
+    assert.equal(initial.runLogLoadedAt, null);
+    assert.deepEqual(initial.runLog, []);
+    assert.equal(archives, 0);
+    assert.equal(runs, 0);
+    const pending = dashboard.refreshRunLog();
+    assert.equal(pending, dashboard.refreshRunLog());
+    assert.equal(dashboard.state().runLogLoading, true);
+    assert.equal(dashboard.state().loading, false);
+    const first = await pending;
     assert.equal(first.runLog.length, 3);
     assert.equal(first.runLogLoadedAt, 2000000);
     assert.equal(first.runLogError, null);
     assert.equal(first.phases.length, 1);
+    assert.equal(first.runLogLoading, false);
+    assert.equal(archives, 1);
+    assert.equal(runs, 1);
+    assert.deepEqual((await dashboard.refresh()).runLog, first.runLog);
+    assert.equal(archives, 1);
+    assert.equal(runs, 1);
     dashboard.checkpoints.history = async () => { throw new Error("Archive unreadable"); };
-    const stale = await dashboard.refresh();
+    const stale = await dashboard.refreshRunLog();
     assert.equal(stale.error, null);
     assert.equal(stale.phases.length, 1);
     assert.deepEqual(stale.runLog, first.runLog);
     assert.equal(stale.runLogLoadedAt, first.runLogLoadedAt);
     assert.match(stale.runLogError, /Archive unreadable/);
-    assert.equal(stale.auto, false);
+    assert.equal(stale.auto, true);
+    assert.equal(stale.runLogLoading, false);
+    assert.equal((await dashboard.refresh()).auto, true);
+    assert.equal(runs, 2);
+    dashboard.checkpoints.history = history;
+    const recovered = await dashboard.refreshRunLog();
+    assert.equal(recovered.runLogError, null);
+    assert.equal(recovered.runLog.length, 3);
+    assert.equal(archives, 2);
+    assert.equal(runs, 3);
+});
+
+test("PR refresh does not wait for an in-flight on-demand run log", { timeout: 2000 }, async () => {
+    const dashboard = fakeDashboard();
+    let release;
+    dashboard.github.recentCoordinators = () => new Promise((resolve) => release = resolve);
+    const pending = dashboard.refreshRunLog();
+    const state = await dashboard.refresh();
+    assert.equal(state.loading, false);
+    assert.equal(state.runLogLoading, true);
+    assert.equal(state.phases.length, 1);
+    release([]);
+    assert.equal((await pending).runLogLoading, false);
 });
 
 test("worker reads deduplicate active run IDs and preserve queued, running and completed evidence", async () => {
@@ -1127,7 +1174,7 @@ test("history coalesces archive reads, reports failures, and cannot mix with a r
     release();
     assert.equal((await one).snapshot, (await two).snapshot);
     await refresh;
-    assert.equal(loads, 2);
+    assert.equal(loads, 1);
     dashboard.checkpoints.history = async () => { throw new Error("Missing archive"); };
     await assert.rejects(dashboard.history(target), /Missing archive/);
     assert.equal(dashboard.state().auto, false);
@@ -1174,6 +1221,14 @@ test("loopback serves assets and read-only endpoints; cross-origin data reads an
     });
     assert.equal(hostileHost, 403);
     assert.equal((await fetch(new URL("api/visibility?visible=maybe", server.url), { method: "POST" })).status, 400);
+    assert.equal((await fetch(new URL("api/refresh", server.url), { method: "POST" })).status, 200);
+    assert.equal(dashboard.state().runLogLoadedAt, null);
+    assert.equal((await fetch(new URL("api/run-log", server.url), { method: "POST" })).status, 200);
+    assert.equal(dashboard.state().runLogLoadedAt, 2000000);
+    dashboard.github.recentCoordinators = async () => { throw new Error("Run log unavailable"); };
+    const failedLog = await fetch(new URL("api/run-log", server.url), { method: "POST" });
+    assert.equal(failedLog.status, 502);
+    assert.match((await failedLog.json()).runLogError, /Run log unavailable/);
     assert.equal((await fetch(new URL("api/refresh", server.url), { method: "POST" })).status, 200);
     const history = await fetch(new URL(`api/history?target=${encodeURIComponent(target)}`, server.url));
     assert.equal(history.status, 200);
@@ -1288,6 +1343,73 @@ test("compact run-log rows show PR titles and exact changes regardless of author
     assert.equal(nodes.get("run-log-error").hidden, false);
     assert.match(nodes.get("run-log-error").textContent, /stale.*History read failed/);
     assert.equal(nodes.get("run-log").children.length, 2);
+});
+
+test("run-log controls fetch only on demand, leave PR controls usable and retry locally", async () => {
+    let current = { ...rendererState(), runLog: [], runLogLoadedAt: null, runLogError: null, runLogLoading: false };
+    let release;
+    let reads = 0;
+    const { renderer, nodes } = await rendererFixture(async (path) => {
+        if (path === "/api/run-log") {
+            reads++;
+            return new Promise((resolve) => release = resolve);
+        }
+        return { ok: true, json: async () => structuredClone(current) };
+    });
+    assert.equal(reads, 0);
+    assert.equal(nodes.get("load-run-log").textContent, "Load run log");
+    assert.equal(nodes.get("run-log-count").textContent, "");
+    const pending = nodes.get("load-run-log").events.click();
+    assert.equal(reads, 1);
+    await nodes.get("load-run-log").events.click();
+    assert.equal(reads, 1);
+    assert.equal(nodes.get("load-run-log").disabled, true);
+    assert.equal(nodes.get("load-run-log").textContent, "Loading run log...");
+    assert.equal(nodes.get("run-log")["aria-busy"], "true");
+    assert.equal(nodes.get("loading").hidden, true);
+    assert.equal(nodes.get("prs")["aria-busy"], "false");
+    for (const id of ["repo", "refresh", "auto"]) assert.notEqual(nodes.get(id).disabled, true);
+    current = { ...current, runLogLoadedAt: 2000000 };
+    release({ ok: true, json: async () => structuredClone(current) });
+    await pending;
+    assert.equal(nodes.get("load-run-log").disabled, false);
+    assert.equal(nodes.get("load-run-log").textContent, "Refresh run log");
+    assert.equal(nodes.get("run-log")["aria-busy"], "false");
+    await renderer.refresh();
+    assert.equal(reads, 1);
+    const failed = nodes.get("load-run-log").events.click();
+    current = { ...current, runLogError: "Archive unreadable" };
+    release({ ok: false, status: 502, json: async () => structuredClone(current) });
+    await failed;
+    assert.match(nodes.get("run-log-error").textContent, /stale.*Archive unreadable/);
+    assert.equal(nodes.get("error").hidden, true);
+    assert.equal(nodes.get("load-run-log").disabled, false);
+    const retry = nodes.get("load-run-log").events.click();
+    current = { ...current, runLogError: null };
+    release({ ok: true, json: async () => structuredClone(current) });
+    await retry;
+    assert.equal(reads, 3);
+    assert.equal(nodes.get("run-log-error").hidden, true);
+});
+
+test("a late run-log response cannot replace a repository switch", async () => {
+    let current = rendererState();
+    let release;
+    const { nodes } = await rendererFixture(async (path) => {
+        if (path === "/api/run-log") return new Promise((resolve) => release = resolve);
+        if (path === "/api/repository") current = rendererState("example/other");
+        return { ok: true, json: async () => structuredClone(current) };
+    });
+    const log = nodes.get("load-run-log").events.click();
+    nodes.get("repo").value = "example/other";
+    await nodes.get("repo").events.change();
+    release({ ok: true, json: async () => ({ ...rendererState(), runLogLoadedAt: 2000000 }) });
+    await log;
+    assert.equal(nodes.get("repo").value, "example/other");
+    assert.equal(nodes.get("prs").firstChild.firstChild.firstChild.textContent, "#12 PR in example/other");
+    assert.equal(nodes.get("load-run-log").textContent, "Load run log");
+    assert.equal(nodes.get("load-run-log").disabled, false);
+    assert.match(nodes.get("run-log").firstChild.textContent, /Select Load run log/);
 });
 
 test("task tooltips separate status from effects and explain disabled controls without an action", async () => {
@@ -2098,7 +2220,7 @@ test("repository selection shows loading before its response and hides old cards
     assert.equal(nodes.get("prs").children.length, 1);
     assert.equal(nodes.get("prs").firstChild.textContent, "Loading open PRs for example/other...");
     assert.equal(nodes.get("troubleshooting-runs").firstChild.textContent, "Loading runs for example/other...");
-    assert.equal(nodes.get("run-log").firstChild.textContent, "Loading run log for example/other...");
+    assert.equal(nodes.get("run-log").firstChild.textContent, "Select Load run log to view tasks in example/other.");
     assert.equal(nodes.get("pr-count").textContent, "Loading...");
     assert.equal(nodes.get("refresh").textContent, "Loading...");
     for (const id of ["repo", "refresh", "auto"]) assert.equal(nodes.get(id).disabled, true);

@@ -128,9 +128,9 @@ function controller({ records = [], pulls = [pull()], dashboardState = state(), 
     const canvas = new PrDashboard(github, () => 2000000);
     canvas.checkpoints = {
         snapshot: null,
-        load: async () => {
+        load: async ({ updateSnapshot = true } = {}) => {
             const snapshot = { sha, current: currentRecords.map((s) => ({ name: "pr-v2-1-12.json", state: s })) };
-            canvas.checkpoints.snapshot = snapshot;
+            if (updateSnapshot) canvas.checkpoints.snapshot = snapshot;
             return snapshot;
         },
         history: async (snapshot) => snapshot.current,
@@ -190,7 +190,9 @@ test("run-log rows use the selected repo's PR titles, including closed PRs, and 
         }
         return get(path);
     };
-    const first = await c.canvas.refresh();
+    assert.equal((await c.canvas.refresh()).runLogLoadedAt, null);
+    assert.equal(titleReads, 0);
+    const first = await c.canvas.refreshRunLog();
     assert.equal(first.runLog.length, 3);
     assert.deepEqual(first.runLog.map((task) => [task.number, task.title]), [
         [12, "Handle <untrusted> input"], [12, "Handle <untrusted> input"], [13, "Closed PR title"],
@@ -207,16 +209,20 @@ test("run-log rows use the selected repo's PR titles, including closed PRs, and 
         base: { repo: { full_name: otherRepo } }, head: { sha, repo: { full_name: otherRepo } },
     })]);
     const selected = await c.canvas.selectRepository(otherRepo);
-    assert.equal(selected.runLog.length, 1);
-    assert.equal(selected.runLog[0].number, 14);
-    assert.equal(selected.runLog[0].title, "Other repository PR");
+    assert.deepEqual(selected.runLog, []);
+    assert.equal(selected.runLogLoadedAt, null);
+    const otherLog = await c.canvas.refreshRunLog();
+    assert.equal(otherLog.runLog.length, 1);
+    assert.equal(otherLog.runLog[0].number, 14);
+    assert.equal(otherLog.runLog[0].title, "Other repository PR");
 });
 
-test("missing run-log titles warn without hiding tasks or disabling unrelated controls, and retry on refresh", async () => {
+test("missing run-log titles warn without disabling controls and retry only on explicit log refresh", async () => {
     const c = controller({ records: [
         checkpoint({ stage: "complete" }, { pr: 13 }),
     ] });
-    const first = await c.canvas.refresh();
+    await c.canvas.refresh();
+    const first = await c.canvas.refreshRunLog();
     assert.equal(first.runLog[0].number, 13);
     assert.equal(first.runLog[0].title, null);
     assert.match(first.runLogWarnings.join(" "), /PR title unavailable/);
@@ -224,9 +230,73 @@ test("missing run-log titles warn without hiding tasks or disabling unrelated co
     const get = c.github.get;
     c.github.get = async (path) => path === `repos/${repo}/pulls/13`
         ? { data: pull({ number: 13, state: "closed", title: "Recovered title" }) } : get(path);
-    const recovered = await c.canvas.refresh();
+    await c.canvas.refresh();
+    assert.match(c.canvas.state().runLogWarnings.join(" "), /PR title unavailable/);
+    const recovered = await c.canvas.refreshRunLog();
     assert.equal(recovered.runLog[0].title, "Recovered title");
     assert.deepEqual(recovered.runLogWarnings, []);
+});
+
+test("repository selection ignores an old run-log read and a new demand loads the selected repository", async () => {
+    const otherRepo = REPOSITORIES[1];
+    const c = controller({ records: [
+        checkpoint({ stage: "complete" }, { pr: 13 }),
+        checkpoint({ stage: "complete", phase: "e".repeat(32) }, {
+            repo: otherRepo, head_repo: otherRepo, pr: 14, request_id: "e".repeat(32), launch_run: { id: 13 },
+        }),
+    ] });
+    let release;
+    let reads = 0;
+    c.github.recentCoordinators = () => ++reads === 1
+        ? new Promise((resolve) => release = resolve) : Promise.resolve([]);
+    await c.canvas.refresh();
+    const oldLog = c.canvas.refreshRunLog();
+    c.setPulls([pull({
+        number: 14, title: "Other repository PR",
+        base: { repo: { full_name: otherRepo } }, head: { sha, repo: { full_name: otherRepo } },
+    })]);
+    const selected = await c.canvas.selectRepository(otherRepo);
+    assert.equal(selected.runLogLoadedAt, null);
+    assert.deepEqual(selected.runLog, []);
+    assert.equal(selected.workflowReady, true);
+    assert.equal(selected.loading, false);
+    const newLog = c.canvas.refreshRunLog();
+    release([]);
+    await oldLog;
+    const loaded = await newLog;
+    assert.equal(reads, 2);
+    assert.equal(loaded.runLogLoading, false);
+    assert.equal(loaded.runLog.length, 1);
+    assert.equal(loaded.runLog[0].target, `${otherRepo}#14`);
+    assert.equal(loaded.runLog[0].title, "Other repository PR");
+    assert.equal(c.calls.includes(`repos/${repo}/pulls/13`), false);
+    assert.deepEqual(loaded.runLogWarnings, []);
+});
+
+test("late run-log title reads cannot leak titles or warnings across repositories", async () => {
+    const c = controller({ records: [checkpoint({ stage: "complete" }, { pr: 13 })] });
+    const otherRepo = REPOSITORIES[1];
+    let release;
+    let started;
+    const titleStarted = new Promise((resolve) => started = resolve);
+    const get = c.github.get;
+    c.github.get = async (path) => {
+        if (path !== `repos/${repo}/pulls/13`) return get(path);
+        started();
+        return new Promise((resolve) => release = resolve);
+    };
+    await c.canvas.refresh();
+    const pending = c.canvas.refreshRunLog();
+    await titleStarted;
+    c.setPulls([]);
+    await c.canvas.selectRepository(otherRepo);
+    release({ data: {} });
+    const state = await pending;
+    assert.equal(state.repository, otherRepo);
+    assert.equal(state.runLogLoadedAt, null);
+    assert.deepEqual(state.runLog, []);
+    assert.deepEqual(state.runLogWarnings, []);
+    assert.equal(c.canvas.runLogTitles.size, 0);
 });
 
 test("dashboard decoding validates shape, version, Git identity, UTF-8 and size", () => {
@@ -1135,7 +1205,7 @@ test("a complete PR refresh shares five read slots and adds one batched live-sta
         else if (path === "user") data = account;
         else if (path === `repos/${repo}/pulls?state=open&per_page=100`) data = [pull()];
         else if (path === dashboardPath(repo)) data = file(state());
-        else if (path === FAILED_COORDINATORS || path.includes("/actions/workflows/coordinator.yml/runs?per_page=100")) {
+        else if (path === FAILED_COORDINATORS) {
             data = { total_count: 0, workflow_runs: [] };
         } else throw new Error(`Unexpected refresh read ${path}`);
         return { code: 0, stdout: `HTTP/2.0 200 OK\r\n\r\n${JSON.stringify(data)}` };
@@ -1147,8 +1217,8 @@ test("a complete PR refresh shares five read slots and adds one batched live-sta
     };
     const result = await canvas.refresh();
     assert.equal(maximum, 5);
-    assert.equal(github.requests, 7);
-    assert.equal(result.cost, 7);
+    assert.equal(github.requests, 6);
+    assert.equal(result.cost, 6);
     assert.equal(result.error, null);
     assert.equal(result.prError, null);
     assert.equal(result.workflowReady, true);
@@ -1773,7 +1843,7 @@ test("extension declares shared task handlers and closes checkpoint storage with
     assert.equal(declaration.id, "workflow-dashboard");
     assert.equal(declaration.displayName, "PR workflows");
     assert.deepEqual(Array.from(declaration.actions, (item) => item.name),
-        ["refresh", "select_repository", "launch", "cancel", "history"]);
+        ["refresh", "load_run_log", "select_repository", "launch", "cancel", "history"]);
     const launch = declaration.actions.find((item) => item.name === "launch");
     assert.equal(launch.inputSchema.properties.confirmed.const, true);
     assert.equal(launch.inputSchema.additionalProperties, false);
@@ -1781,7 +1851,9 @@ test("extension declares shared task handlers and closes checkpoint storage with
     assert.equal((await declaration.actions[0].handler()).prs.length, 1);
     const recentCoordinators = canvas.github.recentCoordinators;
     canvas.github.recentCoordinators = async () => { throw new Error("Run log unavailable"); };
-    await assert.rejects(declaration.actions[0].handler(), /Run log unavailable/);
+    const loadLog = declaration.actions.find((item) => item.name === "load_run_log");
+    await assert.rejects(loadLog.handler(), /Run log unavailable/);
+    assert.equal((await declaration.actions[0].handler()).runLogLoadedAt, null);
     assert.equal(canvas.state().workflowReady, true);
     canvas.github.recentCoordinators = recentCoordinators;
     const first = { instanceId: "first", input: {} };
@@ -1794,7 +1866,14 @@ test("extension declares shared task handlers and closes checkpoint storage with
     await declaration.open(second);
     await declaration.onClose(first);
     assert.equal(closed, 0);
+    let releaseLog;
+    canvas.github.recentCoordinators = () => new Promise((resolve) => releaseLog = resolve);
+    const loadingLog = loadLog.handler();
     const closing = declaration.onClose(second);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(closed, 0);
+    releaseLog([]);
+    await loadingLog;
     await started;
     assert.equal(closed, 1);
     let reopened = false;
@@ -1807,5 +1886,7 @@ test("extension declares shared task handlers and closes checkpoint storage with
     assert.equal(canvas.state().loadedAt, null);
     assert.equal(canvas.state().prLoadedAt, null);
     assert.equal(canvas.state().prs.length, 0);
+    assert.equal(canvas.state().runLogLoadedAt, null);
+    assert.deepEqual(canvas.state().runLog, []);
     await assert.rejects(canvas.history(target), /Refresh the dashboard/);
 });

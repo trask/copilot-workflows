@@ -44,13 +44,23 @@ await joinSession({
         actions: [
             {
                 name: "refresh",
-                description: "Refresh open PRs, live task status and the 24-hour run log without starting workflows.",
+                description: "Refresh open PRs and live task status without loading the run log or starting workflows.",
                 inputSchema: emptyInput,
                 handler: async () => {
                     const state = await dashboard.refresh();
-                    if (state.error || state.prError || state.runLogError) {
-                        throw new CanvasError("dashboard_refresh_failed", state.prError || state.error || state.runLogError);
+                    if (state.error || state.prError) {
+                        throw new CanvasError("dashboard_refresh_failed", state.prError || state.error);
                     }
+                    return state;
+                },
+            },
+            {
+                name: "load_run_log",
+                description: "Load the past 24 hours of tasks for the selected repository on request.",
+                inputSchema: emptyInput,
+                handler: async () => {
+                    const state = await dashboard.refreshRunLog();
+                    if (state.runLogError) throw new CanvasError("run_log_load_failed", state.runLogError);
                     return state;
                 },
             },
@@ -111,7 +121,9 @@ await joinSession({
                 if (!servers.size) {
                     closing = (async () => {
                         await dashboard.pending;
+                        while (dashboard.runLogPending) await dashboard.runLogPending;
                         await dashboard.checkpoints.close();
+                        dashboard.resetRunLog();
                         dashboard.value.loadedAt = null;
                         dashboard.prLoadedAt = null;
                         dashboard.prs = [];

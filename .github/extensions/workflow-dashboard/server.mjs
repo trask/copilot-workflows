@@ -78,6 +78,9 @@ export async function startServer(dashboard) {
             } else if (req.method === "POST" && url.pathname === "/api/refresh") {
                 const state = await dashboard.refresh();
                 json(state.error || state.prError ? 502 : 200, state);
+            } else if (req.method === "POST" && url.pathname === "/api/run-log") {
+                const state = await dashboard.refreshRunLog();
+                json(state.runLogError ? 502 : 200, state);
             } else if (req.method === "POST" && url.pathname === "/api/visibility") {
                 const visible = url.searchParams.get("visible");
                 if (!["true", "false"].includes(visible)) json(400, { error: "Visibility must be true or false." });

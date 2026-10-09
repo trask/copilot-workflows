@@ -73,12 +73,14 @@ export class PrDashboard extends Dashboard {
             repository: this.repository, repositories: REPOSITORIES,
             viewer: this.viewer, prLoadedAt: this.prLoadedAt, prError: this.prError,
             prWarnings: this.prWarnings, workflowReady,
-            runLog: workflow.runLog.filter((task) => task.target?.startsWith(`${this.repository}#`))
+            runLogLoadedAt: this.value.runLogLoadedAt, runLogError: this.value.runLogError,
+            runLogLoading: this.value.runLogLoading,
+            runLog: this.value.runLog.filter((task) => task.target?.startsWith(`${this.repository}#`))
                 .map((task) => ({
                     ...task, number: targetParts(task.target).number,
                     title: this.prs.find((pr) => pr.target === task.target)?.title ?? this.runLogTitles.get(task.target) ?? null,
                 })),
-            runLogWarnings: [...workflow.runLogWarnings, ...this.runLogTitleWarnings],
+            runLogWarnings: [...this.value.runLogWarnings, ...this.runLogTitleWarnings],
             prs: this.prs.map((pr) => {
                 const phase = phases.find((item) => item.target === pr.target);
                 const dispatch = this.dispatches.get(pr.target);
@@ -109,8 +111,7 @@ export class PrDashboard extends Dashboard {
                 this.prLoadedAt = null;
                 this.prError = null;
                 this.prWarnings = [];
-                this.runLogTitles.clear();
-                this.runLogTitleWarnings = [];
+                this.resetRunLog();
             }
             return await this.refresh();
         } finally {
@@ -195,7 +196,6 @@ export class PrDashboard extends Dashboard {
             this.pauseReason = "Automatic refresh paused after a failed PR read.";
         } finally {
             await workflow;
-            await this.loadRunLogTitles();
             this.value.latency = this.now() - started;
             this.value.cost = this.github.counted - counted;
             if (warm && this.value.latency > 10000 && !this.pauseReason) {
@@ -208,24 +208,41 @@ export class PrDashboard extends Dashboard {
         return this.state();
     }
 
-    async loadRunLogTitles() {
-        const targets = [...new Set(this.value.runLog.map((task) => task.target))]
-            .filter((target) => target?.startsWith(`${this.repository}#`) &&
-                !this.prs.some((pr) => pr.target === target) && !this.runLogTitles.has(target));
+    resetRunLog() {
+        super.resetRunLog();
+        this.runLogTitles.clear();
         this.runLogTitleWarnings = [];
+    }
+
+    async updateRunLog(version) {
+        await super.updateRunLog(version);
+        if (version === this.runLogVersion && !this.value.runLogError) await this.loadRunLogTitles(version);
+    }
+
+    async loadRunLogTitles(version) {
+        const repository = this.repository;
+        const targets = [...new Set(this.value.runLog.map((task) => task.target))]
+            .filter((target) => target?.startsWith(`${repository}#`) &&
+                !this.prs.some((pr) => pr.target === target) && !this.runLogTitles.has(target));
+        const titles = new Map(this.runLogTitles);
+        const warnings = [];
         await Promise.all(targets.map(async (target) => {
             try {
                 const { number } = targetParts(target);
-                const pr = (await this.github.get(`repos/${this.repository}/pulls/${number}`)).data;
+                const pr = (await this.github.get(`repos/${repository}/pulls/${number}`)).data;
                 if (pr?.number !== number || typeof pr.title !== "string" ||
-                    pr.base?.repo?.full_name?.toLowerCase() !== this.repository.toLowerCase()) {
+                    pr.base?.repo?.full_name?.toLowerCase() !== repository.toLowerCase()) {
                     throw new Error("GitHub returned a mismatched PR title.");
                 }
-                this.runLogTitles.set(target, pr.title);
+                titles.set(target, pr.title);
             } catch (error) {
-                this.runLogTitleWarnings.push(`${target}: PR title unavailable. ${error.message}`);
+                warnings.push(`${target}: PR title unavailable. ${error.message}`);
             }
         }));
+        if (version === this.runLogVersion) {
+            this.runLogTitles = titles;
+            this.runLogTitleWarnings = warnings;
+        }
     }
 
     schedule() {

@@ -72,7 +72,7 @@ export class Checkpoints {
         return "HEAD^{commit}";
     }
 
-    load() {
+    load({ updateSnapshot = true } = {}) {
         return this.serialize(async () => {
             if (this.github.retryAt > (this.github.now?.() ?? Date.now())) {
                 throw new GitHubError("GitHub reads are paused until the recorded rate-limit reset.", this.github.retryAt);
@@ -82,8 +82,9 @@ export class Checkpoints {
                 ref = await this.fetch();
             } catch (error) {
                 if (!error.missingState) throw error;
-                this.snapshot = { sha: null, entries: new Map(), current: [], history: null };
-                return this.snapshot;
+                const snapshot = { sha: null, entries: new Map(), current: [], history: null };
+                if (updateSnapshot) this.snapshot = snapshot;
+                return snapshot;
             }
             const sha = (await this.run(["-C", this.directory, "rev-parse", "--verify", ref])).toString("utf8").trim();
             check(SHA.test(sha), "State branch has an invalid commit identity.");
@@ -104,8 +105,9 @@ export class Checkpoints {
                 .map(async (entry) => ({ name: entry.path, state: await this.blob(entry) })));
             const failed = reads.find((read) => read.status === "rejected");
             if (failed) throw failed.reason;
-            this.snapshot = { sha, entries, current: reads.map((read) => read.value), history: null };
-            return this.snapshot;
+            const snapshot = { sha, entries, current: reads.map((read) => read.value), history: null };
+            if (updateSnapshot) this.snapshot = snapshot;
+            return snapshot;
         });
     }
 

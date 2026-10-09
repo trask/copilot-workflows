@@ -6,6 +6,7 @@ let state = null;
 let busy = false;
 let loadingRepository = null;
 let stateVersion = 0;
+let runLogRequest = null;
 let expanded = new Set();
 const histories = new Map();
 let inViewport = true;
@@ -118,7 +119,8 @@ async function api(path, method = "GET", input) {
             state = value;
             render();
         }
-        throw new Error(value.prError || value.error || `Canvas request failed with HTTP ${response.status}.`);
+        throw new Error((path === "/api/run-log" ? value.runLogError : value.prError) ||
+            value.error || `Canvas request failed with HTTP ${response.status}.`);
     }
     return value;
 }
@@ -190,17 +192,22 @@ function render() {
 
 function renderRunLog() {
     const log = $("run-log");
-    log.setAttribute("aria-busy", String(busy || Boolean(state.loading)));
-    $("run-log-error").hidden = !state.runLogError;
-    $("run-log-error").textContent = state.runLogError
+    const switching = loadingRepository && state.repository !== loadingRepository;
+    const loading = !switching && Boolean(state.runLogLoading || runLogRequest?.repository === state.repository);
+    log.setAttribute("aria-busy", String(loading));
+    $("load-run-log").disabled = loading || busy || Boolean(state.loading);
+    $("load-run-log").textContent = loading ? "Loading run log..."
+        : state.runLogLoadedAt ? "Refresh run log" : "Load run log";
+    $("run-log-error").hidden = switching || !state.runLogError;
+    $("run-log-error").textContent = !switching && state.runLogError
         ? `Run log is ${state.runLogLoadedAt ? "stale" : "unavailable"}. ${state.runLogError}` : "";
-    $("run-log-warnings").hidden = !state.runLogWarnings?.length;
-    $("run-log-warnings").textContent = (state.runLogWarnings ?? []).join(" ");
-    $("run-log-count").textContent = (state.runLog ?? []).length;
+    $("run-log-warnings").hidden = switching || !state.runLogWarnings?.length;
+    $("run-log-warnings").textContent = switching ? "" : (state.runLogWarnings ?? []).join(" ");
+    $("run-log-count").textContent = state.runLogLoadedAt ? (state.runLog ?? []).length : "";
     log.replaceChildren();
-    if (loadingRepository && state.repository !== loadingRepository) {
-        $("run-log-count").textContent = "Loading...";
-        log.append(element("p", `Loading run log for ${loadingRepository}...`, "empty"));
+    if (switching) {
+        $("run-log-count").textContent = "";
+        log.append(element("p", `Select Load run log to view tasks in ${loadingRepository}.`, "empty"));
         return;
     }
     for (const task of state.runLog ?? []) {
@@ -229,8 +236,8 @@ function renderRunLog() {
         row.append(heading, detail);
         log.append(row);
     }
-    if (!log.children.length) log.append(element("p", state.runLogLoadedAt
-        ? "No PR tasks ran in the past 24 hours." : "Run log has not been loaded yet.", "empty"));
+    if (!log.children.length) log.append(element("p", loading ? "Loading run log..." : state.runLogLoadedAt
+        ? "No PR tasks ran in the past 24 hours." : "Select Load run log to view the past 24 hours.", "empty"));
 }
 
 function renderTroubleshooting() {
@@ -609,7 +616,26 @@ function refresh() {
     return load("/api/refresh");
 }
 
+async function loadRunLog() {
+    if (!state || busy || state.loading || state.runLogLoading ||
+        runLogRequest?.repository === state.repository) return;
+    const request = { repository: state.repository, version: stateVersion };
+    runLogRequest = request;
+    renderRunLog();
+    try {
+        const next = await api("/api/run-log", "POST");
+        if (request.version !== stateVersion || next.repository !== request.repository) return;
+        state = next;
+    } catch (failure) {
+        if (request.version === stateVersion) state = { ...state, runLogError: failure.message };
+    } finally {
+        if (runLogRequest === request) runLogRequest = null;
+        render();
+    }
+}
+
 $("refresh").addEventListener("click", refresh);
+$("load-run-log").addEventListener("click", loadRunLog);
 $("troubleshooting").addEventListener("toggle", () => {
     if (state && $("troubleshooting").open) renderTroubleshooting();
 });

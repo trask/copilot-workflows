@@ -38,7 +38,10 @@
     </section>
     <section aria-labelledby="run-log-title">
       <h2 id="run-log-title">Workflow run log <span id="run-log-count" class="badge"></span></h2>
-      <p class="muted">Past 24 hours in the selected repository.</p>
+      <div class="row">
+        <p class="muted">Past 24 hours in the selected repository. Loaded only on request.</p>
+        <button id="load-run-log" type="button">Load run log</button>
+      </div>
       <p id="run-log-error" class="error" role="alert" hidden></p>
       <p id="run-log-warnings" class="notice" hidden></p>
       <div id="run-log" aria-busy="false"></div>
