@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { runInNewContext } from "node:vm";
-import { GitHub, CENTRAL, MAX_RESPONSE, FAILED_COORDINATORS } from "./github.mjs";
+import { GitHub, GitHubError, CENTRAL, MAX_RESPONSE, FAILED_COORDINATORS } from "./github.mjs";
 import { PrDashboard, decodeDashboard } from "./pr-dashboard.mjs";
 import { Checkpoints } from "./state.mjs";
 import { REPOSITORIES, DEFAULT_REPOSITORY, LAUNCH_OWNER_ID, dashboardPath, targetParts } from "./repositories.mjs";
@@ -54,8 +54,12 @@ const thread = (changes = {}) => ({
 });
 const cleanBody = "<!-- ccr-overview-v2 -->\n\n### \u{1f7e2} Approval recommended\n\nThe change preserves behavior.\n\n**0 open findings**\n\n\u{1f9e0} **Review effort:** Balanced";
 const review = (changes = {}) => ({
+    id: "PRR_example",
     author: { id: "BOT_kgDOCnlnWA", login: "copilot-pull-request-reviewer", __typename: "Bot" },
     state: "COMMENTED", submittedAt: "2026-10-08T15:15:56Z", commit: { oid: sha }, body: cleanBody, ...changes,
+});
+const reviewNode = (value, number = 12, head = sha) => ({
+    ...value, pullRequest: { number, headRefOid: head, repository: { nameWithOwner: repo } },
 });
 function detail({ number = 12, head = sha, conflicts = "FAILED", checks = [], threads = [], reviews = [] } = {}) {
     return {
@@ -467,22 +471,92 @@ test("live evidence batches PRs and paginates checks, threads and reviews before
     const github = new GitHub(async (args) => {
         const query = args.find((arg) => arg.startsWith("query="));
         queries.push(query);
+        if (query.includes("nodes(ids:")) return response({ data: {
+            repository: { nameWithOwner: repo },
+            nodes: [reviewNode(review()), reviewNode(review({ id: "PRR_feedback", body: "Fix the missing input guard." }))],
+        } });
         if (!query.includes("after:")) return response({ data: { repository: { pr12: first, pr13: detail({ number: 13 }) } } });
         const more = query.includes("reviewThreads")
             ? { number: 12, headRefOid: sha, reviewThreads: connection([thread()]) }
             : query.includes("reviews(")
-                ? { number: 12, headRefOid: sha, reviews: connection([review({ body: "Fix the missing input guard." })]) }
+                ? { number: 12, headRefOid: sha, reviews: connection([review({ id: "PRR_feedback", body: undefined })]) }
                 : detail({ checks: [check("SUCCESS", { databaseId: 2 }), check("FAILURE", { name: "Build" })] });
         return response({ data: { repository: { pullRequest: more } } });
     });
     const result = await github.pullEvidence(repo, [{ number: 12, sha }, { number: 13, sha }]);
-    assert.equal(queries.length, 4);
+    assert.equal(queries.length, 5);
     assert.ok(queries[0].includes("pr12:") && queries[0].includes("pr13:"));
     assert.equal(normalizeEvidence(result.get(12).detail, sha).ci, "failing");
     assert.equal(normalizeEvidence(result.get(12).detail, sha).failing, 1);
     assert.equal(normalizeEvidence(result.get(12).detail, sha).copilotThreads, 1);
     assert.equal(normalizeEvidence(result.get(12).detail, sha).copilotBodies, 1);
     assert.equal(result.get(13).error, undefined);
+});
+
+test("only submitted current-head verified Copilot reviews require body downloads", async () => {
+    const metadata = [
+        review({ id: "older", commit: { oid: "f".repeat(40) }, body: undefined }),
+        review({ id: "human", author: { __typename: "User", id: "user", login: "reviewer" }, body: undefined }),
+        review({ id: "draft", state: "PENDING", body: undefined }),
+        review({ id: "current", body: undefined }),
+        review({ id: "changes", state: "CHANGES_REQUESTED", body: undefined }),
+    ];
+    const queries = [];
+    const github = new GitHub(async (args) => {
+        const query = args.find((arg) => arg.startsWith("query="));
+        queries.push(query);
+        if (!query.includes("nodes(ids:")) {
+            assert.match(query, /reviews\(first: 100, author: "copilot-pull-request-reviewer\[bot\]"/);
+            assert.doesNotMatch(query, /\bbody\b/);
+            return response({ data: { repository: { pr12: detail({ reviews: metadata }) } } });
+        }
+        assert.deepEqual(JSON.parse(/nodes\(ids: (\[[^\]]+\])\)/.exec(query)[1]), ["current", "changes"]);
+        return response({ data: {
+            repository: { nameWithOwner: repo },
+            nodes: [reviewNode(review({ id: "current" })),
+                reviewNode(review({ id: "changes", state: "CHANGES_REQUESTED", body: "" }))],
+        } });
+    });
+    const result = await github.pullEvidence(repo, [{ number: 12, sha }]);
+    assert.equal(queries.length, 2);
+    assert.equal(normalizeEvidence(result.get(12).detail, sha).copilotBodies, 1);
+    assert.equal(result.get(12).detail.reviews.nodes[0].body, undefined);
+});
+
+test("historical review metadata does not trigger a body request or imply current feedback", async () => {
+    let calls = 0;
+    const github = new GitHub(async () => {
+        calls++;
+        return response({ data: { repository: { pr12: detail({
+            reviews: [review({ commit: { oid: "f".repeat(40) }, body: undefined })],
+        }) } } });
+    });
+    const result = await github.pullEvidence(repo, [{ number: 12, sha }]);
+    assert.equal(calls, 1);
+    assert.equal(normalizeEvidence(result.get(12).detail, sha).copilotBodies, 0);
+});
+
+test("body reads bind each review to its PR and head without failing unrelated PRs", async () => {
+    const first = review({ id: "first", body: undefined });
+    const second = review({ id: "second", body: undefined });
+    const github = new GitHub(async (args) => {
+        const query = args.find((arg) => arg.startsWith("query="));
+        return response({ data: query.includes("nodes(ids:") ? {
+            repository: { nameWithOwner: repo },
+            nodes: [reviewNode({ ...first, body: cleanBody }, 12, "f".repeat(40)),
+                reviewNode({ ...second, body: cleanBody }, 13)],
+        } : { repository: { pr12: detail({ reviews: [first] }), pr13: detail({ number: 13, reviews: [second] }) } } });
+    });
+    const result = await github.pullEvidence(repo, [{ number: 12, sha }, { number: 13, sha }]);
+    assert.match(result.get(12).error, /changed while reading/);
+    assert.equal(normalizeEvidence(result.get(13).detail, sha).copilotBodies, 0);
+});
+
+test("failed review body reads remain unknown instead of using metadata as clean evidence", async () => {
+    const github = new GitHub(async (args) => response(args.some((arg) => arg.includes("nodes(ids:"))
+        ? { errors: [{ message: "Unavailable" }] }
+        : { data: { repository: { pr12: detail({ reviews: [review({ body: undefined })] }) } } }));
+    assert.match((await github.pullEvidence(repo, [{ number: 12, sha }])).get(12).error, /could not return/);
 });
 
 test("head drift or GraphQL errors do not produce false passing status", async () => {
@@ -833,17 +907,20 @@ test("a complete PR refresh shares three read slots and adds one batched live-st
         else if (path === "user") data = account;
         else if (path === `repos/${repo}/pulls?state=open&per_page=100`) data = [pull()];
         else if (path === dashboardPath(repo)) data = file(state());
-        else if (path === `repos/${CENTRAL}/git/matching-refs/heads/review-loop-state`) data = [];
         else if (path === FAILED_COORDINATORS) {
             data = { total_count: 0, workflow_runs: [] };
         } else throw new Error(`Unexpected refresh read ${path}`);
         return { code: 0, stdout: `HTTP/2.0 200 OK\r\n\r\n${JSON.stringify(data)}` };
     });
     const canvas = new PrDashboard(github, () => 2000000);
+    canvas.checkpoints.load = async () => {
+        canvas.checkpoints.snapshot = { sha: null, entries: new Map(), current: [], history: null };
+        return canvas.checkpoints.snapshot;
+    };
     const result = await canvas.refresh();
     assert.equal(maximum, 3);
-    assert.equal(github.requests, 7);
-    assert.equal(result.cost, 7);
+    assert.equal(github.requests, 6);
+    assert.equal(result.cost, 6);
     assert.equal(result.error, null);
     assert.equal(result.prError, null);
     assert.equal(result.workflowReady, true);
@@ -868,16 +945,19 @@ test("a healthy PR refresh keeps automatic refresh enabled after 20 counted requ
     assert.equal(result.prError, null);
 });
 
-test("fresh checkpoint absence enables Run and is rechecked before the first dispatch", async () => {
+test("fresh checkpoint absence enables Run and is rechecked before the first dispatch", async (t) => {
     const c = controller();
-    const get = c.github.get;
-    const path = `repos/${CENTRAL}/git/matching-refs/heads/review-loop-state`;
-    c.github.get = async (requested) => {
-        if (requested !== path) return get(requested);
-        c.calls.push(requested);
-        return { data: [] };
-    };
-    c.canvas.checkpoints = new Checkpoints(c.github);
+    let fetches = 0;
+    c.canvas.checkpoints = new Checkpoints(c.github, async (args) => {
+        if (args.includes("clone") || args.includes("fetch")) {
+            fetches++;
+            const error = new GitHubError("State branch is absent");
+            error.missingState = true;
+            throw error;
+        }
+        return Buffer.alloc(0);
+    });
+    t.after(() => c.canvas.checkpoints.close());
     const result = await c.canvas.refresh();
     assert.equal(result.error, null);
     assert.equal(result.snapshot, null);
@@ -885,7 +965,7 @@ test("fresh checkpoint absence enables Run and is rechecked before the first dis
     assert.equal(result.prs[0].actionBlock, null);
     assert.equal(result.prs[0].canCancel, false);
     await c.canvas.launch({ target, kind: "self_review", confirmed: true });
-    assert.equal(c.calls.filter((call) => call === path).length, 2);
+    assert.equal(fetches, 2);
     assert.equal(c.calls.filter((call) => typeof call === "object").length, 1);
     const refreshed = await c.canvas.refresh();
     assert.equal(refreshed.prs[0].dispatch.status, "accepted");
@@ -1440,8 +1520,14 @@ test("loopback mutations enforce origin, JSON/body bounds, confirmation and exac
     assert.match(actionBlock(normalizePull(pull(), repo, state(), account), account, null, false), /Refresh/);
 });
 
-test("extension declares one compatible canvas with schema-guarded shared task handlers", async () => {
+test("extension declares shared task handlers and closes checkpoint storage with the last panel", async (t) => {
     const { canvas } = controller();
+    let closed = 0;
+    let releaseClose;
+    let closeStarted;
+    const started = new Promise((resolve) => closeStarted = resolve);
+    const finishing = new Promise((resolve) => releaseClose = resolve);
+    canvas.checkpoints.close = async () => { closed++; closeStarted(); await finishing; };
     let joined;
     const source = await readFile(new URL("extension.mjs", import.meta.url), "utf8");
     await runInNewContext(`(async () => { ${source.replace(/^import .+;\r?$/gm, "")} })()`, {
@@ -1462,4 +1548,28 @@ test("extension declares one compatible canvas with schema-guarded shared task h
     assert.equal(launch.inputSchema.additionalProperties, false);
     await assert.rejects(launch.handler({ input: { target, kind: "self_review", confirmed: false } }), /Confirm/);
     assert.equal((await declaration.actions[0].handler()).prs.length, 1);
+    const first = { instanceId: "first", input: {} };
+    const second = { instanceId: "second", input: {} };
+    t.after(async () => {
+        await declaration.onClose(first);
+        await declaration.onClose(second);
+    });
+    await declaration.open(first);
+    await declaration.open(second);
+    await declaration.onClose(first);
+    assert.equal(closed, 0);
+    const closing = declaration.onClose(second);
+    await started;
+    assert.equal(closed, 1);
+    let reopened = false;
+    const opening = declaration.open(first).then(() => reopened = true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(reopened, false);
+    releaseClose();
+    await closing;
+    await opening;
+    assert.equal(canvas.state().loadedAt, null);
+    assert.equal(canvas.state().prLoadedAt, null);
+    assert.equal(canvas.state().prs.length, 0);
+    await assert.rejects(canvas.history(target), /Refresh the dashboard/);
 });

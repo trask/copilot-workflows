@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { REPOSITORIES, configuredRepository, dashboardPath } from "./repositories.mjs";
 import { KIND_LABELS } from "./kinds.mjs";
+import { currentCopilotReview } from "./prs.mjs";
 
 export const CENTRAL = "trask/copilot-workflows";
 export const MAX_RESPONSE = 16 * 1024 * 1024;
@@ -19,8 +20,10 @@ const THREAD_FIELDS = `
         nodes { author { login __typename ... on Bot { id } } pullRequestReview { state } }
     }`;
 const REVIEW_FIELDS = `
+    id
     author { login __typename ... on Bot { id } }
-    state body submittedAt commit { oid }`;
+    state submittedAt commit { oid }`;
+const REVIEW_FILTER = 'author: "copilot-pull-request-reviewer[bot]", states: [COMMENTED, APPROVED, CHANGES_REQUESTED]';
 const EVIDENCE_FIELDS = `
     number headRefOid
     mergeRequirements { conditions { __typename result } }
@@ -34,7 +37,7 @@ const EVIDENCE_FIELDS = `
         pageInfo { hasNextPage endCursor }
         nodes { ${THREAD_FIELDS} }
     }
-    reviews(first: 100) {
+    reviews(first: 100, ${REVIEW_FILTER}) {
         pageInfo { hasNextPage endCursor }
         nodes { ${REVIEW_FIELDS} }
     }`;
@@ -344,7 +347,7 @@ export class GitHub {
             if (result.code !== 0 || payload?.errors?.length || !payload?.data?.repository) {
                 throw new GitHubError("GitHub could not return live PR status. Check repository access and GraphQL query support.");
             }
-            return payload.data.repository;
+            return payload.data;
         });
     }
 
@@ -358,7 +361,7 @@ export class GitHub {
         for (let index = 0; index < pulls.length; index += 10) batches.push(pulls.slice(index, index + 10));
         await Promise.all(batches.map(async (batch) => {
             try {
-                const data = await this.graphql(`query($owner: String!, $name: String!) {
+                const { repository: data } = await this.graphql(`query($owner: String!, $name: String!) {
                     repository(owner: $owner, name: $name) {
                         ${batch.map((pr) => `pr${pr.number}: pullRequest(number: ${pr.number}) { ${EVIDENCE_FIELDS} }`).join("\n")}
                     }
@@ -389,11 +392,66 @@ export class GitHub {
                         results.set(pr.number, { error: error.message });
                     }
                 }));
+                await this.reviewBodies(repo, batch, results);
             } catch (error) {
                 for (const pr of batch) results.set(pr.number, { error: error.message });
             }
         }));
         return results;
+    }
+
+    async reviewBodies(repo, pulls, results) {
+        const records = [];
+        for (const pr of pulls) {
+            const read = results.get(pr.number);
+            if (!read?.detail) continue;
+            try {
+                const reviews = read.detail.reviews.nodes.filter((review) => currentCopilotReview(review, pr.sha));
+                const ids = new Set();
+                for (const review of reviews) {
+                    if (typeof review.id !== "string" || !review.id || ids.has(review.id)) {
+                        throw new GitHubError("Live Copilot review identity is missing or duplicated.");
+                    }
+                    ids.add(review.id);
+                }
+                records.push(...reviews.map((review) => ({ pr, review })));
+            } catch (error) {
+                results.set(pr.number, { error: error.message });
+            }
+        }
+        const batches = [];
+        for (let index = 0; index < records.length; index += 100) batches.push(records.slice(index, index + 100));
+        await Promise.all(batches.map(async (batch) => {
+            try {
+                const data = await this.graphql(`query($owner: String!, $name: String!) {
+                    repository(owner: $owner, name: $name) { nameWithOwner }
+                    nodes(ids: ${JSON.stringify(batch.map(({ review }) => review.id))}) {
+                        ... on PullRequestReview {
+                            ${REVIEW_FIELDS} body
+                            pullRequest { number headRefOid repository { nameWithOwner } }
+                        }
+                    }
+                }`, repo);
+                if (data.repository.nameWithOwner?.toLowerCase() !== repo.toLowerCase() ||
+                    !Array.isArray(data.nodes) || data.nodes.length !== batch.length) {
+                    throw new GitHubError("Live Copilot review body response is incomplete or belongs to another repository.");
+                }
+                for (const [index, { pr, review }] of batch.entries()) {
+                    const node = data.nodes[index];
+                    if (node?.id !== review.id || !currentCopilotReview(node, pr.sha) ||
+                        node.state !== review.state || node.submittedAt !== review.submittedAt ||
+                        node.pullRequest?.number !== pr.number || node.pullRequest.headRefOid !== pr.sha ||
+                        node.pullRequest.repository?.nameWithOwner?.toLowerCase() !== repo.toLowerCase() ||
+                        typeof node.body !== "string") {
+                        results.set(pr.number, { error: "Live Copilot review body is missing or changed while reading status. Refresh to try again." });
+                    } else {
+                        review.body = node.body;
+                    }
+                }
+            } catch (error) {
+                for (const { pr } of batch) results.set(pr.number, { error: error.message });
+            }
+        }));
     }
 
     async completeConnection(repo, pr, value, kind) {
@@ -406,7 +464,7 @@ export class GitHub {
             }
             cursors.add(cursor);
             const fields = kind === "reviews"
-                ? `reviews(first: 100, after: ${JSON.stringify(cursor)}) {
+                ? `reviews(first: 100, ${REVIEW_FILTER}, after: ${JSON.stringify(cursor)}) {
                     pageInfo { hasNextPage endCursor }
                     nodes { ${REVIEW_FIELDS} }
                 }`
@@ -421,7 +479,7 @@ export class GitHub {
                         nodes { ${CHECK_FIELDS} }
                     }
                 } } } }`;
-            const data = await this.graphql(`query($owner: String!, $name: String!) {
+            const { repository: data } = await this.graphql(`query($owner: String!, $name: String!) {
                 repository(owner: $owner, name: $name) {
                     pullRequest(number: ${pr.number}) { number headRefOid ${fields} }
                 }

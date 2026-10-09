@@ -4,6 +4,11 @@ import { LAUNCH_OWNER_ID } from "./repositories.mjs";
 const SHA = /^[0-9a-f]{40}$/;
 const SUBMITTED_REVIEWS = new Set(["COMMENTED", "APPROVED", "CHANGES_REQUESTED"]);
 const copilot = (author) => author?.__typename === "Bot" && author.id === "BOT_kgDOCnlnWA";
+
+export function currentCopilotReview(review, sha) {
+    return copilot(review?.author) && SUBMITTED_REVIEWS.has(review.state) && review.commit?.oid === sha;
+}
+
 const ROUTES = {
     approver: "Waiting on reviewers", author: "Waiting on authors",
     maintainer: "Waiting on maintainers", "transient-failure": "Dashboard retrieval failed",
@@ -170,12 +175,11 @@ export function normalizeEvidence(detail, sha) {
     let copilotBodies = 0;
     for (const review of reviews.nodes) {
         if (!review || typeof review.state !== "string") throw new Error("Live review state is incomplete.");
-        if (!copilot(review.author) || !SUBMITTED_REVIEWS.has(review.state)) continue;
+        if (!currentCopilotReview(review, sha)) continue;
         if (!review.submittedAt || typeof review.body !== "string") {
             throw new Error("Live Copilot review body is incomplete.");
         }
-        if (review.commit?.oid === sha &&
-            (review.state === "CHANGES_REQUESTED" || hasCopilotBodyFeedback(review.body))) copilotBodies++;
+        if (review.state === "CHANGES_REQUESTED" || hasCopilotBodyFeedback(review.body)) copilotBodies++;
     }
     return {
         sha, conflicts, copilotThreads, copilotBodies, failing, pending,

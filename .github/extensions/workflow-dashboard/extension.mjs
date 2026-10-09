@@ -6,6 +6,7 @@ import { KIND_LABELS } from "./kinds.mjs";
 
 const dashboard = new PrDashboard();
 const servers = new Map();
+let closing = Promise.resolve();
 const emptyInput = { type: "object", properties: {}, additionalProperties: false };
 const target = { type: "string", pattern: `^(?:${REPOSITORIES.join("|")})#[1-9][0-9]{0,7}$` };
 const confirmed = { type: "boolean", const: true, description: "The user explicitly requested this target and action. A direct button click is sufficient." };
@@ -80,19 +81,41 @@ await joinSession({
             },
         ],
         open: async (ctx) => {
-            if (ctx.input?.repo && ctx.input.repo !== dashboard.repository) await dashboard.selectRepository(ctx.input.repo);
+            await closing;
             let entry = servers.get(ctx.instanceId);
+            const created = !entry;
             if (!entry) {
-                entry = await startServer(dashboard);
+                entry = startServer(dashboard);
                 servers.set(ctx.instanceId, entry);
             }
-            return { title: "PR workflows", url: entry.url };
+            let server;
+            try {
+                server = await entry;
+                if (ctx.input?.repo && ctx.input.repo !== dashboard.repository) await dashboard.selectRepository(ctx.input.repo);
+                return { title: "PR workflows", url: server.url };
+            } catch (error) {
+                if (created && servers.get(ctx.instanceId) === entry) {
+                    servers.delete(ctx.instanceId);
+                    if (server) await server.close();
+                }
+                throw error;
+            }
         },
         onClose: async (ctx) => {
             const entry = servers.get(ctx.instanceId);
             if (entry) {
                 servers.delete(ctx.instanceId);
-                await entry.close();
+                await (await entry).close();
+                if (!servers.size) {
+                    closing = (async () => {
+                        await dashboard.pending;
+                        await dashboard.checkpoints.close();
+                        dashboard.value.loadedAt = null;
+                        dashboard.prLoadedAt = null;
+                        dashboard.prs = [];
+                    })();
+                    await closing;
+                }
             }
         },
     })],

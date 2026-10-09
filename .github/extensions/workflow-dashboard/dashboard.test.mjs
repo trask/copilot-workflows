@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { runInNewContext } from "node:vm";
 import { request as httpRequest } from "node:http";
 import { GitHub, GitHubError, CENTRAL, FAILED_COORDINATORS, parseResponse, runGh } from "./github.mjs";
-import { Checkpoints } from "./state.mjs";
+import { Checkpoints, runGit } from "./state.mjs";
 import { phaseSummary, targetHistory, actionSummary, failedActionSummary, commitLink, compareLink } from "./model.mjs";
 import { Dashboard } from "./dashboard.mjs";
 import { startServer } from "./server.mjs";
@@ -409,201 +411,158 @@ test("rate limits honor Retry-After or reset and never leak response bodies", as
     }
 });
 
-function gitBlob(value) {
-    const content = Buffer.isBuffer(value) ? value : Buffer.from(JSON.stringify(value));
-    const hash = createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
-    return {
-        entry: { path: "", type: "blob", mode: "100644", sha: hash, size: content.length },
-        blob: { sha: hash, encoding: "base64", content: content.toString("base64"), size: content.length },
-    };
-}
-
-function stateClient() {
-    const current = gitBlob(fixture());
-    current.entry.path = "pr-v2-123-12.json";
-    const archive = gitBlob(fixture({ iteration: 0, intent: null, run: null }, { request_id: requestId("b") }));
-    archive.entry.path = `request-${requestId("b")}.json`;
-    const calls = [];
-    const objects = new Map([
-        ["matching-refs/heads/review-loop-state", [{
-            ref: "refs/heads/review-loop-state", object: { type: "commit", sha: sha("c") },
-        }]],
-        ["commits/" + sha("c"), { sha: sha("c"), tree: { sha: sha("d") } }],
-        ["trees/" + sha("d"), { sha: sha("d"), truncated: false, tree: [current.entry, archive.entry] }],
-        ["blobs/" + current.entry.sha, current.blob], ["blobs/" + archive.entry.sha, archive.blob],
-    ]);
-    return {
-        calls, objects,
-        github: { get: async (path) => {
-            const key = path.split("/git/")[1];
-            calls.push(key);
-            assert.ok(objects.has(key), `Unexpected read ${key}`);
-            return { data: structuredClone(objects.get(key)) };
-        } },
-    };
-}
-
-test("state pins commit/tree/blob identities, defers archives, and caches immutable blobs", async () => {
-    const client = stateClient();
-    const store = new Checkpoints(client.github);
-    const snapshot = await store.load();
-    assert.equal(snapshot.current.length, 1);
-    assert.equal(client.calls.length, 4);
-    await store.load();
-    assert.equal(client.calls.length, 5);
-    assert.equal((await store.history(snapshot)).length, 2);
-    assert.equal(client.calls.length, 6);
-    await store.history(snapshot);
-    assert.equal(client.calls.length, 6);
-    const nextCommit = sha("e");
-    client.objects.set("matching-refs/heads/review-loop-state", [{
-        ref: "refs/heads/review-loop-state", object: { type: "commit", sha: nextCommit },
-    }]);
-    client.objects.set("commits/" + nextCommit, { sha: nextCommit, tree: { sha: sha("d") } });
-    await store.load();
-    assert.equal(client.calls.filter((path) => path.startsWith("blobs/")).length, 2);
-});
-
-test("current checkpoint blobs share three read slots and retain tree order", async () => {
-    const client = stateClient();
-    const tree = client.objects.get("trees/" + sha("d"));
-    for (let iteration = 2; iteration <= 5; iteration++) {
-        const item = gitBlob(fixture({ iteration }));
-        item.entry.path = `pr-v2-123-${iteration}.json`;
-        tree.tree.push(item.entry);
-        client.objects.set("blobs/" + item.entry.sha, item.blob);
-    }
-    const releases = [];
-    const github = new GitHub(async (args) => {
-        const key = args.at(-1).split("/git/")[1];
-        if (key.startsWith("blobs/")) await new Promise((resolve) => releases.push(resolve));
-        return response(client.objects.get(key));
-    });
-    const pending = new Checkpoints(github).load();
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(releases.length, 3);
-    assert.equal(github.activeReads, 3);
-    for (const release of releases.slice().reverse()) release();
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(releases.length, 5);
-    for (const release of releases.slice(3).reverse()) release();
-    const snapshot = await pending;
-    assert.deepEqual(snapshot.current.map((item) => item.name),
-        tree.tree.filter((entry) => entry.path.startsWith("pr-")).map((entry) => entry.path));
-    assert.equal(github.activeReads, 0);
-});
-
-test("a failed checkpoint read waits for other blobs and does not publish a partial snapshot", async () => {
-    const client = stateClient();
-    const item = gitBlob(fixture({ iteration: 2 }));
-    item.entry.path = "pr-v2-123-13.json";
-    client.objects.get("trees/" + sha("d")).tree.push(item.entry);
-    const get = client.github.get;
-    let release;
-    client.github.get = async (path) => {
-        if (path.endsWith(item.entry.sha)) {
-            await new Promise((resolve) => release = resolve);
-            return { data: item.blob };
+async function stateClient(t) {
+    const directory = await mkdtemp(join(tmpdir(), "copilot-state-test-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    await runGit(["init", "--quiet", "--initial-branch=review-loop-state", directory]);
+    const commit = async (files) => {
+        for (const [path, value] of Object.entries(files)) {
+            await writeFile(join(directory, path), Buffer.isBuffer(value) ? value : JSON.stringify(value));
         }
-        if (path.includes("/blobs/")) throw new Error("Checkpoint unavailable");
-        return get(path);
+        await runGit(["-C", directory, "add", "--all"]);
+        await runGit(["-C", directory, "-c", "user.name=Tests", "-c", "user.email=tests@example.com",
+            "commit", "--quiet", "-m", "State snapshot"]);
     };
-    const store = new Checkpoints(client.github);
-    let done = false;
-    const pending = assert.rejects(store.load(), /Checkpoint unavailable/).then(() => done = true);
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(typeof release, "function");
-    assert.equal(done, false);
-    assert.equal(store.snapshot, null);
-    release();
-    await pending;
-    assert.equal(store.snapshot, null);
+    await commit({
+        "pr-v2-123-12.json": fixture(),
+        [`request-${requestId("b")}.json`]: fixture({ iteration: 0, intent: null, run: null }, { request_id: requestId("b") }),
+    });
+    const calls = [];
+    const store = new Checkpoints({}, async (args) => {
+        calls.push(args);
+        return runGit(args.map((arg) => arg === `https://github.com/${CENTRAL}.git` ? pathToFileURL(directory).href : arg));
+    });
+    t.after(() => store.close());
+    return { directory, calls, commit, store };
+}
+
+test("state fetches a fresh shallow pinned snapshot and defers archives until history", async (t) => {
+    const { store, calls, commit } = await stateClient(t);
+    const reads = [];
+    const blob = store.blob.bind(store);
+    store.blob = (entry) => { reads.push(entry.path); return blob(entry); };
+    const snapshot = await store.load();
+    assert.match(snapshot.sha, /^[0-9a-f]{40}$/);
+    assert.equal(snapshot.current.length, 1);
+    assert.deepEqual(reads, ["pr-v2-123-12.json"]);
+    assert.equal((await readFile(join(store.directory, ".git", "shallow"), "utf8")).trim(), snapshot.sha);
+    await store.load();
+    assert.equal(calls.filter((args) => args.includes("clone")).length, 1);
+    assert.equal(calls.filter((args) => args.includes("fetch")).length, 1);
+    assert.ok(calls.filter((args) => args.includes("clone") || args.includes("fetch"))
+        .every((args) => args.includes("--depth=1") && args.includes("--no-tags")));
+    assert.equal((await store.history(snapshot)).length, 2);
+    assert.equal(reads.filter((path) => path.startsWith("request-")).length, 1);
+    await store.history(snapshot);
+    assert.equal(reads.filter((path) => path.startsWith("request-")).length, 1);
+    await commit({ "pr-v2-123-12.json": fixture({ stage: "complete" }) });
+    const updated = await store.load();
+    assert.notEqual(updated.sha, snapshot.sha);
+    assert.equal(updated.current[0].state.stage, "complete");
+    assert.equal(snapshot.current[0].state.stage, "running");
 });
 
-test("absent state is explicit empty history, detects initialization, and clears removed state", async () => {
-    const client = stateClient();
-    const refs = client.objects.get("matching-refs/heads/review-loop-state");
-    client.objects.set("matching-refs/heads/review-loop-state", []);
-    const store = new Checkpoints(client.github);
+test("history and fresh fetches serialize their checkouts and cleanup permits reopening", async (t) => {
+    const { store, calls, commit } = await stateClient(t);
+    const snapshot = await store.load();
+    await commit({ "pr-v2-123-12.json": fixture({ stage: "complete" }) });
+    let release;
+    let started;
+    const waiting = new Promise((resolve) => started = resolve);
+    const blob = store.blob.bind(store);
+    store.blob = async (entry) => {
+        if (entry.path.startsWith("request-")) {
+            started();
+            await new Promise((resolve) => release = resolve);
+        }
+        return blob(entry);
+    };
+    const history = store.history(snapshot);
+    await waiting;
+    const pending = store.load();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(calls.filter((args) => args.includes("fetch")).length, 0);
+    release();
+    assert.equal((await history).length, 2);
+    assert.equal((await pending).current[0].state.stage, "complete");
+    const directory = store.directory;
+    await store.close();
+    await assert.rejects(access(directory), { code: "ENOENT" });
+    assert.equal((await store.load()).current[0].state.stage, "complete");
+});
+
+test("absent state is explicit empty history, detects initialization, and clears removed state", async (t) => {
+    const { directory, store } = await stateClient(t);
+    const original = (await runGit(["-C", directory, "rev-parse", "HEAD"])).toString("utf8").trim();
+    await runGit(["-C", directory, "update-ref", "refs/heads/review-loop-state-archive", original]);
+    await runGit(["-C", directory, "update-ref", "-d", "refs/heads/review-loop-state"]);
     const empty = await store.load();
     assert.equal(empty.sha, null);
     assert.equal(empty.entries.size, 0);
     assert.deepEqual(empty.current, []);
     assert.deepEqual(await store.history(empty), []);
-    assert.equal(await store.load(), empty);
-    assert.deepEqual(client.calls, [
-        "matching-refs/heads/review-loop-state", "matching-refs/heads/review-loop-state",
-    ]);
-    client.objects.set("matching-refs/heads/review-loop-state", refs);
+    await runGit(["-C", directory, "update-ref", "refs/heads/review-loop-state", original]);
     assert.equal((await store.load()).current.length, 1);
-    assert.equal(store.blobs.size, 1);
-    client.objects.set("matching-refs/heads/review-loop-state", []);
+    await runGit(["-C", directory, "update-ref", "-d", "refs/heads/review-loop-state"]);
     const cleared = await store.load();
     assert.equal(cleared.sha, null);
     assert.deepEqual(cleared.current, []);
-    assert.equal(cleared.entries.size, 0);
-    assert.equal(store.blobs.size, 0);
-    assert.deepEqual(await store.history(cleared), []);
-    client.objects.set("matching-refs/heads/review-loop-state", refs);
-    assert.equal((await store.load()).current.length, 1);
-    assert.equal(client.calls.filter((path) => path.startsWith("blobs/")).length, 2);
 });
 
-test("state requires the exact branch, not another matching prefix", async () => {
-    const client = stateClient();
-    client.objects.get("matching-refs/heads/review-loop-state")[0].ref += "-archive";
-    const snapshot = await new Checkpoints(client.github).load();
-    assert.equal(snapshot.sha, null);
-    assert.deepEqual(snapshot.current, []);
-    assert.deepEqual(client.calls, ["matching-refs/heads/review-loop-state"]);
+test("failed Git reads preserve the previous snapshot and do not become an empty success", async (t) => {
+    const { store } = await stateClient(t);
+    const snapshot = await store.load();
+    const run = store.run;
+    store.run = async () => { throw new GitHubError("Git authentication failed"); };
+    await assert.rejects(store.load(), /authentication failed/);
+    assert.equal(store.snapshot, snapshot);
+    store.run = run;
+    assert.equal((await store.load()).sha, snapshot.sha);
 });
 
-test("state listing access failures never become an empty snapshot", async () => {
-    for (const status of [401, 403, 404, 500]) {
-        const store = new Checkpoints(new GitHub(async () => response({}, {}, status, 1)));
-        await assert.rejects(store.load(), new RegExp(`HTTP ${status}`));
+test("Git transport hides console windows, preserves exact bytes and sanitizes errors", async () => {
+    await assert.rejects(runGit(["fetch"], (command, args, options, callback) => {
+        assert.equal(command, "git");
+        assert.ok(args.includes("credential.helper=!gh auth git-credential"));
+        assert.ok(args.includes("core.autocrlf=false"));
+        assert.equal(options.windowsHide, true);
+        assert.equal(options.timeout, 60000);
+        assert.equal(options.encoding, "buffer");
+        assert.equal(options.env.GIT_TERMINAL_PROMPT, "0");
+        callback({ code: 128 }, Buffer.alloc(0), Buffer.from("fatal: Authentication failed. secret=must-not-echo"));
+    }), (error) => !error.missingState && !error.message.includes("must-not-echo"));
+    await assert.rejects(runGit(["fetch"], (_command, _args, _options, callback) => {
+        callback({ code: 128 }, Buffer.alloc(0), Buffer.from("fatal: couldn't find remote ref refs/heads/review-loop-state"));
+    }), (error) => error.missingState === true);
+});
+
+test("state rejects unsafe trees and corrupted checkout bytes before publishing a snapshot", async (t) => {
+    const { store } = await stateClient(t);
+    const run = store.run;
+    for (const tree of [
+        `100644 blob ${sha("a")} 2\t../secret.json\0`,
+        `120000 blob ${sha("a")} 2\tpr-v2-123-12.json\0`,
+        `100644 blob ${sha("a")} 2\tpr-v2-123-12.json`,
+    ]) {
+        store.run = (args) => args.includes("ls-tree") ? Promise.resolve(Buffer.from(tree)) : run(args);
+        await assert.rejects(store.load(), /State tree/);
         assert.equal(store.snapshot, null);
     }
+    store.run = run;
+    const blob = store.blob.bind(store);
+    store.blob = async (entry) => {
+        await writeFile(join(store.directory, entry.path), "{}");
+        return blob(entry);
+    };
+    await assert.rejects(store.load(), /Git object identity/);
+    assert.equal(store.snapshot, null);
 });
 
-test("state rejects malformed, duplicate, unpinned and incomplete reference listings", async () => {
-    const ref = { ref: "refs/heads/review-loop-state", object: { type: "commit", sha: sha("c") } };
-    for (const refs of [
-        null, {}, [null], [{ ...ref, ref: "refs/heads/main" }], [ref, ref],
-        [{ ...ref, object: { type: "tree", sha: sha("c") } }],
-        [{ ...ref, object: { type: "commit", sha: "invalid" } }],
-        Array.from({ length: 1001 }, () => ref),
-    ]) {
-        await assert.rejects(new Checkpoints(new GitHub(async () => response(refs))).load(), /State/);
-    }
-    const incomplete = new GitHub(async () => response([], {
-        Link: `<https://api.github.com/repos/${CENTRAL}/git/matching-refs/heads/review-loop-state?page=2>; rel="next"`,
-    }));
-    await assert.rejects(new Checkpoints(incomplete).load(), /incomplete/);
-});
-
-test("state rejects truncation, unsafe paths, duplicate entries, and corrupted objects", async () => {
-    for (const mutation of [
-        (c) => c.objects.get("trees/" + sha("d")).truncated = true,
-        (c) => c.objects.get("trees/" + sha("d")).tree[0].path = "../secrets.json",
-        (c) => c.objects.get("commits/" + sha("c")).sha = sha("e"),
-        (c) => { const entry = c.objects.get("trees/" + sha("d")).tree[0]; c.objects.get("blobs/" + entry.sha).content = "e30="; },
-        (c) => { const tree = c.objects.get("trees/" + sha("d")); tree.tree.push(tree.tree[0]); },
-    ]) {
-        const client = stateClient();
-        mutation(client);
-        await assert.rejects(new Checkpoints(client.github).load(), /State|state/);
-    }
-});
-
-test("state rejects malformed JSON and invalid UTF-8 even when Git object identity is correct", async () => {
+test("state rejects malformed JSON and invalid UTF-8 even when Git object identity is correct", async (t) => {
+    const { store, commit } = await stateClient(t);
     for (const content of [Buffer.from("{invalid"), Buffer.from('{"text":"\xff"}', "latin1")]) {
-        const client = stateClient();
-        const bad = gitBlob(content);
-        bad.entry.path = "pr-v2-123-12.json";
-        client.objects.get("trees/" + sha("d")).tree[0] = bad.entry;
-        client.objects.set("blobs/" + bad.entry.sha, bad.blob);
-        await assert.rejects(new Checkpoints(client.github).load(), /malformed JSON/);
+        await commit({ "pr-v2-123-12.json": content });
+        await assert.rejects(store.load(), /malformed JSON/);
     }
 });
 
@@ -774,6 +733,10 @@ test("a fresh state branch absence loads failed launches without inventing histo
         throw new Error(`Unexpected dashboard read ${path}`);
     });
     const dashboard = new Dashboard(github, () => 2000000);
+    dashboard.checkpoints.load = async () => {
+        dashboard.checkpoints.snapshot = { sha: null, entries: new Map(), current: [], history: null };
+        return dashboard.checkpoints.snapshot;
+    };
     const state = await dashboard.refresh();
     assert.equal(state.error, null);
     assert.equal(state.loadedAt, 2000000);
