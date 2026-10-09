@@ -65,6 +65,8 @@ network:
     - raw.githubusercontent.com
     - objects.githubusercontent.com
     - release-assets.githubusercontent.com
+    - mise-versions.jdx.dev
+    - tuf-repo-cdn.sigstore.dev
     - repo.maven.apache.org
     - plugins.gradle.org
     - plugins-artifacts.gradle.org
