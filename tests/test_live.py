@@ -1,3 +1,4 @@
+from tests.support import verify
 from tests.support import reconstruct
 from tests.fixtures import (FIXTURE, REPOSITORIES, REPO_NODE, ROOT_PATH,
                             CI_CHECK, CI_WORKFLOW_BLOB, CI_WORKFLOW_ID, CI_WORKFLOW_PATH)
@@ -22,11 +23,11 @@ from loop.live import (advance, cas, confirm_push, confirm_request, guard,
                        new_review_intent, observed_review_request, publish, request_review,
                        main as live_main, publication_invocation, start, watch_review)
 from loop.policy import (AUTHOR_ID, CENTRAL, Rejected, canonical, checkpoint_name, digest, iso, eligible)
-from loop.publication import (PROFILE, PublisherAPI, acceptance, authenticated_push, bound_artifact, evidence, import_candidate, plan, read_package)
+from loop.publication import (PROFILE, PublisherAPI, acceptance, authenticated_push, evidence, import_candidate, plan)
 from loop.publication import SECRET
 from loop.reviews import (body_classification, exact_ci, fresh_collection,
                           inline_fingerprints, missed_fingerprints)
-from loop.verify import (git, verify)
+from loop.verify import git
 from loop.revisions import revision_ref
 from tests.test_loop import BOT, FakeAPI, MemoryState, REVISION, SHA, pr, request, result, review, run
 
@@ -893,7 +894,7 @@ class AcceptanceTests(unittest.TestCase):
             with self.assertRaises(Rejected):
                 acceptance(state, {})
         artifact = {"id": 33, "digest": "sha256:" + "0" * 64}
-        state["artifacts"] = [artifact]
+        state["artifacts"] = [copy.deepcopy(artifact)]
         originals = [{"id": 34, "name": "verification-99-1", "digest": "sha256:" + "1" * 64,
                       "expired": False}]
         state["publication_intent"] = {
@@ -953,7 +954,7 @@ class AcceptanceTests(unittest.TestCase):
             target = Read()
             target.pr["head"]["sha"] = state["report"]["candidate"]["commit"]
             server[88]["run_attempt"] = 1
-            originals[0]["digest"] = "sha256:" + "1" * 64
+            artifact["digest"] = "sha256:" + "0" * 64
             if mutation == "cancelled":
                 value["stage"] = "cancelled"
             elif mutation == "already_reconciled":
@@ -965,7 +966,7 @@ class AcceptanceTests(unittest.TestCase):
             elif mutation == "rerun":
                 server[88]["run_attempt"] = 2
             elif mutation == "changed_artifact":
-                originals[0]["digest"] = "sha256:" + "2" * 64
+                artifact["digest"] = "sha256:" + "2" * 64
             else:
                 key = "receipt_sha256" if historical else "verification_sha256"
                 value["publication_intent"]["acceptance"][key] = "0" * 64
@@ -1924,42 +1925,7 @@ class CredentialAndArchiveTests(unittest.TestCase):
             self.assertEqual(REPO_NODE, api.identity(personal_request())["repo_node"])
             self.assertNotIn(f"repos/{CENTRAL}", [item.args[0] for item in reads.call_args_list])
 
-    def test_trusted_zip_reader_rejects_traversal_duplicates_symlinks_and_missing_members(self):
-        self.assertEqual({"receipt.json": b"{}"}, read_package(zipped({"receipt.json": b"{}"}), {"receipt.json"}))
-        for files in [{"../receipt.json": b"{}"}, {"receipt.json": b"{}", "extra": b"bad"}, {}]:
-            with self.assertRaises(Rejected):
-                read_package(zipped(files), {"receipt.json"})
-        output = io.BytesIO()
-        with zipfile.ZipFile(output, "w") as archive:
-            info = zipfile.ZipInfo("receipt.json")
-            info.external_attr = 0o120777 << 16
-            archive.writestr(info, b"link")
-        with self.assertRaises(Rejected):
-            read_package(output.getvalue(), {"receipt.json"})
 
-    def test_artifact_retention_server_metadata_hash_and_duplicates_are_checked(self):
-        payload = zipped({"receipt.json": b"{}"})
-        run = {"id": 99, "head_sha": REVISION, "created_at": iso(90)}
-        artifact = {"id": 7, "name": "verification-99-1", "expired": False,
-                    "workflow_run": {"id": 99, "head_sha": REVISION},
-                    "size_in_bytes": len(payload), "digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
-                    "created_at": iso(100), "expires_at": iso(100 + 14 * 86400)}
-        api = Mock()
-        api.pages.return_value = [artifact]
-        api.artifact_zip.return_value = payload
-        with patch("loop.publication.time.time", return_value=100):
-            self.assertEqual({"receipt.json": b"{}"}, bound_artifact(
-                api, run, artifact["name"], {"receipt.json"}, [artifact])[0])
-            for key, value in [("expired", True), ("workflow_run", {"id": 98, "head_sha": REVISION}),
-                               ("digest", "sha256:" + "0" * 64), ("expires_at", iso(99)),
-                               ("created_at", iso(89))]:
-                broken = dict(artifact, **{key: value})
-                api.pages.return_value = [broken]
-                with self.subTest(key=key), self.assertRaises(Rejected):
-                    bound_artifact(api, run, artifact["name"], {"receipt.json"}, [broken])
-            api.pages.return_value = [artifact, artifact]
-            with self.assertRaises(Rejected):
-                bound_artifact(api, run, artifact["name"], {"receipt.json"}, [artifact])
 
 
 class RealObjectEvidenceTests(unittest.TestCase):
@@ -1967,9 +1933,8 @@ class RealObjectEvidenceTests(unittest.TestCase):
     def test_real_git_candidate_bundle_server_bound_evidence_and_publication_reconciliation(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
-            source, package, restored = root / "source", root / "package", root / "restored"
+            source, restored = root / "source", root / "restored"
             source.mkdir()
-            package.mkdir()
             restored.mkdir()
             git(["init", "--bare", "--quiet"], source)
             blob = git(["hash-object", "-w", "--stdin"], source, b"values.length - 1\n").decode().strip()
@@ -1988,50 +1953,35 @@ class RealObjectEvidenceTests(unittest.TestCase):
 -values.length - 1
 +values.length
 """.encode()
-            from tests.support import semantic
+            from tests.support import semantic, native_files
             files = {
                 "result.json": canonical(semantic(req, "fixes", patch_data)),
                 "candidate.patch": patch_data,
                 "diagnostics.txt": b'{"commands":[{"argv":["python3","-c","raise RuntimeError()"]}]}',
             }
-            payload = zipped(files)
             def fetch(directory):
                 git(["-c", "protocol.file.allow=always", "fetch", "--quiet", "--depth=1",
                      str(source), commit], directory)
+            payload = zipped(native_files(files, req, fetch))
             worker = run()
             worker_artifact = {"id": 33, "name": "candidate-24-1", "size_in_bytes": len(payload),
                                "digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
                                "expired": False, "workflow_run": {"id": 24, "head_sha": REVISION}}
-            result = verify(payload, req, worker, worker_artifact, fetch, package)
+            result = verify(payload, req, worker, worker_artifact, fetch)
             state = live_state(req)
             state["report"] = copy.deepcopy(result)
             candidate = result["candidate"]
-            manifest = json.loads((package / "manifest.json").read_bytes())
-            result_report = {"schema": 2, "request_id": req["request_id"],
-                             "request_digest": digest(req), "generation": 6, "verification": "verified",
-                             "run_id": 24, "run_attempt": 1, "result": result}
-            verification = zipped({"verification-report.json": canonical(result_report),
-                                   "candidate-package/manifest.json": canonical(manifest),
-                                   "candidate-package/candidate.bundle": (package / "candidate.bundle").read_bytes()})
-            artifacts = [{
-                "id": i, "name": name, "size_in_bytes": len(data), "expired": False,
-                "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
-                "workflow_run": {"id": 99, "head_sha": REVISION},
-                "created_at": iso(100), "expires_at": iso(100 + 14 * 86400),
-            } for i, name, data in [(34, "verification-99-1", verification)]]
-            state["artifacts"] = artifacts
+            state["artifacts"] = [worker_artifact]
             state["report"]["verification_run"] = {"id": 99, "attempt": 1}
-            pipeline = dict(worker, id=99, path=".github/workflows/coordinator.yml", created_at=iso(90))
             class Artifacts:
                 def call(self, path, *_args):
-                    return pipeline if path.endswith("/99") else worker
+                    return worker
                 def pages(self, path, key):
                     if key == "jobs":
-                        return ([{"name": n, "conclusion": "success"} for n in ("verify", "finalize")]
-                                if "/99/" in path else [{"name": "agent", "conclusion": "success"}])
-                    return artifacts if "/99/" in path else [worker_artifact]
+                        return [{"name": "agent", "conclusion": "success"}]
+                    return [worker_artifact]
                 def artifact_zip(self, identity, limit):
-                    return {33: payload, 34: verification}[identity]
+                    return payload
             original_git = git
             def redirect(args, directory):
                 args = list(args)
@@ -2041,7 +1991,6 @@ class RealObjectEvidenceTests(unittest.TestCase):
                     args = ["-c", "protocol.file.allow=always"] + args
                 return original_git(args, directory)
             with patch("loop.publication.git", side_effect=redirect), \
-                    patch("loop.publication.time.time", return_value=100), \
                     patch("loop.verify.subprocess.run", wraps=subprocess.run) as executor:
                 accepted, derived = evidence(Artifacts(), state, restored)
             self.assertGreater(executor.call_count, 0)
@@ -2058,25 +2007,11 @@ class RealObjectEvidenceTests(unittest.TestCase):
             for key, value in [("run_attempt", 2), ("head_sha", SHA), ("status", "in_progress"),
                                ("path", ".github/workflows/validate.yml"),
                                ("path", ".github/workflows/qualification.yml"), ("event", "pull_request")]:
-                before = pipeline[key]
-                pipeline[key] = value
+                before = worker[key]
+                worker[key] = value
                 with self.subTest(key=key), self.assertRaises(Rejected):
                     evidence(Artifacts(), state, restored)
-                pipeline[key] = before
-            state["coordinator_recovery"] = {"execution_revision": "f" * 40,
-                                             "workflow_ref": revision_ref("f" * 40)}
-            with self.assertRaisesRegex(Rejected, "trusted verification pipeline"):
-                evidence(Artifacts(), state, restored)
-            pipeline["head_sha"] = "f" * 40
-            artifacts[0]["workflow_run"]["head_sha"] = "f" * 40
-            recovered = root / "recovered"
-            recovered.mkdir()
-            with patch("loop.publication.git", side_effect=redirect), \
-                    patch("loop.publication.time.time", return_value=100):
-                self.assertEqual((accepted, derived), evidence(Artifacts(), state, recovered))
-            state.pop("coordinator_recovery")
-            pipeline["head_sha"] = REVISION
-            artifacts[0]["workflow_run"]["head_sha"] = REVISION
+                worker[key] = before
             store, name = stored(state)
             read = Read(req)
             publisher = Publisher(read)

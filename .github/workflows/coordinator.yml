@@ -52,12 +52,6 @@ jobs:
       contents: write
       actions: write
     outputs:
-      verify: ${{ steps.control.outputs.verify }}
-      pr: ${{ steps.control.outputs.pr }}
-      request_id: ${{ steps.control.outputs.request_id }}
-      revision: ${{ steps.control.outputs.revision }}
-      generation: ${{ steps.control.outputs.generation }}
-      repo: ${{ steps.control.outputs.repo }}
       live: ${{ steps.control.outputs.live }}
       live_pr: ${{ steps.control.outputs.live_pr }}
       live_repo: ${{ steps.control.outputs.live_repo }}
@@ -117,63 +111,6 @@ jobs:
           GENERATION: ${{ steps.control.outputs.source_generation }}
           TARGET_REPO: ${{ steps.control.outputs.source_repo }}
         run: python3 -m loop.cli attach-source
-  verify:
-    needs: coordinate
-    if: needs.coordinate.outputs.verify == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ needs.coordinate.outputs.revision }}
-          persist-credentials: false
-      - id: verify
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ needs.coordinate.outputs.pr }}
-          REQUEST_ID: ${{ needs.coordinate.outputs.request_id }}
-          GENERATION: ${{ needs.coordinate.outputs.generation }}
-          TARGET_REPO: ${{ needs.coordinate.outputs.repo }}
-        run: python3 -m loop.cli verify
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
-        with:
-          name: verification-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            verification-report.json
-            candidate-package/
-          if-no-files-found: error
-          retention-days: 14
-  finalize:
-    needs: [coordinate, verify]
-    if: always() && needs.coordinate.outputs.verify == 'true'
-    environment: protected
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: write
-      actions: read
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ needs.coordinate.outputs.revision }}
-          persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: needs.verify.result == 'success'
-        with:
-          name: verification-${{ github.run_id }}-${{ github.run_attempt }}
-      - if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCE_READ_TOKEN: ${{ secrets.REVIEW_LOOP_SOURCE_READ_TOKEN }}
-          PR: ${{ needs.coordinate.outputs.pr }}
-          REQUEST_ID: ${{ needs.coordinate.outputs.request_id }}
-          GENERATION: ${{ needs.coordinate.outputs.generation }}
-          TARGET_REPO: ${{ needs.coordinate.outputs.repo }}
-        run: python3 -m loop.cli finalize
   personal_live:
     needs: coordinate
     if: needs.coordinate.outputs.live == 'true'
@@ -203,3 +140,11 @@ jobs:
           TRUSTED_REVISION: ${{ needs.coordinate.outputs.live_revision }}
           EXPECTED_STAGE: ${{ needs.coordinate.outputs.live_stage }}
         run: python3 -m loop.live
+      - name: Retain trusted verification diagnostics
+        if: always() && needs.coordinate.outputs.live_stage == 'verify_pending'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: verification-report.json
+          if-no-files-found: error
+          retention-days: 14

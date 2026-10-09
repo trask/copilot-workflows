@@ -5,9 +5,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from loop.api import APIError
-from loop.cli import choose_live, choose_verification, main as cli_main, recover_coordinator
+from loop.cli import choose_live, main as cli_main, recover_coordinator
 from loop.control import busy, claim
-from loop.coordinator import checkpoint, dispatch, run_binding
+from loop.coordinator import cancel, checkpoint, dispatch, run_binding
 from loop.policy import CENTRAL, Rejected, pipeline_budget
 from loop.revisions import (check_pin, execution_ref, inherit_pin, pin_revision,
                             revision_ref, verification_revision, workflow_ref)
@@ -18,6 +18,23 @@ from tests.test_waiter import Controls, ENV, controller, phases
 
 
 class RevisionTests(unittest.TestCase):
+    def test_waiter_routes_and_user_cancels_an_older_pinned_contract(self):
+        req = dict(personal_request(), protocol="reviewable-v1", workflow_ref=revision_ref(REVISION))
+        req["publication"]["profile"] = "reviewable-v1"
+        state = live_state(req, "running")
+        store, name = stored(state)
+        api = Controls()
+        pin_revision(api, REVISION)
+        api.calls.clear()
+        with patch("loop.waiter.supported_checkpoint",
+                   side_effect=AssertionError("Old contracts belong to their pinned runtime")):
+            self.assertTrue(poll(api, store, 400, "f" * 40, {}))
+        self.assertEqual(req["workflow_ref"], api.calls[-1][2]["ref"])
+        self.assertEqual(state, store.entries[name])
+        cancelled = cancel(store, name, req["request_id"], 6, 400)
+        self.assertEqual("cancelled", cancelled["stage"])
+        self.assertEqual(7, cancelled["generation"])
+
     def test_pin_is_created_once_then_reused_without_updates(self):
         api = FakeAPI()
         ref = pin_revision(api, REVISION)
@@ -259,10 +276,10 @@ class RevisionTests(unittest.TestCase):
             with self.subTest(stage=stage), patch.dict(os.environ, env, clear=True), \
                     patch("loop.cli.target_api", return_value=Read(req)), \
                     patch("loop.cli.output") as output:
-                selected = (choose_verification(store, 400, api, only=name)
+                selected = (choose_live(store, 400, api, only=name)
                             if stage == "verify_pending" else choose_live(store, 400, api, only=name))
             self.assertEqual(name, selected)
-            output.assert_any_call("revision" if stage == "verify_pending" else "live_revision", REVISION)
+            output.assert_any_call("live_revision", REVISION)
             self.assertEqual(REVISION, store.entries[name]["coordinator_run"]["revision"])
         api.controllers[99] = dict(controller(99), head_branch=req["workflow_ref"])
         self.assertTrue(busy(api, store.entries[name]))
@@ -289,8 +306,8 @@ class RevisionTests(unittest.TestCase):
             self.assertEqual(name, recover_coordinator(api, store, args, "f" * 40, 400))
             recovered = copy.deepcopy(store.entries[name])
             with patch("loop.cli.output") as output:
-                self.assertEqual(name, choose_verification(store, 400, api, only=name))
-            output.assert_any_call("revision", "f" * 40)
+                self.assertEqual(name, choose_live(store, 400, api, only=name))
+            output.assert_any_call("live_revision", "f" * 40)
         self.assertEqual("verify_pending", recovered["stage"])
         self.assertEqual(req, recovered["request"])
         self.assertEqual(6, recovered["generation"])

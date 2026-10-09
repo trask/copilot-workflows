@@ -22,7 +22,7 @@ const fixture = (updates = {}, request = {}) => ({
     expected_sha: sha("a"), intent: { recorded_at: 1001 },
     run: { id: 101, attempt: 1, conclusion: null },
     request: {
-        schema: 2, protocol: "reviewable-v1", repo: "example/project", head_repo: "example/fork", pr: 12,
+        schema: 2, protocol: "git-candidate-v1", repo: "example/project", head_repo: "example/fork", pr: 12,
         request_id: requestId("a"), frozen_at: 1000, frozen_sha: sha("a"),
         loop_kind: "copilot_review", mode: "publish", budgets: { max_iterations: 5 },
         publication: { authorized_at: 1000 }, ...request,
@@ -636,6 +636,15 @@ test("historical and unknown records cannot appear as active generic phases", ()
     assert.equal(commitLink("../secrets", sha("a")), null);
     assert.equal(compareLink("example/fork", sha("a"), sha("a")), null);
     assert.equal(targetHistory([record({})], target).warnings.length, 1);
+});
+
+test("older candidate contracts remain active only at their exact runtime pin", () => {
+    const revision = sha("b");
+    const state = fixture({ stage: "running" }, { protocol: "reviewable-v1",
+        workflow_revision: revision, workflow_ref: `review-loop-revisions/${revision}` });
+    assert.equal(phaseSummary(record(state)).historical, false);
+    state.request.workflow_ref = "main";
+    assert.equal(phaseSummary(record(state)).historical, true);
 });
 
 test("current batch publication and thread effects link only confirmed published commits and replies", () => {

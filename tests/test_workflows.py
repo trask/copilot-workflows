@@ -44,7 +44,7 @@ class WorkflowTests(unittest.TestCase):
     def test_custom_secrets_require_the_protected_environment(self):
         root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
         expected = {
-            "coordinator.yml": {"coordinate", "finalize", "personal_live"},
+            "coordinator.yml": {"coordinate", "personal_live"},
             "waiter.yml": {"wait"},
             "copilot-worker.lock.yml": {"activation", "agent", "detection"},
             "validate.yml": set(),
@@ -91,7 +91,10 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("\n  validate:", coordinator)
         self.assertNotIn("loop.validation", coordinator)
         self.assertNotIn("objective-validation", coordinator)
-        self.assertIn("needs: [coordinate, verify]", coordinator.split("\n  finalize:", 1)[1])
+        self.assertEqual(["coordinate", "personal_live"], re.findall(
+            r"^  ([a-z_]+):$", coordinator.split("\njobs:", 1)[1], re.MULTILINE))
+        self.assertIn("run: python3 -m loop.live", coordinator)
+        self.assertIn("path: verification-report.json", coordinator)
         self.assertNotIn("qualify", coordinator)
         self.assertFalse(hasattr(publication, "qualified_reviewable"))
         self.assertFalse((root.parents[1] / "loop" / "validation.py").exists())
@@ -118,7 +121,7 @@ class WorkflowTests(unittest.TestCase):
                 self.assertIn('java-version: "25"', text)
                 self.assertLess(text.index("Install Java runtime for sandbox checks"),
                                 text.index("Prepare fresh writable sandbox home"))
-        self.assertIn("preserve AWF's `JAVA_TOOL_OPTIONS` proxy settings", worker)
+        self.assertIn("preserve AWF's\n`JAVA_TOOL_OPTIONS` proxy settings", worker)
 
     def test_mise_installs_can_reach_version_metadata_and_sigstore_trust_roots(self):
         root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
@@ -165,10 +168,8 @@ class WorkflowTests(unittest.TestCase):
         worker = (root / "copilot-worker.md").read_text(encoding="utf-8")
         frontmatter, prompt = worker.split("\n---\n", 1)
         self.assertNotIn("loop_kind:", frontmatter)
-        self.assertIn("Only the trusted frozen request selects `loop_kind`.", prompt)
-        self.assertIn("one pass", prompt)
-        self.assertIn("a real changed", prompt)
-        self.assertIn("an empty patch", prompt)
+        self.assertIn("Only the trusted request selects\nthe task", prompt)
+        self.assertIn("Blocked tasks return\nno candidate commits", prompt)
         waiter = (root / "waiter.yml").read_text(encoding="utf-8")
         self.assertNotIn("loop_kind:", waiter)
         self.assertEqual(1, waiter.count("group: central-review-loop-waiter"))
@@ -186,8 +187,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("startsWith(github.ref, 'refs/heads/review-loop-revisions/')", condition)
         worker = (root / "copilot-worker.md").read_text(encoding="utf-8")
         self.assertIn("ref: ${{ github.sha }}", worker)
-        for output in ("revision", "live_revision"):
-            self.assertIn("ref: ${{ needs.coordinate.outputs." + output + " }}", coordinator)
+        self.assertIn("ref: ${{ needs.coordinate.outputs.live_revision }}", coordinator)
 
     def test_unpublished_restart_is_explicit_coordinator_input_only(self):
         root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
@@ -206,36 +206,28 @@ class WorkflowTests(unittest.TestCase):
         worker = (Path(__file__).resolve().parents[1] /
                   ".github" / "workflows" / "copilot-worker.md").read_text(encoding="utf-8")
         self.assertIn("Return exactly these three regular files", worker)
-        self.assertIn("Record the actual commands", worker)
-        self.assertIn("must happen\nthrough bash tools **inside the AWF sandbox**", worker)
+        self.assertIn("record actual check commands and results", worker)
+        self.assertIn("through bash inside AWF", worker)
         self.assertIn("run: python3 -m loop.worker_home", worker)
         self.assertNotIn("loop.validation", worker)
         staging = worker.split("for name, limit in [", 1)[1].split("]:", 1)[0]
         self.assertNotIn("validation.json", staging)
-        for name in ("result.json", "candidate.patch", "diagnostics.txt"):
+        for name in ("result.json", "candidate.bundle", "diagnostics.txt"):
             self.assertIn(name, staging)
 
     def test_completed_no_change_investigations_do_not_require_builds(self):
         worker = (Path(__file__).resolve().parents[1] /
                   ".github" / "workflows" / "copilot-worker.md").read_text(encoding="utf-8")
-        contract = worker.split("For `pr_simplify` and `pr_consistency`,", 1)[1].split(
-            "\nAll new results", 1)[0]
-        for rule in ("return `no_change` with empty\npatch and batches",
-                     "Builds and tests are not prerequisites",
-                     "do not run them solely to validate unchanged code",
-                     "check failure does not turn a completed no-change investigation into `blocked`",
-                     "Record any attempted checks and their failures",
-                     "a check needed to decide whether a change qualifies"):
-            self.assertIn(rule, contract)
-        self.assertIn("When source-changing tasks make edits,\n"
-                      "run appropriate existing repository checks", worker)
-        self.assertIn("The `copilot_review` and `self_review` loops also run checks "
-                      "on no-change passes.", worker)
+        self.assertIn("Simplify and consistency tasks don't need builds solely to validate unchanged code", worker)
+        self.assertIn("An incomplete investigation or a check needed to decide a change still blocks", worker)
+        self.assertIn("Source changes require appropriate existing formatting and focused checks", worker)
+        self.assertIn("including on a no-change pass", worker)
+        self.assertIn("Run appropriate checks on every pass", worker)
 
     def test_publisher_routing_exposes_names_and_presence_only_outside_live_job(self):
         root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
         coordinator = (root / "coordinator.yml").read_text(encoding="utf-8")
-        coordinate = coordinator.split("\n  coordinate:", 1)[1].split("\n  verify:", 1)[0]
+        coordinate = coordinator.split("\n  coordinate:", 1)[1].split("\n  personal_live:", 1)[0]
         live = coordinator.split("\n  personal_live:", 1)[1]
         self.assertIn("if: inputs.operation == 'launch'", coordinate)
         self.assertIn('python3 -m loop.cli select-publisher --target "$TARGET"', coordinate)
@@ -257,10 +249,6 @@ class WorkflowTests(unittest.TestCase):
                       live)
         self.assertIn("TARGET_PUBLISHER_SECRET_NAME: ${{ needs.coordinate.outputs.live_target_publisher_secret }}",
                       live)
-        for job in ("verify", "finalize"):
-            section = re.split(r"\n  [a-z_]+:", coordinator.split("\n  " + job + ":", 1)[1])[0]
-            self.assertNotIn("PUBLISHER_SECRET", section)
-            self.assertNotIn("PUBLISHER_TOKEN", section)
         for name in ("copilot-worker.md", "copilot-worker.lock.yml", "waiter.yml"):
             text = (root / name).read_text(encoding="utf-8")
             self.assertNotIn("PUBLISHER_SECRET", text)

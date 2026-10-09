@@ -97,33 +97,23 @@ The variable and secret names are reusable by other workflows in this repository
 
 Without the variable, only effects in repositories owned by the central owner select `TRASK_PUBLISH_TOKEN`. An explicit mapping replaces that default. The personal token can cover selected repositories or all personal repositories, including forks; an organization entry needs its own token and any required organization approval. All-repository access includes private repositories such as the central workflow repository. Private and central PR targets remain rejected, and workers never receive publisher tokens. The publisher checks live identity, target/head access and bound effects, not the token's complete repository scope. The loop neither provisions credentials nor changes their permissions.
 
-Published commits use `Trask Stalnaker` as both author and committer display name, with the launch owner's verified numeric-ID noreply email. The account identity is frozen from GitHub PR metadata, bound to the candidate before verification and checked against the authenticated publisher by ID and login. For Copilot-authored PRs, the owner's account is verified through GitHub's author search and frozen separately from the bot author. The commit date is the freeze time and Copilot remains credited in the co-author trailer. Push credentials alone do not determine Git commit authorship.
+Published commits use `Trask Stalnaker` as both author and committer display name, with the launch owner's verified numeric-ID noreply email. The account identity is frozen from GitHub PR metadata, bound to the candidate before verification and checked against the authenticated publisher by ID and login. For Copilot-authored PRs, the owner's account is verified through GitHub's author search and frozen separately from the bot author. Workers create ordinary Git commits and credit Copilot in the co-author trailer. Push credentials alone do not determine Git commit authorship.
 
 Only description can update title/body, and only conflict resolution can publish a two-parent base update. Landing PRs, changing draft state, forced pushes, top-level comments, submitted reviews and human-rooted thread replies remain outside the protocol.
 
 ## Reviewable commits and thread handling
 
-One worker iteration can produce several ordered root-cause commits. Related findings share a commit; unrelated causes remain separate, including sequential edits to the same file. Copilot-review messages use this format, repeating the original-comment block for each associated finding:
+One worker iteration can produce several ordinary commits. Related findings can share a commit; unrelated causes remain separate, including sequential edits to the same file. Messages need a useful subject and the co-author trailer, not prescribed analysis or tradeoff sections:
 
 ```text
-Address Copilot review comment: Reject stale snapshot generations
-
-Copilot comment:
-
-<verbatim frozen original comment>
-
-Analysis: Reject a non-snapshot head with a snapshot ancestor.
-
-Upsides: Prevents accepting stale state.
-
-Downsides: Requires an ancestry read.
+Reject stale snapshot generations
 
 Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>
 ```
 
-Self-review uses an issue-specific subject and Analysis/Upsides/Downsides without fabricated Copilot comments. Both use the frozen owner identity/date and co-author trailer.
+The worker returns a small semantic result alongside its native Git bundle. Copilot findings select their fixing commit by its 1-based history index; the trusted publisher derives the actual SHA from Git.
 
-Only the trusted publisher handles threads. Fixed replies start `Addressed in <batch sha>.`; supported no-code decisions start `No code change.` Both include analysis and tradeoffs, without repeating the original comment. No-code decisions push no empty commit. Body-only findings receive no invented inline or top-level comment.
+Only the trusted publisher handles threads. Fixed replies start `Addressed in <commit sha>.`; supported no-code decisions start `No code change.` Both include the finding's concrete explanation, without repeating the original comment. No-code decisions push no empty commit. Body-only findings receive no invented inline or top-level comment.
 
 The publisher confirms the exact branch ref and PR head before replying, confirms the reply before resolving, and confirms resolution before requesting fresh review. Human intervention or changed conversation prevents automatic handling of that thread and records the reason. Already resolved threads are explicitly skipped. An outdated or already-addressed comment still gets an explanatory reply and resolution; a fixed thread gets its mapped-commit reply. An outdated thread alone does not establish review clearance.
 
@@ -165,9 +155,9 @@ Automatic refresh runs every 60 seconds while visible, with cached conditional R
 
 This is the real pinned gh-aw Copilot engine running inside Actions/AWF, not GitHub Agent Tasks. The compiler is gh-aw v0.89.21 at `c35393777e5604a63721d09512263b1383301d4f`. The worker and threat detector explicitly pin Copilot CLI 1.0.93, which supports GPT-6.1 Sol, rather than relying on the compiler's older CLI default. Rootless AWF is pinned to 0.28.49, which keeps Chat Completions custom tools separate from Responses tool translation. Action and container pins are immutable.
 
-The worker runs relevant repository checks inside its AWF sandbox for candidate edits and the two review loops, and records commands, exit codes and failures in `diagnostics.txt`. A completed Simplify or Consistency investigation with no qualifying change returns `no_change` without requiring builds or tests of unchanged code. Missing SDKs or optional check failures remain explicit in diagnostics but do not block that result; incomplete investigation or unavailable checks needed to assess a change still block. It returns exactly `candidate.patch`, `result.json` and `diagnostics.txt`. There is no `validation.json` or command-plan protocol.
+The worker runs relevant repository checks inside its AWF sandbox for candidate edits and the two review loops, and records commands, exit codes and failures in `diagnostics.txt`. A completed Simplify or Consistency investigation with no qualifying change returns `no_change` without requiring builds or tests of unchanged code. Missing SDKs or optional check failures remain explicit in diagnostics but do not block that result; incomplete investigation or unavailable checks needed to assess a change still block. It returns exactly `candidate.bundle`, `result.json` and `diagnostics.txt`. There is no `validation.json` or command-plan protocol.
 
-The trusted verifier reconstructs linear fix batches or a real two-parent merge from Git objects without checking out or executing target code. Report-only results have no manufactured commits. It checks every intermediate change and the cumulative diff. The publisher downloads fresh server-bound worker/verifier artifacts and reconstructs the entire chain again. Acceptance binds patch spans/hashes, every commit/tree/parent, finding mappings, acquired inputs, request digest, generation, worker run/attempt and trusted workflow revision. PR Description instead verifies the request-bound proposal and empty patch/package without importing source or constructing a Git tree.
+One trusted coordinator job verifies and publishes the worker result. It downloads the server-bound artifact, imports the native bundle as data, and checks ancestry, authorship, paths and the semantic result without checking out or executing target code. Acceptance binds every commit/tree/parent, finding mapping, acquired input, request digest, generation, worker run/attempt and trusted workflow revision. Publication reuses the verified Git objects rather than passing a second candidate artifact between jobs. An interrupted continuation revalidates the original worker evidence. PR Description verifies its request-bound proposal and empty bundle without constructing a source tree.
 
 There is no independent test runner or native test receipt. Worker diagnostics are untrusted feedback, not proof of passing tests or coverage. A clean review result does not establish passing target CI.
 
@@ -175,11 +165,11 @@ Workers run on hosted Ubuntu 24.04 with pinned AWF and Java 25 installed before 
 
 Public Git retrieval is unauthenticated. An optional `REVIEW_LOOP_SOURCE_READ_TOKEN` supplies target/head API reads, never private Git retrieval. Trusted Git-only acquisition creates a frozen snapshot artifact; workers and verifiers receive that bundle, never the credential. Every self-review pass uses this transport with both complete frozen head and merge-base trees. API file-list or diff truncation cannot reduce the review scope. No App is created or registered.
 
-Source acquisition, verification and publisher reconstruction preserve complete frozen Git objects without source byte-size, object-count or file-count caps. Source preserves regular/executable files, symlinks and submodule pointers without following links or fetching submodule repositories in trusted jobs.
+Source acquisition and verification preserve complete frozen Git objects without source byte-size, object-count or file-count caps. Source preserves regular/executable files, symlinks and submodule pointers without following links or fetching submodule repositories in trusted jobs.
 
 Temporary Git repositories retain fetched packs and skip automatic fetch maintenance so no background repack races cleanup. Packing uses one thread to stay within the process memory limit. Missing or invalid source fails explicitly, never as a partial review. Git failures report their exit code and error.
 
-Repository configuration and instruction files, binary files, executable files, symlinks and submodule pointers are valid source and edits. UTF-8 filenames, including Git-quoted names, have no ASCII-only or 240-character policy limit. Paths must remain relative without traversal, NUL or `.git` metadata components. Target instructions remain untrusted task input, and actual secrets must never enter candidate artifacts. Central trusted runtime source has separate protections. GitHub enforces the selected publisher's actual workflow-file permissions.
+Any target-repository file may be read or changed when the task requires it, including configuration, instructions, binary files, executable files, symlinks and submodule pointers. Conflict resolution can repair semantic incompatibilities in files Git merged without textual conflicts. UTF-8 filenames, including Git-quoted names, have no ASCII-only or 240-character policy limit. Paths must remain relative without traversal, NUL or `.git` metadata components. Target instructions remain untrusted task input, and actual secrets must never enter candidate artifacts. Central trusted runtime source has separate protections. GitHub enforces the selected publisher's actual workflow-file permissions.
 
 ## Reviews, CI and state
 
@@ -195,11 +185,11 @@ Source-based independent tasks freeze complete GitHub PR diffs without byte-size
 
 CI diagnosis collects complete failed-step log windows, excluding later cleanup outside those windows. Jobs without failed-step timestamps supply their complete logs. Evidence has no byte budget; the worker selects relevant quotations for each diagnosis. Denied, missing or expired log downloads are recorded as unavailable, including failures from signed log storage, and retain any check output. Insufficient evidence still requires an unknown diagnosis, not CI clearance.
 
-Copilot feedback includes every unresolved verified finding and its complete conversation, without finding-count or body-length caps. Output prose has no custom length caps; workers are instructed to write concise explanations, and GitHub enforces its own text limits. Summaries remain single-line and analysis, upsides and downsides remain required. API response, artifact, process-resource and runtime limits still apply.
+Copilot feedback includes every unresolved verified finding and its complete conversation, without finding-count or body-length caps. Workers return concise explanations rather than mandatory upside/downside sections. GitHub's text limits and API response, artifact, process-resource and runtime limits still apply.
 
-All fresh requests use the single `reviewable-v1` protocol. Requests, state, verifier reports, manifests, and worker results use schema 2. Worker results include ordered patch spans and messages; external results account for every frozen finding exactly once. Candidate patches have no byte-size, changed-file or changed-line caps; this includes clean incoming changes when merging the frozen base into a PR. Up to 100 ordered code batches are supported. Candidate artifacts use native Actions uploads, and downloads are bound to GitHub's recorded artifact size and digest rather than a fixed size ceiling. Unknown protocols and old artifacts cannot execute. Checkpoints retain the `pr-v2-<actual-base-repository-ID>-<PR>.json` storage namespace; an unfrozen access gate uses a repository-name digest. `launch_run` binds requests to the actual owner dispatch run/attempt.
+All fresh requests use `git-candidate-v1` and schema 2. Workers supply native Git history and only task-specific semantic claims; external results account for every frozen finding exactly once. Bundles have no byte-size, changed-file or changed-line caps, including incoming base changes in merge candidates. Up to 100 linear candidate commits are supported, or one two-parent conflict-resolution commit. Artifact downloads are bound to GitHub's recorded size and digest. Checkpoints retain the `pr-v2-<actual-base-repository-ID>-<PR>.json` namespace, and `launch_run` binds requests to the actual owner dispatch run/attempt.
 
-Earlier protocols are historical and read-only. There is no execution compatibility or in-place migration. A fresh launch archives a terminal prior checkpoint only after proving bound executions have stopped and effect intents are settled. Unknown old effects block launch. The [historical exhausted pilot](docs/legacy-pilot.md#historical-central-qualification) stays stopped.
+Existing `reviewable-v1` phases continue at their own pinned runtime; current code routes them but never adapts or publishes their old candidates. Other earlier protocols remain read-only. A fresh launch archives a terminal prior checkpoint only after proving bound executions have stopped and effect intents are settled. Unknown old effects block launch. The [historical exhausted pilot](docs/legacy-pilot.md#historical-central-qualification) stays stopped.
 
 One shared Actions waiter polls all active authorized PRs, including phases launched while it is running. Ten PRs can run independently without ten waiting runners. The waiter dispatches short per-PR coordinator runs when reviews, CI or workers are ready; model workers and structural verification pipelines run concurrently across PRs. It never publishes or receives inference/publisher credentials.
 

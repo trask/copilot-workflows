@@ -40,12 +40,15 @@ def guard_task(store, name, state, read, publisher):
     check_diff(read, state["request"], state["report"]["dispositions"].get("input_identity"))
 
 
-def publish_task(store, name, state, central, read, publisher, now):
+def publish_task(store, name, state, central, read, publisher, now, verified=None):
     import tempfile
     from loop.live import cas, owner
     request = state["request"]
-    with tempfile.TemporaryDirectory(prefix="trusted-task-") as directory:
-        accepted, _ = evidence(central, state, directory)
+    if verified is None:
+        with tempfile.TemporaryDirectory(prefix="trusted-task-") as directory:
+            accepted, _ = evidence(central, state, directory)
+    else:
+        accepted = verified[0]
     result = state["report"]["dispositions"]
     kind = loop_kind(request)
     guard_task(store, name, state, read, publisher)

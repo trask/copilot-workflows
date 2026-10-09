@@ -1,15 +1,10 @@
 """Entry points used by trusted central workflows."""
 
 import argparse
-import hashlib
-import json
 import os
+import subprocess
 import sys
 import time
-import subprocess
-import zipfile
-import shutil
-import tempfile
 from pathlib import Path
 
 from loop.api import API, APIError
@@ -18,20 +13,20 @@ from loop.coordinator import (cancel, checkpoint, dispatch, due, executions_quie
 from loop.control import busy as coordinator_busy, claim as claim_coordinator, owned
 from loop.publisher_auth import publisher_secret
 from loop.freeze import freeze
-from loop.policy import (AUTHOR_ID, CENTRAL, LOOP_KINDS, REQUEST, TERMINAL, Rejected, attributed_owner, canonical,
+from loop.policy import (CENTRAL, LOOP_KINDS, REQUEST, TERMINAL, Rejected, attributed_owner, canonical,
                          check_target, checkpoint_name, digest, effect_repository, eligible, loop_kind, parse_target,
-                         direct_inputs, staged_source, publication_gate,
+                         staged_source, publication_gate,
                          pipeline_budget, require, supported_checkpoint)
 from loop.state import State
-from loop.verify import artifact_metadata, git, parse_json, verify
-from loop.source import (bind_manifest, download_source, gated_request, import_source,
-                         acquire_source, package_source, source_metadata, target_api)
+from loop.verify import artifact_metadata, git, parse_json
+from loop.source import (bind_manifest, download_source, gated_request,
+                         package_source, source_metadata, target_api)
 from loop.inputs import acquire as acquire_inputs
 from loop.reviews import select_checks
 from loop.live import (STAGES as LIVE_STAGES, publication_invocation,
                        authorize_publication_reconciliation, execution_revision,
                        start as start_publication)
-from loop.revisions import execution_ref, pin_revision, verification_revision, workflow_ref
+from loop.revisions import execution_ref, pin_revision
 
 
 def output(name, value):
@@ -76,52 +71,17 @@ def select_publisher(api, target, kind="copilot_review"):
     output("publisher_head_repo", effect_repository(dict(request, loop_kind=kind)))
     output("publisher_secret", publisher_secret(effect_repository(dict(request, loop_kind=kind))))
     output("target_publisher_secret", publisher_secret(request["repo"]))
-
-
-def choose_verification(store, now=None, api=None, only=None):
-    _, _, entries = store.snapshot()
-    for name, state in sorted(entries.items()):
-        if only is not None and name != only:
-            continue
-        if (name.startswith("pr-v2-") and state.get("schema") == 2
-                and state["stage"] == "verify_pending"):
-            pipeline_budget(state)
-            request = state["request"]
-            if (execution_ref(state) != "main"
-                    and os.environ["GITHUB_SHA"] != execution_revision(state)):
-                continue
-            if api is not None:
-                if coordinator_busy(api, state):
-                    continue
-                try:
-                    check_target(target_api(api, request["repo"]), request)
-                except (Rejected, RuntimeError) as error:
-                    def blocked(current):
-                        require(current == state, "Verification selection changed")
-                        current.update(stage="blocked", reason="target_repository_read_or_stale_gate",
-                                       error=type(error).__name__ + ": " + str(error)[:1000])
-                        return current
-                    summary(store.update(name, blocked))
-                    continue
-                state = claim_coordinator(store, name, state, api)
-                if state is None:
-                    continue
-            for key, value in {"verify": "true", "pr": request["pr"],
-                               "repo": request["repo"],
-                               "request_id": request["request_id"],
-                               "revision": verification_revision(state),
-                               "generation": state["generation"]}.items():
-                output(key, value)
-            return name
-
-
-def choose_live(store, now, api=None, only=None):
+def choose_live(store, now=None, api=None, only=None):
+    now = int(time.time()) if now is None else now
     _, _, entries = store.snapshot()
     for name, state in sorted(entries.items()):
         if only is not None and name != only:
             continue
         if (not name.startswith("pr-v2-") or state.get("schema") != 2
                 or state["stage"] in TERMINAL):
+            continue
+        if (execution_ref(state) != "main"
+                and os.environ["GITHUB_SHA"] != execution_revision(state)):
             continue
         supported_checkpoint(state)
         if state["stage"] not in LIVE_STAGES:
@@ -130,9 +90,6 @@ def choose_live(store, now, api=None, only=None):
         if state["next_check_at"] > now:
             continue
         request = state["request"]
-        if (execution_ref(state) != "main"
-                and os.environ["GITHUB_SHA"] != execution_revision(state)):
-            continue
         if (execution_ref(state) == "main" and api is not None
                 and api.call(f"repos/{CENTRAL}/git/ref/heads/main")["object"]["sha"]
                 != execution_revision(state)):
@@ -143,6 +100,8 @@ def choose_live(store, now, api=None, only=None):
             summary(store.update(name, changed))
             continue
         if api is not None:
+            if coordinator_busy(api, state):
+                continue
             state = claim_coordinator(store, name, state, api)
             if state is None:
                 continue
@@ -181,151 +140,38 @@ def prepare(api, store, args):
     output("digest", digest(request))
 
 
-def verify_pending(api, store, args):
+def verify_pending(api, store, args, directory=None, read=None):
     name, state = get_state(store, int(args.pr), args.request_id, args.repo)
     require(state["stage"] == "verify_pending" and state["generation"] == int(args.generation),
             "Stale or cancelled verification claim")
     supported_checkpoint(state)
     owned(state)
-    request = state["request"]
-    report = {"schema": 2, "request_id": request["request_id"], "generation": state["generation"],
-              "run_id": state["run"]["id"], "run_attempt": state["run"]["attempt"],
-              "request_digest": digest(request), "artifacts": [], "verification": "failed"}
+    report = {"schema": 2, "request_id": state["request"]["request_id"],
+              "generation": state["generation"], "verification": "failed"}
     try:
-        require(git(["rev-parse", "HEAD"], Path.cwd()).decode().strip()
-                == verification_revision(state),
-                "Verifier did not check out the authorized trusted revision")
-        check_target(target_api(api, request["repo"], request["head_repo"]), request)
-        fetch = None
-        source = None
-        if staged_source(request):
-            source = download_source(api, state, "frozen-source")
-            def fetch(directory):
-                import_source(directory, source / "source.bundle", state["source"]["manifest"], request)
-        run = api.call(f"repos/{CENTRAL}/actions/runs/{state['run']['id']}")
-        artifact, artifacts = artifact_metadata(api, run, request)
-        report["artifacts"] = [
-            {k: a[k] for k in ("id", "name", "size_in_bytes", "expired", "digest")}
-            for a in artifacts
-        ]
-        payload = api.artifact_zip(artifact["id"], artifact["size_in_bytes"])
-        require("sha256:" + hashlib.sha256(payload).hexdigest() == artifact["digest"],
-                "Downloaded artifact differs from trusted server digest")
-        with tempfile.TemporaryDirectory(prefix="verification-inputs-") as directory:
-            acquired = acquire_inputs(target_api(api, request["repo"], request["head_repo"]),
-                                      request, directory)
-            if direct_inputs(request) and loop_kind(request) != "pr_description":
-                def fetch(target):
-                    acquire_source(target, request)
-            report.update(verification="verified",
-                          result=verify(payload, acquired, run, artifact, fetch,
-                                        package_dir="candidate-package"))
-        if source is not None:
-            shutil.copyfile(source / "source.bundle", Path("candidate-package") / "source.bundle")
-            manifest_path = Path("candidate-package", "manifest.json")
-            candidate_manifest = parse_json(manifest_path.read_bytes())
-            source_hash = state["source"]["manifest"]["bundle_sha256"]
-            candidate_manifest["source_bundle_sha256"] = source_hash
-            manifest_path.write_bytes(canonical(candidate_manifest))
-            report["result"]["candidate"]["source_bundle_sha256"] = source_hash
-            report["source"] = state["source"]
-            report["request"] = request
-    except (Rejected, ValueError, KeyError, OSError, RuntimeError,
-            zipfile.BadZipFile, subprocess.SubprocessError) as error:
+        require(os.environ["GITHUB_RUN_ATTEMPT"] == "1"
+                and git(["rev-parse", "HEAD"], Path.cwd()).decode().strip() == execution_revision(state),
+                "Publisher did not check out the authorized trusted revision")
+        from loop.publication import worker_evidence
+        result, artifacts = worker_evidence(api, state, directory, read)
+        check_target(read or target_api(api, state["request"]["repo"]), state["request"])
+        result["verification_run"] = {"id": int(os.environ["GITHUB_RUN_ID"]), "attempt": 1}
+        report.update(verification="verified", result=result)
+        state = record_result(store, name, state, result, artifacts)
+        return state
+    except (Rejected, ValueError, KeyError, OSError, RuntimeError, subprocess.SubprocessError) as error:
         report["error"] = type(error).__name__ + ": " + str(error)[:1000]
-    Path("verification-report.json").write_bytes(canonical(report))
-    # Failures are explicit report data; finalize writes a failed checkpoint and Actions summary.
-    print("Artifact verification: " + report["verification"])
-
-
-def finalize(api, store, args):
-    name, expected = get_state(store, int(args.pr), args.request_id, args.repo)
-    require(expected["stage"] == "verify_pending"
-            and expected["generation"] == int(args.generation), "Cancelled or stale finalization")
-    supported_checkpoint(expected)
-    owned(expected)
-    try:
-        _finalize(api, store, args)
-    except (Rejected, ValueError, KeyError, TypeError, OSError, RuntimeError) as error:
         def failed(current):
-            require(current["request"] == expected["request"]
-                    and current["generation"] == expected["generation"],
-                    "Cancelled or replaced finalization")
+            require(current["request"] == state["request"] and current["generation"] == state["generation"],
+                    "Cancelled or replaced verification")
             if current["stage"] == "verify_pending":
-                current.update(stage="failed", reason="finalization_failed",
-                               error=type(error).__name__ + ": " + str(error)[:1000],
-                               finalizer_run=os.environ.get("GITHUB_RUN_ID"),
-                               finalizer_attempt=os.environ.get("GITHUB_RUN_ATTEMPT"))
+                current.update(stage="failed", reason="artifact_verification_failed",
+                               report=report, error=report["error"])
             return current
         summary(store.update(name, failed))
         raise
-
-
-def _finalize(api, store, args):
-    name, state = get_state(store, int(args.pr), args.request_id, args.repo)
-    require(state["stage"] == "verify_pending" and state["generation"] == int(args.generation),
-            "Cancelled or stale finalization")
-    path = Path("verification-report.json")
-    if not path.exists():
-        def failed(current):
-            require(current == state, "Checkpoint changed during failure finalization")
-            current.update(stage="failed", reason="verifier_job_failed_no_report")
-            return current
-        state = store.update(name, failed)
-    else:
-        require(path.stat().st_size <= 1024 * 1024 and not path.is_symlink(), "Unsafe verifier report")
-        report = parse_json(path.read_bytes())
-        require(report["schema"] == 2 and report["request_id"] == args.request_id
-                and report["generation"] == state["generation"]
-                and report["run_id"] == state["run"]["id"]
-                and report["run_attempt"] == state["run"]["attempt"]
-                and report["request_digest"] == digest(state["request"]),
-                "Verifier report does not match checkpoint")
-        if report["verification"] != "verified":
-            def failed(current):
-                require(current == state, "Checkpoint changed during finalization")
-                current.update(stage="failed", reason="artifact_verification_failed",
-                               report=report, artifacts=report["artifacts"])
-                return current
-            state = store.update(name, failed)
-        else:
-            result = report["result"]
-            require(result["request_digest"] == digest(state["request"])
-                    and result["schema"] == 2 and result["verification"] == "verified"
-                    and result["publication_eligible"] is False
-                    and not {"validation", "validation_claim", "objective_validation"} & result.keys(),
-                    "Wrong structural verifier result")
-            if staged_source(state["request"]):
-                require(result["candidate"]["source_bundle_sha256"]
-                        == state["source"]["manifest"]["bundle_sha256"],
-                        "Wrong verified source binding")
-            try:
-                check_target(target_api(api, state["request"]["repo"]), state["request"])
-            except Rejected as error:
-                def stale(current):
-                    require(current == state, "Checkpoint changed during stale-head finalization")
-                    current.update(stage="blocked", reason="stale_target",
-                                   report=report, artifacts=report["artifacts"])
-                    return current
-                summary(store.update(name, stale))
-                raise Rejected("Target changed during finalization; request is blocked") from error
-            central_artifacts = api.pages(
-                f"repos/{CENTRAL}/actions/runs/{os.environ['GITHUB_RUN_ID']}/artifacts", "artifacts")
-            report["artifacts"].extend(
-                {key: item.get(key) for key in
-                 ("id", "name", "size_in_bytes", "expired", "digest")}
-                for item in central_artifacts
-            )
-            if state["request"].get("mode") == "publish":
-                result["verification_run"] = {"id": int(os.environ["GITHUB_RUN_ID"]),
-                                              "attempt": int(os.environ["GITHUB_RUN_ATTEMPT"])}
-                require(result["verification_run"]["attempt"] == 1,
-                        "Publication verification pipeline reruns are forbidden")
-            state = record_result(store, name, state, result, report["artifacts"])
-    summary(state)
-    require(state["stage"] != "failed", "Verification failed; inspect retained report")
-
-
+    finally:
+        Path("verification-report.json").write_bytes(canonical(report))
 def summary(state):
     text = (f"## Review loop checkpoint\n\nStage: `{state['stage']}`\n\n"
             f"Target: `{state['request']['repo']}#{state['request']['pr']}`\n\n"
@@ -438,7 +284,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("operation", choices=["launch", "reconcile-publication", "recover-coordinator",
                                              "cancel", "status", "tick", "prepare",
-                                             "verify", "finalize", "publish", "attach-source",
+                                             "publish", "attach-source",
                                              "select-publisher"])
     parser.add_argument("--target", default="")
     parser.add_argument("--loop-kind", choices=sorted(LOOP_KINDS),
@@ -542,10 +388,6 @@ def main():
                 if args.operation == "cancel" else state)
     elif args.operation == "prepare":
         prepare(api, store, args)
-    elif args.operation == "verify":
-        verify_pending(api, store, args)
-    elif args.operation == "finalize":
-        finalize(api, store, args)
     elif args.operation == "attach-source":
         attach_source(api, store, args)
     elif args.operation == "tick":
@@ -561,12 +403,12 @@ def main():
             if not name.startswith("pr-"):
                 continue
             if due(state, now):
-                supported_checkpoint(state)
                 if (execution_ref(state) != "main"
                         and os.environ["GITHUB_SHA"] != execution_revision(state)):
                     from loop.waiter import wake
                     wake(api, state)
                     continue
+                supported_checkpoint(state)
                 if coordinator_busy(api, state):
                     continue
                 if state["stage"] in LIVE_STAGES:
@@ -582,9 +424,7 @@ def main():
                 elif state["stage"] != "verify_pending":
                     reconcile(store, name, api, now)
     if args.operation in {"launch", "reconcile-publication", "recover-coordinator", "tick"}:
-        verification = choose_verification(store, api=api, only=selection)
-        if verification is None:
-            choose_live(store, now, api, only=selection)
+        choose_live(store, now, api, only=selection)
 
 
 if __name__ == "__main__":

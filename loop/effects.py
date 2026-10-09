@@ -5,7 +5,6 @@ import hashlib
 import time
 import uuid
 
-from loop.candidates import tradeoffs
 from loop.api import APIError
 from loop.freeze import threads
 from loop.policy import bot, digest, loop_kind, require
@@ -56,7 +55,7 @@ def reply_body(state, effect):
     mapping = state["report"]["candidate"]["finding_commits"]
     lead = ("Addressed in " + mapping[effect["key"]] + "."
             if decision["disposition"] == "fixed" else "No code change.")
-    return (lead + "\n\n" + tradeoffs(decision) +
+    return (lead + "\n\n" + decision["analysis"] +
             f"\n\n<!-- copilot-loop:{digest(state['request'])}:{effect['root']}:"
             f"{effect['reply']['claim']} -->")
 

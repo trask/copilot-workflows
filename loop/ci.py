@@ -11,9 +11,7 @@ from loop.reviews import check_decision, ci_items
 def latest_workflows(repo, sha, runs):
     latest = {}
     for run in runs:
-        if (run["head_sha"] != sha or run["repository"]["full_name"] != repo
-                or re.fullmatch(r"\.github/workflows/[^/\\@?#]+\.ya?ml",
-                                run["path"].split("@")[0]) is None):
+        if run["head_sha"] != sha or run["repository"]["full_name"] != repo:
             continue
         require(type(run["workflow_id"]) is int and run["workflow_id"] > 0
                 and type(run["run_number"]) is int and run["run_number"] > 0
@@ -49,8 +47,6 @@ def collect(api, request, required, *, log_dir=None):
                 require(run["id"] == run_id and run["head_sha"] == sha
                         and run["repository"]["full_name"] == repo
                         and type(run["workflow_id"]) is int and run["workflow_id"] > 0
-                        and re.fullmatch(r"\.github/workflows/[^/\\@?#]+\.ya?ml",
-                                         run["path"].split("@")[0]) is not None
                         and type(run["run_attempt"]) is int and 1 <= run["run_attempt"] <= 100,
                         "CI run identity or attempt differs")
                 jobs = api.pages(f"repos/{repo}/actions/runs/{run_id}/attempts/{run['run_attempt']}/jobs", "jobs")

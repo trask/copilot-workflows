@@ -1,3 +1,4 @@
+from tests.support import verify
 from tests.support import launch, reconstruct
 import copy
 import hashlib
@@ -17,7 +18,7 @@ from loop.policy import (AUTHOR_ID, CENTRAL, Rejected, candidate_outcome,
 from loop.publication import PublisherAPI, acceptance, evidence
 from loop.source import bind_manifest, import_source, package_source, public_fetch
 from loop.state import State
-from loop.verify import git, verify
+from loop.verify import git
 from loop.waiter import poll
 from loop.revisions import revision_ref
 from tests import test_live as live_fixtures
@@ -538,7 +539,7 @@ class ReviewSourceTests(unittest.TestCase):
             req, manifest, source = self.package(root)
             def fetch(directory):
                 import_source(directory, source / "source.bundle", manifest, req)
-            for outcome, patch_data in (("fixes", GOOD_PATCH), ("clean", b"")):
+            for outcome, patch_data in (("fixes", GOOD_PATCH), ("clean", b""), ("blocked", b"")):
                 payload = zipped({"result.json": json.dumps(semantic(req, outcome)),
                                   "candidate.patch": patch_data,
                                   "diagnostics.txt": "Reviewed complete PR"})
@@ -590,54 +591,37 @@ class ReviewSourceTests(unittest.TestCase):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as root:
                 req, source_manifest, source = self.package(root, publish_mode=True)
                 root = Path(root)
-                package = root / "candidate-package"
                 restored = root / "restored"
                 restored.mkdir()
-                payload = zipped({"result.json": canonical(semantic(req, "fixes" if changed else "clean")),
-                                  "candidate.patch": GOOD_PATCH if changed else b"",
-                                  "diagnostics.txt": b"Reviewed"})
+                from tests.support import native_files
+                def fetch(directory):
+                    import_source(directory, source / "source.bundle", source_manifest, req)
+                payload = zipped(native_files({
+                    "result.json": canonical(semantic(req, "fixes" if changed else "clean")),
+                    "candidate.patch": GOOD_PATCH if changed else b"", "diagnostics.txt": b"Reviewed"},
+                    req, fetch))
                 worker = run()
                 worker_artifact = {"id": 33, "name": "candidate-24-1", "size_in_bytes": len(payload),
                                    "digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
                                    "expired": False, "workflow_run": {"id": 24, "head_sha": REVISION}}
-                def fetch(directory):
-                    import_source(directory, source / "source.bundle", source_manifest, req)
-                result = verify(payload, req, worker, worker_artifact, fetch, package)
+                result = verify(payload, req, worker, worker_artifact, fetch)
                 candidate = result["candidate"]
                 candidate["source_bundle_sha256"] = source_manifest["bundle_sha256"]
-                manifest = json.loads((package / "manifest.json").read_bytes())
-                manifest["source_bundle_sha256"] = source_manifest["bundle_sha256"]
                 state = live_fixtures.live_state(req)
                 state["source"] = {"manifest": source_manifest}
                 state["report"] = copy.deepcopy(result)
                 state["report"]["verification_run"] = state["verification_run"]
-                report = {"schema": 2, "request_id": req["request_id"],
-                          "request_digest": digest(req), "generation": 6, "verification": "verified",
-                          "run_id": 24, "run_attempt": 1, "result": result, "request": req,
-                          "source": state["source"]}
-                verification = zipped({"verification-report.json": canonical(report),
-                                       "candidate-package/manifest.json": canonical(manifest),
-                                       "candidate-package/source.bundle": (source / "source.bundle").read_bytes(),
-                                       "candidate-package/candidate.bundle": (package / "candidate.bundle").read_bytes()})
-                artifacts = [{
-                    "id": identity, "name": name, "size_in_bytes": len(data), "expired": False,
-                    "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
-                    "workflow_run": {"id": 99, "head_sha": REVISION},
-                    "created_at": iso(100), "expires_at": iso(100 + 14 * 86400),
-                } for identity, name, data in [(34, "verification-99-1", verification)]]
-                state["artifacts"] = artifacts
-                pipeline = dict(worker, id=99, path=".github/workflows/coordinator.yml", created_at=iso(90))
+                state["artifacts"] = [worker_artifact]
                 class Artifacts:
                     def call(self, path):
-                        return pipeline if path.endswith("/99") else worker
+                        return worker
                     def pages(self, path, key):
                         if key == "jobs":
-                            names = ("verify", "finalize") if "/99/" in path else ("agent",)
-                            return [{"name": name, "conclusion": "success"} for name in names]
-                        return artifacts if "/99/" in path else [worker_artifact]
+                            return [{"name": "agent", "conclusion": "success"}]
+                        return [worker_artifact]
                     def artifact_zip(self, identity, _limit):
-                        return {33: payload, 34: verification}[identity]
-                with patch("loop.publication.time.time", return_value=100):
+                        return payload
+                with patch("loop.source.download_source", return_value=source):
                     accepted, derived = evidence(Artifacts(), state, restored)
                 self.assertEqual(candidate, derived)
                 self.assertEqual(digest(req), accepted["request_digest"])

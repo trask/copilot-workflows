@@ -26,7 +26,7 @@ def quiescent(api, state, read=None):
             and "reviewable_retry" not in state["request"].get("publication", {})
             and not state["request"].get("publication", {}).get("reply_bot_threads"),
             "Retired publication capability evidence requires manual inspection")
-    if state["request"].get("protocol") == "reviewable-v1":
+    if state["request"].get("protocol") == "git-candidate-v1":
         pipeline_budget(state)
     require(state["stage"] in TERMINAL, "An active phase cannot be restarted")
     require(state["reason"] not in {"source_acquisition_uncertain_no_retry",
@@ -38,7 +38,9 @@ def quiescent(api, state, read=None):
                 "Uncertain effects require reconciliation, not a new phase")
     from loop.effects import pending
     require(not pending(state), "Uncertain thread effects require reconciliation, not a new phase")
-    require(not state.get("effects") or state["request"].get("protocol") == "reviewable-v1",
+    require(not state.get("effects") or state["request"].get("protocol") == "git-candidate-v1"
+            or state["request"].get("protocol") == "reviewable-v1"
+            and workflow_ref(state["request"]) != "main",
             "Retired effect-bearing checkpoints require manual inspection")
     executions_quiescent(api, state)
     confirmation = None
@@ -99,7 +101,9 @@ def executions_quiescent(api, state):
 
 def due(state, now):
     return (state.get("schema") == 2 and state["request"].get("schema") == 2
-            and state["request"].get("protocol") == "reviewable-v1"
+            and (state["request"].get("protocol") == "git-candidate-v1"
+                 or state["request"].get("protocol") == "reviewable-v1"
+                 and "workflow_ref" in state["request"])
             and state["stage"] not in TERMINAL
             and state["next_check_at"] <= now)
 
@@ -250,7 +254,7 @@ def reconcile(store, name, api, now):
             # Actions listing can be delayed, unavailable, or incomplete. Absence is not proof
             # a dispatch never happened; an operator must inspect before creating a new request.
             current.update(stage="blocked", reason="dispatch_uncertain_no_blind_retry")
-        current["next_check_at"] = now + 300
+        current["next_check_at"] = now if current["stage"] == "verify_pending" else now + 300
         return current
 
     return store.update(name, operation)
@@ -262,7 +266,9 @@ def cancel(store, name, previous_id, previous_generation, now=None):
     def operation(state):
         require(state is not None, "Unknown checkpoint")
         require(state["schema"] == 2, "Legacy checkpoints are read-only")
-        supported_checkpoint(state)
+        if not (state["request"].get("protocol") == "reviewable-v1"
+                and workflow_ref(state["request"]) != "main"):
+            supported_checkpoint(state)
         require(REQUEST.fullmatch(previous_id or "") and type(previous_generation) is int
                 and previous_generation > 0
                 and state["request"]["request_id"] == previous_id

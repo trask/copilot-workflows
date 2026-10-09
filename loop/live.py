@@ -2,7 +2,9 @@
 
 import copy
 import os
+import subprocess
 import tempfile
+from contextlib import ExitStack, nullcontext
 import time
 import uuid
 from pathlib import Path
@@ -24,7 +26,7 @@ from loop.state import State
 from loop.verify import artifact_metadata, git
 from loop.revisions import execution_revision, inherit_pin, pin_revision, workflow_ref
 
-STAGES = {"publish_pending", "publication_intent", "published", "review_request_intent",
+STAGES = {"verify_pending", "publish_pending", "publication_intent", "published", "review_request_intent",
           "waiting_review", "waiting_ci", "thread_effects", "threads_settled", "task_effect_intent"}
 PUSH_PROPAGATION_SECONDS = 900
 
@@ -246,7 +248,6 @@ def authorize_publication_reconciliation(store, central, read, previous_id, gene
                 and prior["report"]["run_attempt"] == prior["run"]["attempt"] == 1
                 and prior["report"]["verification_run"] == prior["verification_run"],
             "Saved structural acceptance differs")
-    verification_run = prior["verification_run"]
     run_id = int(intent["owner"]["run_id"])
     run = central.call(f"repos/{CENTRAL}/actions/runs/{run_id}")
     require(run["id"] == run_id and intent["owner"]["attempt"] == "1"
@@ -259,21 +260,6 @@ def authorize_publication_reconciliation(store, central, read, previous_id, gene
     selected = [job for job in jobs if job["name"] == "personal_live"]
     require(len(selected) == 1 and selected[0]["conclusion"] == "success",
             "Original publication job is not successfully completed")
-    pipeline = central.call(f"repos/{CENTRAL}/actions/runs/{verification_run['id']}")
-    require(pipeline["id"] == verification_run["id"]
-            and pipeline["head_sha"] == request["workflow_revision"]
-            and pipeline["run_attempt"] == verification_run["attempt"] == 1
-            and pipeline["repository"]["full_name"] == pipeline["head_repository"]["full_name"] == CENTRAL
-            and pipeline["path"].split("@")[0] == ".github/workflows/coordinator.yml"
-            and pipeline["status"] == "completed" and pipeline["conclusion"] == "success"
-            and prior["report"]["request_digest"] == digest(request),
-            "Original accepted verification pipeline provenance differs")
-    artifacts = central.pages(f"repos/{CENTRAL}/actions/runs/{pipeline['id']}/artifacts", "artifacts")
-    for recorded in intent["acceptance"]["artifacts"]:
-        matched = [artifact for artifact in artifacts if artifact["id"] == recorded["id"]]
-        require(len(matched) == 1 and not matched[0]["expired"]
-                and matched[0]["name"] == recorded["name"] and matched[0]["digest"] == recorded["digest"],
-                "Original accepted artifact identity is missing, expired or changed")
     worker = central.call(f"repos/{CENTRAL}/actions/runs/{prior['run']['id']}")
     artifact, _ = artifact_metadata(central, worker, request)
     require(worker["id"] == prior["run"]["id"] and worker["run_attempt"] == prior["run"]["attempt"] == 1
@@ -388,17 +374,18 @@ def guard_review_request(store, name, state, read):
             "Copilot became pending before mutation; request not issued")
 
 
-def publish(store, name, state, central, read, publisher, now):
+def publish(store, name, state, central, read, publisher, now, verified=None):
     pipeline_budget(state)
     require(state["iteration"] > 0, "Publication requires a consumed model pipeline")
     request = state["request"]
     if loop_kind(request) in {"pr_description", "pr_review"} or (
             loop_kind(request) == "ci_fix" and state["report"]["dispositions"]["outcome"] == "rerun"):
         from loop.task_effects import publish_task
-        return publish_task(store, name, state, central, read, publisher, now)
+        return publish_task(store, name, state, central, read, publisher, now, verified)
     publisher.identity(request)
-    with tempfile.TemporaryDirectory(prefix="trusted-publisher-") as directory:
-        accepted, candidate = evidence(central, state, directory)
+    with (tempfile.TemporaryDirectory(prefix="trusted-publisher-")
+          if verified is None else nullcontext(verified[2])) as directory:
+        accepted, candidate = evidence(central, state, directory) if verified is None else verified[:2]
         if loop_kind(request) == "ci_fix":
             from loop.ci import same_attempts
             same_attempts(read, request)
@@ -632,7 +619,7 @@ def watch_ci_fix(store, name, state, read, now):
     return store.update(name, next_pass)
 
 
-def advance(store, name, state, central, read, publisher, now):
+def advance(store, name, state, central, read, publisher, now, verified=None):
     personal(state["request"])
     pipeline_budget(state)
     require(state["stage"] in STAGES, "No live transition for this checkpoint")
@@ -642,7 +629,7 @@ def advance(store, name, state, central, read, publisher, now):
         guard(store, name, state, read, now)
     stage = state["stage"]
     if stage == "publish_pending":
-        return publish(store, name, state, central, read, publisher, now)
+        return publish(store, name, state, central, read, publisher, now, verified)
     if stage == "publication_intent":
         return confirm_push(store, name, state, read, now)
     if stage == "task_effect_intent":
@@ -678,6 +665,31 @@ def advance(store, name, state, central, read, publisher, now):
     raise Rejected("No live transition for this checkpoint")
 
 
+def publisher_for(request, outcome):
+    secret = publisher_secret(effect_repository(request, outcome))
+    require(secret, "human_gate_publisher_secret_for_head_owner")
+    primary_name = os.environ.get("PUBLISHER_SECRET_NAME")
+    target_name = os.environ.get("TARGET_PUBLISHER_SECRET_NAME")
+    require(primary_name in {publisher_secret(effect_repository(request)), secret},
+            "Publisher secret selection differs from the frozen head owner")
+    token = (os.environ.get("PUBLISHER_TOKEN", "") if primary_name == secret
+             else os.environ.get("TARGET_PUBLISHER_TOKEN", "") if target_name == secret else "")
+    require(token, "human_gate_" + secret)
+    target_secret = publisher_secret(request["repo"])
+    require(target_secret, "human_gate_publisher_secret_for_target_owner")
+    target_credentials = {}
+    if target_secret != secret:
+        require(target_name == target_secret,
+                "Upstream publisher secret selection differs from the frozen target owner")
+        target_token = os.environ.get("TARGET_PUBLISHER_TOKEN", "")
+        require(target_token, "human_gate_" + target_secret)
+        target_credentials["target_token"] = target_token
+    return PublisherAPI(token, request, request["publication"]["auth_mode"],
+                        source_write=not (loop_kind(request) == "ci_fix"
+                                          and outcome in {None, "rerun"}),
+                        **target_credentials)
+
+
 def main():
     started = time.monotonic()
     central = API()
@@ -695,29 +707,27 @@ def main():
     supported_checkpoint(state)
     from loop.control import owned
     owned(state)
+    stack = ExitStack()
     try:
         outcome = (state.get("report") or {}).get("dispositions", {}).get("outcome")
-        secret = publisher_secret(effect_repository(state["request"], outcome))
-        require(secret, "human_gate_publisher_secret_for_head_owner")
-        require(os.environ.get("PUBLISHER_SECRET_NAME") == secret,
-                "Publisher secret selection differs from the frozen head owner")
-        token = os.environ.get("PUBLISHER_TOKEN", "")
-        require(token, "human_gate_" + secret)
-        target_secret = publisher_secret(state["request"]["repo"])
-        require(target_secret, "human_gate_publisher_secret_for_target_owner")
-        target_credentials = {}
-        if target_secret != secret:
-            require(os.environ.get("TARGET_PUBLISHER_SECRET_NAME") == target_secret,
-                    "Upstream publisher secret selection differs from the frozen target owner")
-            target_token = os.environ.get("TARGET_PUBLISHER_TOKEN", "")
-            require(target_token, "human_gate_" + target_secret)
-            target_credentials["target_token"] = target_token
-        publisher = PublisherAPI(token, state["request"],
-                                 state["request"]["publication"]["auth_mode"],
-                                 source_write=not (loop_kind(state["request"]) == "ci_fix"
-                                                   and outcome == "rerun"),
-                                 **target_credentials)
+        publisher = publisher_for(state["request"], outcome)
         read = publisher
+        verified = None
+        if state["stage"] == "verify_pending":
+            from argparse import Namespace
+            from loop.cli import verify_pending
+            directory = stack.enter_context(tempfile.TemporaryDirectory(prefix="trusted-candidate-"))
+            state = verify_pending(central, store, Namespace(
+                pr=state["request"]["pr"], request_id=state["request"]["request_id"],
+                repo=state["request"]["repo"], generation=state["generation"]), directory, read)
+            if state["stage"] in TERMINAL:
+                from loop.cli import summary
+                summary(state)
+                return
+            from loop.publication import acceptance
+            verified = (acceptance(state), state["report"]["candidate"], directory)
+            publisher = publisher_for(state["request"], state["report"]["dispositions"]["outcome"])
+            read = publisher
         if state["stage"] == "publication_intent":
             live = read.call(f"repos/{state['request']['repo']}/pulls/{state['request']['pr']}")
             allowed = {state["request"]["frozen_sha"],
@@ -730,12 +740,13 @@ def main():
         # Each mutation still has its own durable intent. This is not a side-effect retry loop.
         for _ in range(310):
             before = state
-            state = advance(store, name, state, central, read, publisher, int(time.time()))
+            state = advance(store, name, state, central, read, publisher, int(time.time()), verified)
+            verified = None
             if (state["stage"] not in {"published", "thread_effects", "threads_settled"}
                     or state["next_check_at"] > int(time.time()) or state == before
                     or time.monotonic() - started >= 300):
                 break
-    except (Rejected, ValueError, KeyError, TypeError, OSError, RuntimeError) as error:
+    except (Rejected, ValueError, KeyError, TypeError, OSError, RuntimeError, subprocess.SubprocessError) as error:
         latest = current(store, name)
         if (latest["request"]["request_id"] == state["request"]["request_id"]
                 and latest["generation"] == state["generation"]
@@ -755,6 +766,8 @@ def main():
                 error=type(error).__name__ + ": " + str(error)[:1000],
                 next_check_at=int(time.time()) + 300)
         raise
+    finally:
+        stack.close()
     from loop.cli import summary
     summary(state)
 

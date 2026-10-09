@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from loop.api import API, APIError, DeadlineReached, MAX_RESPONSE
-from loop.cli import choose_verification, finalize, main as cli_main, verify_pending
+from loop.cli import choose_live, main as cli_main, verify_pending
 from loop.control import busy, claim, owned
 from loop.policy import CENTRAL, Rejected, canonical, checkpoint_name, iso
 from loop.state import Conflict, State
@@ -351,11 +351,11 @@ class ControlTests(unittest.TestCase):
             with patch.dict(os.environ, execution, clear=True), \
                     patch("loop.cli.target_api", return_value=Reads(reads)), \
                     patch("loop.cli.output") as output:
-                self.assertEqual(name, choose_verification(store, 400, api, only=name))
-            output.assert_any_call("pr", state["request"]["pr"])
+                self.assertEqual(name, choose_live(store, 400, api, only=name))
+            output.assert_any_call("live_pr", state["request"]["pr"])
         self.assertEqual(10, len({state["coordinator_run"]["id"] for state in store.entries.values()}))
         with patch.dict(os.environ, ENV, clear=True), patch("loop.cli.output") as output:
-            self.assertIsNone(choose_verification(store, 400, api))
+            self.assertIsNone(choose_live(store, 400, api))
         output.assert_not_called()
 
     def test_completed_claim_can_be_reconciled_but_unbound_run_cannot_be_inherited(self):
@@ -384,7 +384,7 @@ class ControlTests(unittest.TestCase):
         before = copy.deepcopy(state)
         args = SimpleNamespace(pr="1", repo=FIXTURE, request_id=state["request"]["request_id"],
                                generation="6")
-        for operation in (verify_pending, finalize):
+        for operation in (verify_pending,):
             with self.subTest(operation=operation.__name__), patch.dict(os.environ, ENV, clear=True), \
                     self.assertRaisesRegex(Rejected, "another coordinator"):
                 operation(Mock(), store, args)
@@ -400,25 +400,21 @@ class ControlTests(unittest.TestCase):
             with self.subTest(generation=generation), patch("sys.argv", argv), \
                     patch.dict(os.environ, ENV, clear=True), patch("loop.cli.API", return_value=Controls()), \
                     patch("loop.cli.State", return_value=store), patch("loop.cli.time.time", return_value=400), \
-                    patch("loop.cli.choose_verification", return_value=None) as verify, \
                     patch("loop.cli.choose_live") as live:
                 if generation == "5":
                     with self.assertRaisesRegex(Rejected, "generation"):
                         cli_main()
-                    verify.assert_not_called()
                     live.assert_not_called()
                 else:
                     cli_main()
-                    self.assertEqual(second, verify.call_args.kwargs["only"])
                     self.assertEqual(second, live.call_args.kwargs["only"])
 
     def test_one_coordinator_run_does_not_mix_another_pr_live_work_with_verification(self):
         with patch("sys.argv", ["loop.cli", "tick"]), patch("loop.cli.API"), \
                 patch("loop.cli.State", return_value=MemoryState()), \
-                patch("loop.cli.choose_verification", return_value="pr-v2-1-1.json"), \
-                patch("loop.cli.choose_live") as live:
+                patch("loop.cli.choose_live", return_value="pr-v2-1-1.json") as live:
             cli_main()
-        live.assert_not_called()
+        live.assert_called_once()
 
 
 class StateCacheTests(unittest.TestCase):

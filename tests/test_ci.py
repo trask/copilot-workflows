@@ -11,6 +11,15 @@ from tests.test_loop import SHA
 
 
 class IndependentWorkflowCITests(unittest.TestCase):
+    def test_dynamic_workflows_keep_exact_run_job_and_attempt_binding(self):
+        read, executions, _ = self.context()
+        executions[201].update(path="dynamic/agents/copilot-pull-request-reviewer", event="dynamic")
+        result = exact_ci(read, FIXTURE, SHA, [CI_CHECK])
+        self.assertEqual("passed", result["decision"])
+        self.assertEqual([333, 334], result["checks"][0]["ids"])
+        read.checks[1]["conclusion"] = "failure"
+        self.assertEqual("failed", exact_ci(read, FIXTURE, SHA, [CI_CHECK])["decision"])
+
     def context(self):
         read = Read()
         checks, executions, jobs = [], {}, {}
@@ -141,7 +150,7 @@ class IndependentWorkflowCITests(unittest.TestCase):
         for mutation in [
             "same_workflow", "same_path", "duplicate_check", "foreign_link", "foreign_app",
             "unknown_app", "wrong_check_head", "wrong_run_head", "wrong_repository",
-            "wrong_run_id", "rerun", "wrong_suite", "missing_suite", "dynamic_path",
+            "wrong_run_id", "rerun", "wrong_suite", "missing_suite",
             "missing_job", "duplicate_job", "wrong_job_id", "wrong_job_run", "job_rerun",
             "wrong_job_name", "wrong_check_link", "mixed_status",
         ]:
@@ -173,8 +182,6 @@ class IndependentWorkflowCITests(unittest.TestCase):
             elif mutation == "missing_suite":
                 executions[201].pop("check_suite_id")
                 read.checks[1].pop("check_suite")
-            elif mutation == "dynamic_path":
-                executions[201]["path"] = "dynamic/other/workflow"
             elif mutation == "missing_job":
                 jobs[201] = []
             elif mutation == "duplicate_job":

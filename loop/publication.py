@@ -2,23 +2,17 @@
 
 import base64
 import hashlib
-import io
 import os
-import re
-import stat
 import subprocess
-import time
-import zipfile
 from pathlib import Path
 from loop.policy import direct_inputs
 
 from loop.api import API
 from loop.policy import (BOT_IDENTITY_PATH, CENTRAL, PROFILE, SHA, digest,
                          candidate_outcome, check_target, commit_author, loop_kind, pipeline_limit, require, source_effect, staged_source,
-                         timestamp, unchanged)
-from loop.verify import (artifact_metadata, git as object_git, parse_json, safe_path, verify)
+                         unchanged)
+from loop.verify import (artifact_metadata, git as object_git, safe_path, verify)
 from loop.candidates import current_request
-from loop.revisions import verification_revision
 
 SECRET = "TRASK_PUBLISH_TOKEN"
 
@@ -168,57 +162,18 @@ def personal(request):
     commit_author(request)
 
 
-def read_package(payload, names):
-    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        entries = archive.infolist()
-        require(len(entries) == len(names) and {e.filename for e in entries} == set(names),
-                "Wrong artifact members")
-        result = {}
-        for entry in entries:
-            mode = entry.external_attr >> 16
-            require(not entry.is_dir() and stat.S_IFMT(mode) in {0, stat.S_IFREG}
-                    and not entry.flag_bits & 1,
-                    "Unsafe artifact member")
-            result[entry.filename] = archive.read(entry)
-        return result
-
-
-def bound_artifact(api, run, name, names, recorded):
-    artifacts = api.pages(f"repos/{CENTRAL}/actions/runs/{run['id']}/artifacts", "artifacts")
-    selected = [a for a in artifacts if a["name"] == name]
-    require(len(selected) == 1, "Missing/duplicate trusted pipeline artifact")
-    artifact = selected[0]
-    require(not artifact["expired"] and artifact["size_in_bytes"] > 0
-            and artifact["workflow_run"]["id"] == run["id"]
-            and artifact["workflow_run"]["head_sha"] == run["head_sha"]
-            and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"])
-            and any(a["id"] == artifact["id"] and a["digest"] == artifact["digest"]
-                    and a["name"] == name for a in recorded),
-            "Artifact server provenance/retention differs from durable checkpoint")
-    require(timestamp(artifact["created_at"]) >= timestamp(run["created_at"])
-            and timestamp(artifact["expires_at"]) > int(time.time())
-            and 0 < timestamp(artifact["expires_at"]) - timestamp(artifact["created_at"])
-            <= 15 * 86400, "Artifact creation/retention is stale or outside the pinned policy")
-    payload = api.artifact_zip(artifact["id"], artifact["size_in_bytes"])
-    require("sha256:" + hashlib.sha256(payload).hexdigest() == artifact["digest"],
-            "Artifact download hash differs")
-    return read_package(payload, names), {key: artifact[key] for key in ("id", "name", "digest")}
-
-
-def acceptance(state, manifest):
+def acceptance(state, manifest=None):
     request, result = state["request"], state["report"]
     personal(request)
     candidate = result["candidate"]
     chain(candidate, request)
     candidate_outcome(result["dispositions"], request, candidate)
-    batches = result["dispositions"]["batches"]
-    merge = loop_kind(request) == "pr_conflict_resolver"
-    require(merge or len(candidate["commits"]) == len(batches)
-            and all(entry["patch_sha256"] == batch["sha256"]
-                    for entry, batch in zip(candidate["commits"], batches)),
-            "Batch-chain semantic mapping differs")
-    expected_mapping = {key: entry["commit"] for entry, batch in zip(candidate["commits"], batches)
-                        for key in batch.get("findings", [])}
+    findings = result["dispositions"].get("findings", [])
+    require(all(item["commit"] <= len(candidate["commits"])
+                for item in findings if item["disposition"] == "fixed"),
+            "Finding selects a missing candidate commit")
+    expected_mapping = {item["key"]: candidate["commits"][item["commit"] - 1]["commit"]
+                        for item in findings if item["disposition"] == "fixed"}
     require(candidate["finding_commits"] == expected_mapping, "Finding-to-commit mapping differs")
     require(result["request_digest"] == digest(request)
             and result["schema"] == 2
@@ -239,11 +194,11 @@ def acceptance(state, manifest):
             and all(SHA.fullmatch(candidate[k]) for k in ("commit", "parent"))
             and (candidate["tree"] is None if loop_kind(request) == "pr_description"
                  else SHA.fullmatch(candidate["tree"]))
-            and manifest == dict(candidate, schema=2, request_digest=digest(request),
+            and (manifest is None or manifest == dict(candidate, schema=2, request_digest=digest(request),
                                  prerequisite=request["frozen_sha"], repo=request["repo"],
                                  repo_id=request["head_repo_id"], head_repo=request["head_repo"],
-                                 source_private=request["source_private"]),
-            "Candidate manifest differs from independently reconstructed identity")
+                                 source_private=request["source_private"])),
+            "Candidate differs from verified Git identity")
     if staged_source(request):
         require(candidate["source_bundle_sha256"] == state["source"]["manifest"]["bundle_sha256"],
                 "Candidate differs from verified source bundle")
@@ -251,42 +206,12 @@ def acceptance(state, manifest):
             "candidate_commit": candidate["commit"], "verification_sha256": digest(result)}
 
 
-def evidence(api, state, destination):
+def worker_evidence(api, state, destination, read=None):
     request = state["request"]
     personal(request)
-    pipeline = api.call(f"repos/{CENTRAL}/actions/runs/{state['verification_run']['id']}")
-    require(pipeline["repository"]["full_name"] == CENTRAL
-            and pipeline["head_repository"]["full_name"] == CENTRAL
-            and pipeline["path"].split("@")[0] == ".github/workflows/coordinator.yml"
-            and pipeline["head_sha"] == verification_revision(state)
-            and pipeline["id"] == state["verification_run"]["id"]
-            and pipeline["event"] in {"workflow_dispatch", "workflow_run", "schedule"}
-            and pipeline["run_attempt"] == state["verification_run"]["attempt"] == 1
-            and pipeline["status"] == "completed" and pipeline["conclusion"] == "success",
-            "Wrong/incomplete trusted verification pipeline")
-    jobs = api.pages(f"repos/{CENTRAL}/actions/runs/{pipeline['id']}/attempts/1/jobs", "jobs")
-    for name in ("verify", "finalize"):
-        selected = [j for j in jobs if j["name"] == name]
-        require(len(selected) == 1 and selected[0]["conclusion"] == "success",
-                "Trusted verification/finalization job did not pass")
-    package_names = {"verification-report.json", "candidate-package/manifest.json",
-                     "candidate-package/candidate.bundle"}
-    if staged_source(request):
-        package_names.add("candidate-package/source.bundle")
-    package, package_id = bound_artifact(
-        api, pipeline, f"verification-{pipeline['id']}-1",
-        package_names, state["artifacts"])
-    report = parse_json(package["verification-report.json"])
-    require(type(report["schema"]) is int and report["schema"] == 2
-            and report["request_id"] == request["request_id"]
-            and report["request_digest"] == digest(request)
-            and report["generation"] == state["generation"]
-            and report["verification"] == "verified"
-            and report["run_id"] == state["run"]["id"] and report["run_attempt"] == 1,
-            "Verification artifact request/generation differs")
     run = api.call(f"repos/{CENTRAL}/actions/runs/{state['run']['id']}")
     require(run["id"] == state["run"]["id"], "Wrong worker run identity")
-    artifact, _ = artifact_metadata(api, run, request)
+    artifact, artifacts = artifact_metadata(api, run, request)
     payload = api.artifact_zip(artifact["id"], artifact["size_in_bytes"])
     require("sha256:" + hashlib.sha256(payload).hexdigest() == artifact["digest"],
             "Worker artifact server hash differs")
@@ -295,39 +220,27 @@ def evidence(api, state, destination):
             from loop.source import acquire_source
             acquire_source(directory, request)
         elif staged_source(request):
-            from loop.source import import_source
-            source_bundle = Path(destination) / "source.bundle"
-            source_bundle.write_bytes(package["candidate-package/source.bundle"])
-            import_source(directory, source_bundle, state["source"]["manifest"], request)
+            from loop.source import download_source, import_source
+            source = download_source(api, state, Path(destination, "frozen-source"))
+            import_source(directory, source / "source.bundle", state["source"]["manifest"], request)
         else:
             git(["fetch", "--quiet", "--no-auto-maintenance", "--depth=1", "--no-tags",
                  "https://github.com/" + request["head_repo"] + ".git", request["frozen_sha"]], directory)
     from loop.inputs import acquire
     from loop.source import target_api
-    acquired = acquire(target_api(api, request["repo"], request["head_repo"]), request, destination)
-    reconstructed = verify(payload, acquired, run, artifact, fetch_source)
-    require(all(reconstructed[key] == state["report"][key]
-                for key in reconstructed if key != "candidate"),
-            "Fresh worker bindings/dispositions differ from accepted checkpoint")
-    candidate = state["report"]["candidate"]
-    for key in reconstructed["candidate"]:
-        require(candidate[key] == reconstructed["candidate"][key],
-                "Candidate differs from fresh credential-free reconstruction")
-    require(all(report["result"][key] == state["report"][key]
-                for key in report["result"]),
-            "Trusted result differs from checkpoint")
-    manifest = parse_json(package["candidate-package/manifest.json"])
-    accepted = acceptance(state, manifest)
-    bundle = package["candidate-package/candidate.bundle"]
-    require(hashlib.sha256(bundle).hexdigest() == candidate["bundle_sha256"],
-            "Candidate bundle hash mismatch")
-    bundle_path = Path(destination) / "candidate.bundle"
-    bundle_path.write_bytes(bundle)
-    if loop_kind(request) == "pr_description":
-        require(bundle == b"", "Description task contains a source bundle")
-    else:
-        import_candidate(destination, bundle_path, request, candidate, fetch_source)
-    return dict(accepted, artifacts=[package_id]), candidate
+    acquired = acquire(read or target_api(api, request["repo"], request["head_repo"]), request, destination)
+    result = verify(payload, acquired, run, artifact, fetch_source, repository_dir=destination)
+    if staged_source(request):
+        result["candidate"]["source_bundle_sha256"] = state["source"]["manifest"]["bundle_sha256"]
+    return result, [{key: item.get(key) for key in
+                    ("id", "name", "size_in_bytes", "expired", "digest")} for item in artifacts]
+
+
+def evidence(api, state, destination):
+    result, _ = worker_evidence(api, state, destination)
+    require(all(state["report"][key] == value for key, value in result.items()),
+            "Fresh worker evidence differs from accepted checkpoint")
+    return acceptance(state), result["candidate"]
 
 
 def import_candidate(directory, bundle, request, candidate, fetch_source=None):
@@ -352,41 +265,26 @@ def import_candidate(directory, bundle, request, candidate, fetch_source=None):
         git(["update-ref", "refs/heads/candidate", candidate["commit"]], directory)
         git(["fsck", "--strict", "--no-reflogs"], directory)
         return
-    if loop_kind(request) == "pr_conflict_resolver":
-        heads = git(["bundle", "list-heads", str(Path(bundle).resolve())], directory).decode().splitlines()
-        require(heads == [candidate["commit"] + " refs/heads/candidate"], "Unexpected merge bundle refs")
-        git(["bundle", "verify", str(Path(bundle).resolve())], directory)
-        git(["-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-auto-maintenance",
-             str(Path(bundle).resolve()),
-             "refs/heads/candidate:refs/heads/candidate"], directory)
-        require(git(["rev-list", "--parents", "-1", candidate["commit"]], directory).decode().strip()
-                == candidate["commit"] + " " + request["frozen_sha"] + " " + request["base_sha"]
-                and git(["rev-parse", candidate["commit"] + "^{tree}"], directory).decode().strip()
-                == candidate["tree"], "Merge parents or tree differ")
-        from loop.conflicts import resolved_tree
-        require(resolved_tree(directory, request, candidate["tree"]) == candidate["changed_paths"],
-                "Merge incoming changes or resolutions differ")
-        git(["fsck", "--strict", "--no-reflogs"], directory)
-        return
-    header = Path(bundle).read_bytes().split(b"\n\n", 1)[0].decode("utf-8")
-    require(header.split("\n") == [
-        "# v2 git bundle", "-" + request["frozen_sha"] + " " +
-        git(["show", "-s", "--format=%s", request["frozen_sha"]], directory).decode().strip(),
-        candidate["commit"] + " refs/heads/candidate"], "Unexpected bundle refs/prerequisites")
+    require(hashlib.sha256(Path(bundle).read_bytes()).hexdigest() == candidate["bundle_sha256"],
+            "Candidate bundle digest differs")
+    heads = git(["bundle", "list-heads", str(Path(bundle).resolve())], directory).decode().splitlines()
+    require(heads == [candidate["commit"] + " refs/heads/candidate"], "Unexpected candidate bundle refs")
     git(["bundle", "verify", str(Path(bundle).resolve())], directory)
     git(["-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-auto-maintenance",
          str(Path(bundle).resolve()),
          "refs/heads/candidate:refs/heads/candidate"], directory)
-    require(git(["rev-list", "--reverse", candidate["commit"], "^" + request["frozen_sha"]],
+    merge = loop_kind(request) == "pr_conflict_resolver"
+    exclusions = ["^" + request["frozen_sha"], *(["^" + request["base_sha"]] if merge else [])]
+    require(git(["rev-list", "--reverse", candidate["commit"], *exclusions],
                 directory).decode().splitlines() == [entry["commit"] for entry in candidate["commits"]],
             "Candidate contains unaccounted history")
     for entry in candidate["commits"]:
         require(git(["rev-list", "--parents", "-1", entry["commit"]], directory).decode().strip()
-                == entry["commit"] + " " + entry["parent"]
+                == entry["commit"] + " " + " ".join(entry.get("parents", [entry["parent"]]))
                 and git(["rev-parse", entry["commit"] + "^{tree}"], directory).decode().strip()
                 == entry["tree"]
                 and git(["show", "-s", "--format=%s", entry["commit"]], directory).decode().strip()
-                == entry["subject"], "Candidate has wrong batch parent/tree/subject")
+                == entry["subject"], "Candidate has wrong parent/tree/subject")
         changed = git(["diff", "--name-only", "--no-renames", "-z", entry["parent"], entry["commit"]],
                       directory).decode("utf-8").split("\0")[:-1]
         require(changed == entry["changed_paths"], "Intermediate candidate paths differ")
@@ -398,6 +296,9 @@ def import_candidate(directory, bundle, request, candidate, fetch_source=None):
     require(paths == candidate["changed_paths"], "Candidate paths differ")
     for path in paths:
         safe_path(path, request)
+    if merge:
+        from loop.conflicts import resolved_tree
+        resolved_tree(directory, request, candidate["tree"])
 
 
 def authenticated_push(directory, request, commit, token):
@@ -429,7 +330,7 @@ def plan(request, live, candidate, authorization, mode):
     unchanged(request, live)
     chain(candidate, request)
     require(candidate["parent"] == request["frozen_sha"] and SHA.fullmatch(candidate["commit"])
-            and SHA.fullmatch(candidate["tree"]), "Candidate is not a one-parent descendant")
+            and SHA.fullmatch(candidate["tree"]), "Candidate differs from frozen Git identity")
     require(authorization == {"request_id": request["request_id"],
                               "expected_sha": request["frozen_sha"],
                               "candidate_commit": candidate["commit"],
@@ -442,7 +343,7 @@ def chain(candidate, request):
     mapping = candidate.get("finding_commits")
     require(isinstance(commits, list) and len(commits) <= 100 and isinstance(mapping, dict)
             and type(candidate["changed"]) is bool and candidate["changed"] == bool(commits),
-            "Malformed batch-chain evidence")
+            "Malformed candidate-chain evidence")
     parent = request["frozen_sha"]
     if loop_kind(request) == "pr_conflict_resolver":
         require(len(commits) <= 1 and not mapping, "Invalid merge commit count or mapping")
@@ -451,7 +352,7 @@ def chain(candidate, request):
                     "Frozen head must be first parent and base second")
     for entry in commits:
         require(entry["parent"] == parent and all(SHA.fullmatch(entry[key])
-                for key in ("commit", "tree", "parent")), "Invalid linear batch chain")
+                for key in ("commit", "tree", "parent")), "Invalid candidate chain")
         parent = entry["commit"]
     require(candidate["commit"] == parent and candidate["parent"] == request["frozen_sha"]
             and (not commits or candidate["tree"] == commits[-1]["tree"])

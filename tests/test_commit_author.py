@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 from loop.freeze import freeze
 from loop.policy import AUTHOR_ID, Rejected, commit_author, digest
 from loop.publication import PublisherAPI
-from loop.verify import (git)
+from loop.verify import git
 from tests.test_live import FIXTURE, TEST_TOKEN, Read, personal_request
 from tests.test_loop import GOOD_PATCH, REVISION, baseline, request
 from tests.test_self_review import SelfRead

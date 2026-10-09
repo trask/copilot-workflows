@@ -1,3 +1,4 @@
+from tests.support import reconstruct, verify
 import copy
 import hashlib
 import io
@@ -25,10 +26,10 @@ from loop.recommendations import collect_diff, comments, description_diff, diff_
 from loop.source import SourceAPI, acquire_source, import_source, package_source
 from loop.task_effects import confirm_task, publish_task
 from loop.revisions import revision_ref
-from loop.verify import git, reconstruct, verify
+from loop.verify import git
 from loop.worker_output import check_output
 from tests.fixtures import CI_CHECK, FIXTURE
-from tests.support import REASONING, batch
+from tests.support import REASONING, batch, native_files
 from tests.test_live import personal_pr, personal_request, stored, zipped, TEST_TOKEN
 from tests.test_loop import FakeAPI, MemoryState, REVISION, SHA, GOOD_PATCH, run
 from tests.test_self_review import BASE, MERGE_BASE, SelfRead, self_request
@@ -55,8 +56,7 @@ def task_request(kind):
 
 
 def result(req, outcome="no_change", patch_bytes=b""):
-    value = {"schema": 2, "request_digest": digest(req), "outcome": outcome,
-             "batches": [batch(patch_bytes)] if patch_bytes else []}
+    value = {"schema": 2, "request_digest": digest(req), "outcome": outcome}
     if req.get("input_mode") == "direct":
         value["input_identity"] = req["inputs"]["identity"]
     kind = req["loop_kind"]
@@ -68,8 +68,6 @@ def result(req, outcome="no_change", patch_bytes=b""):
         value["consistency"] = [{"path": "Foo.java", "classification": "avoidable",
                                  "explanation": "Use the compliant nearby check",
                                  "citations": ["Foo.java:1"]}]
-    elif kind == "pr_conflict_resolver":
-        value["merge"] = dict(REASONING, summary="Merge current base")
     elif kind == "ci_fix":
         value.update(rerun_run=None, diagnoses=[{"key": "check:333", "decision": "unrelated",
                                                "analysis": "Failure predates the changed code",
@@ -168,6 +166,20 @@ def task_state(req, value):
 
 
 class TaskContractsTests(unittest.TestCase):
+    def test_ci_diagnosis_accepts_dynamic_runs_with_exact_job_binding(self):
+        req = task_request("ci_fix")
+        read = TaskRead(req)
+        read.runs[0].update(path="dynamic/agents/copilot-pull-request-reviewer",
+                            event="dynamic", conclusion="failure")
+        read.checks[0]["conclusion"] = "failure"
+        value = collect(read, req, [CI_CHECK])
+        self.assertEqual("failed", value["decision"])
+        self.assertEqual("dynamic/agents/copilot-pull-request-reviewer",
+                         value["failures"][0]["actions"]["path"])
+        read.jobs[0]["run_id"] = 201
+        with self.assertRaisesRegex(Rejected, "binding"):
+            collect(read, req, [CI_CHECK])
+
     def test_direct_inputs_bind_the_downloaded_diff_without_changing_task_identity(self):
         req = task_request("pr_description")
         read = TaskRead(req)
@@ -415,8 +427,8 @@ class TaskContractsTests(unittest.TestCase):
                 self.assertEqual(b"", Path(package, "candidate.bundle").read_bytes())
                 self.assertIn("metadata", report["scope"])
                 fetch.assert_not_called()
-                with self.assertRaisesRegex(Rejected, "source patch"):
-                    reconstruct({**files, "candidate.patch": GOOD_PATCH}, req)
+                with self.assertRaisesRegex(Rejected, "source bundle"):
+                    reconstruct({"result.json": canonical(value), "candidate.bundle": b"code"}, req)
                 with self.assertRaisesRegex(Rejected, "source candidate"):
                     candidate_outcome(value, req, {**candidate, "tree": SHA})
 
@@ -595,48 +607,32 @@ class NonCodeEffectsTests(unittest.TestCase):
                 continue
             value = result(req, "proposal")
             value["proposal"] = {"title": "New title", "body": "New body"}
-            payload = zipped({"result.json": canonical(value), "candidate.patch": b"",
+            payload = zipped({"result.json": canonical(value), "candidate.bundle": b"",
                               "diagnostics.txt": b"Compared metadata and diff"})
             worker = run()
             worker_artifact = {"id": 33, "name": "candidate-24-1", "size_in_bytes": len(payload),
                                "digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
                                "expired": False, "workflow_run": {"id": 24, "head_sha": REVISION}}
-            with self.subTest(private=private), tempfile.TemporaryDirectory() as package, \
-                    tempfile.TemporaryDirectory() as restored, \
+            with self.subTest(private=private), tempfile.TemporaryDirectory() as restored, \
                     patch("loop.verify.git", side_effect=AssertionError("No description Git verification")), \
                     patch("loop.publication.git", side_effect=AssertionError("No description source import")):
-                report = verify(payload, req, worker, worker_artifact, package_dir=package)
+                report = verify(payload, req, worker, worker_artifact)
                 state = task_state(req, value)
                 state["run"] = {"id": 24, "attempt": 1}
                 state["verification_run"] = {"id": 99, "attempt": 1}
                 state["report"] = copy.deepcopy(report)
                 state["report"]["verification_run"] = state["verification_run"]
-                verification = zipped({
-                    "verification-report.json": canonical({
-                        "schema": 2, "request_id": req["request_id"], "request_digest": digest(req),
-                        "generation": state["generation"], "verification": "verified",
-                        "run_id": 24, "run_attempt": 1, "result": report}),
-                    "candidate-package/manifest.json": Path(package, "manifest.json").read_bytes(),
-                    "candidate-package/candidate.bundle": Path(package, "candidate.bundle").read_bytes(),
-                })
-                artifact = {"id": 34, "name": "verification-99-1", "size_in_bytes": len(verification),
-                            "digest": "sha256:" + hashlib.sha256(verification).hexdigest(), "expired": False,
-                            "workflow_run": {"id": 99, "head_sha": REVISION},
-                            "created_at": iso(100), "expires_at": iso(100 + 14 * 86400)}
-                state["artifacts"] = [artifact]
-                pipeline = dict(worker, id=99, path=".github/workflows/coordinator.yml", created_at=iso(90))
+                state["artifacts"] = [worker_artifact]
                 api = Mock()
-                api.call.side_effect = lambda path: pipeline if path.endswith("/99") else worker
+                api.call.return_value = worker
                 api.pages.side_effect = lambda path, key: (
-                    [{"name": name, "conclusion": "success"} for name in
-                     (("verify", "finalize") if "/99/" in path else ("agent",))]
-                    if key == "jobs" else [artifact] if "/99/" in path else [worker_artifact])
-                api.artifact_zip.side_effect = lambda identity, limit: {33: payload, 34: verification}[identity]
-                with patch("loop.publication.time.time", return_value=100):
-                    accepted, candidate = evidence(api, state, restored)
+                    [{"name": "agent", "conclusion": "success"}]
+                    if key == "jobs" else [worker_artifact])
+                api.artifact_zip.return_value = payload
+                accepted, candidate = evidence(api, state, restored)
                 self.assertEqual(report["candidate"], candidate)
                 self.assertEqual(digest(state["report"]), accepted["verification_sha256"])
-                pipeline["head_sha"] = SHA
+                worker["head_sha"] = SHA
                 with self.assertRaises(Rejected):
                     evidence(api, state, restored)
 
@@ -829,8 +825,8 @@ class MergeGitTests(unittest.TestCase):
                 self.assertEqual(candidate["commit"] + " " + req["frozen_sha"] + " " + req["base_sha"],
                                  git(["rev-list", "--parents", "-1", candidate["commit"]], imported).decode().strip())
 
-    def test_missing_clean_incoming_change_and_unresolved_conflicts_reject(self):
-        for conflicting in (False, True):
+    def test_unresolved_conflicts_reject(self):
+        for conflicting in (True,):
             with self.subTest(conflicting=conflicting), tempfile.TemporaryDirectory() as directory:
                 req = self.context(directory, conflicting=conflicting)
                 patch_bytes = b"" if not conflicting else b"""diff --git a/Foo.java b/Foo.java
@@ -885,35 +881,31 @@ class MergeGitTests(unittest.TestCase):
                                ("Fragment.txt", b"base\n")):
                 self.assertEqual(text, git(["show", candidate["commit"] + ":" + path], imported))
 
-    def test_companion_files_do_not_allow_changes_to_clean_paths_or_conflict_free_merges(self):
-        for mutation in ("alter", "omit", "restore_deleted", "conflict_free"):
-            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
-                req = self.context(directory, conflicting=mutation != "conflict_free")
-                ancestor = objects(directory, {"Foo.java": "old\n", "Deleted.txt": "deleted\n"})
-                head = objects(directory, {"Foo.java": "head\n", "Deleted.txt": "deleted\n"},
-                               [ancestor])
-                incoming = objects(directory, {"Foo.java": "old\n" if mutation == "conflict_free"
-                                              else "base\n", "Incoming.txt": "incoming\n"}, [ancestor])
-                req.update(frozen_sha=head, base_sha=incoming, merge_base_sha=ancestor)
-                pr_diff = git(["diff", ancestor, head], directory).decode()
-                req["pr_diff"] = {"text": pr_diff,
-                                  "sha256": hashlib.sha256(pr_diff.encode()).hexdigest(),
-                                  "anchors": diff_anchors(pr_diff)[0]}
-                for name, sha in (("snapshot", head), ("incoming", incoming), ("review-base", ancestor)):
-                    git(["update-ref", "refs/heads/" + name, sha], directory)
-                proposed = {"Foo.java": "head\n", "Incoming.txt": "incoming\n",
-                            "Fragment.txt": "base\n"}
-                if mutation == "alter":
-                    proposed["Incoming.txt"] = "altered\n"
-                elif mutation == "omit":
-                    del proposed["Incoming.txt"]
-                elif mutation == "restore_deleted":
-                    proposed["Deleted.txt"] = "deleted\n"
-                git(["read-tree", objects(directory, proposed)], directory)
-                patch_bytes = git(["diff", "--cached", head], directory)
-                with self.assertRaisesRegex(Rejected, "cleanly merged|Conflict-free merge"):
-                    reconstruct({"result.json": canonical(result(req, "merge")),
-                                 "candidate.patch": patch_bytes}, req, self.copy_source(directory))
+    def test_merge_repairs_semantic_incompatibility_in_a_cleanly_merged_file(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as package, \
+                tempfile.TemporaryDirectory() as imported:
+            req = self.context(directory, conflicting=True)
+            ancestor = objects(directory, {"Foo.java": "old\n", "Api.java": "oldApi\n"})
+            head = objects(directory, {"Foo.java": "head\n", "Api.java": "oldApi\n",
+                                       "Caller.java": "oldApi()\n"}, [ancestor])
+            incoming = objects(directory, {"Foo.java": "base\n", "Api.java": "newApi\n"}, [ancestor])
+            req.update(frozen_sha=head, base_sha=incoming, merge_base_sha=ancestor)
+            text = git(["diff", ancestor, head], directory).decode()
+            req["pr_diff"] = {"text": text, "sha256": hashlib.sha256(text.encode()).hexdigest(),
+                              "anchors": diff_anchors(text)[0]}
+            for name, sha in (("snapshot", head), ("incoming", incoming), ("review-base", ancestor)):
+                git(["update-ref", "refs/heads/" + name, sha], directory)
+            proposed = objects(directory, {"Foo.java": "head\nbase\n", "Api.java": "newApi\n",
+                                           "Caller.java": "newApi()\n"})
+            git(["read-tree", proposed], directory)
+            patch_bytes = git(["diff", "--cached", head], directory)
+            candidate = reconstruct({"result.json": canonical(result(req, "merge")),
+                                     "candidate.patch": patch_bytes}, req, self.copy_source(directory), package)
+            import_candidate(imported, Path(package, "candidate.bundle"), req, candidate,
+                             self.copy_source(directory))
+            self.assertEqual([head, incoming], candidate["commits"][0]["parents"])
+            self.assertEqual(b"newApi()\n", git(["show", "candidate:Caller.java"], imported))
+            self.assertEqual(b"newApi\n", git(["show", "candidate:Api.java"], imported))
 
     def test_large_incoming_merge_survives_worker_staging_verification_and_import(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as root, \
@@ -937,9 +929,12 @@ class MergeGitTests(unittest.TestCase):
             workspace = Path(root, "worker")
             output = workspace / "loop-output"
             output.mkdir(parents=True)
-            (output / "result.json").write_bytes(canonical(result(req, "merge")))
-            (output / "candidate.patch").write_bytes(patch_bytes)
-            (output / "diagnostics.txt").write_bytes(b"Preserved incoming files and both conflict intents.")
+            native = native_files({
+                "result.json": canonical(result(req, "merge")), "candidate.patch": patch_bytes,
+                "diagnostics.txt": b"Preserved incoming files and both conflict intents."},
+                req, self.copy_source(directory))
+            for name, data in native.items():
+                (output / name).write_bytes(data)
             check_output(req, output)
             prompt = (Path(__file__).resolve().parents[1] / ".github" /
                       "workflows" / "copilot-worker.md").read_text(encoding="utf-8")
@@ -948,7 +943,7 @@ class MergeGitTests(unittest.TestCase):
                                         "RUNNER_TEMP": root, "GITHUB_RUN_ID": "24"}):
                 exec(textwrap.dedent(staging), {})
             files = {path.name: path.read_bytes() for path in Path(root, "candidate-staged-24").iterdir()}
-            self.assertEqual(patch_bytes, files["candidate.patch"])
+            self.assertEqual(native["candidate.bundle"], files["candidate.bundle"])
             payload = zipped(files)
             report = verify(payload, req, run(),
                             {"id": 33, "digest": "sha256:" + hashlib.sha256(payload).hexdigest()},

@@ -1,3 +1,4 @@
+from tests.support import verify
 from tests.support import launch, reconstruct
 import copy
 import hashlib
@@ -9,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from loop.api import API, APIError
-from loop.cli import choose_live, finalize, main as cli_main, verify_pending
+from loop.cli import choose_live, main as cli_main, verify_pending
 from loop.coordinator import (cancel, checkpoint, dispatch, due)
 from loop.live import advance, guard, main as live_main, request_review, start
 from loop.policy import Rejected, checkpoint_name, digest, eligible, parse_target, unchanged
@@ -17,7 +18,7 @@ from loop.publication import PublisherAPI, acceptance, authenticated_push
 from loop.reviews import exact_ci, fresh_collection, select_checks
 from loop.source import SourceAPI, import_source, package_source
 from loop.state import State
-from loop.verify import (git, safe_path, verify)
+from loop.verify import git, safe_path
 from tests import test_live as live_fixtures
 from tests import test_loop as loop_fixtures
 from tests.test_live import (CI_CHECK, FIXTURE, Read, Publisher,
@@ -139,7 +140,7 @@ class GenericTests(unittest.TestCase):
         before = copy.deepcopy(state)
         args = SimpleNamespace(pr="1", request_id=state["request"]["request_id"],
                                generation="6", repo=FIXTURE)
-        for operation in (verify_pending, finalize):
+        for operation in (verify_pending,):
             with self.subTest(operation=operation.__name__), \
                     self.assertRaisesRegex(Rejected, "read-only"):
                 operation(Mock(), store, args)

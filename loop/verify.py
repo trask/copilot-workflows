@@ -1,4 +1,4 @@
-"""Parse bounded artifacts and reconstruct candidate Git objects without executing code."""
+"""Verify worker artifacts and native Git history without executing target code."""
 
 import hashlib
 import io
@@ -9,15 +9,16 @@ import stat
 import subprocess
 import tempfile
 import zipfile
+from contextlib import nullcontext
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from loop.coordinator import run_binding
-from loop.candidates import current_request, message, patches
+from loop.candidates import TRAILER, current_request, prose
 from loop.policy import (CENTRAL, REPO, Rejected, candidate_outcome, commit_author, diff_scope, digest, loop_kind,
-                         private_source, require, staged_source, worker_result)
+                         require, staged_source, worker_result)
 from loop.policy import direct_inputs
 
-FILES = {"result.json", "candidate.patch", "diagnostics.txt"}
+FILES = {"result.json", "candidate.bundle", "diagnostics.txt"}
 
 
 def unique_json(pairs):
@@ -44,7 +45,7 @@ def read_zip(payload):
             require(not entry.is_dir() and not stat.S_ISLNK(mode)
                     and (stat.S_IFMT(mode) in {0, stat.S_IFREG})
                     and not (entry.flag_bits & 1), "Non-regular or encrypted artifact entry")
-            if entry.filename != "candidate.patch":
+            if entry.filename != "candidate.bundle":
                 limit = 256000 if entry.filename == "result.json" else 4194304
                 require(entry.file_size <= limit, "Artifact member exceeds limit")
             result[entry.filename] = archive.read(entry)
@@ -154,30 +155,25 @@ def patch_sections(patch, directory=None):
             for section, old, new in zip(sections[1:], reverse, forward)]
 
 
-def reconstruct(files, request, fetch_source=None, package_dir=None):
+def verify_candidate(files, request, fetch_source=None, *, repository_dir=None):
     require(request["schema"] == 2, "Legacy candidates are read-only")
     current_request(request)
     require(not direct_inputs(request) or loop_kind(request) in {"copilot_review", "self_review"}
             or "inputs" in request, "Task inputs must be independently acquired before verification")
     result = parse_json(files["result.json"])
     worker_result(result, request)
+    bundle = files["candidate.bundle"]
     if loop_kind(request) == "pr_description":
-        require(files["candidate.patch"] == b"", "Description task cannot contain a source patch")
+        require(not bundle, "Description task cannot contain a source bundle")
         empty_hash = hashlib.sha256(b"").hexdigest()
         candidate = {"commit": request["frozen_sha"], "tree": None, "parent": request["frozen_sha"],
                      "changed_paths": [], "changed": False, "patch_sha256": empty_hash,
-                     "cumulative_patch_sha256": empty_hash, "commits": [], "finding_commits": {}}
-        return package_candidate(candidate, request, package_dir)
-    if loop_kind(request) == "pr_conflict_resolver":
-        from loop.conflicts import reconstruct_merge
-        return reconstruct_merge(files, request, fetch_source, package_dir)
+                     "cumulative_patch_sha256": empty_hash, "commits": [], "finding_commits": {},
+                     "bundle_sha256": empty_hash}
+        return candidate
     name, email = commit_author(request)
-    require(type(request.get("frozen_at")) is int and request["frozen_at"] >= 0,
-            "Invalid frozen commit timestamp")
-    patch = files["candidate.patch"]
-    parts = patches(result, patch)
-    require(b"\x00" not in patch, "NUL in Git patch")
-    with tempfile.TemporaryDirectory(prefix="review-verify-") as directory:
+    with (tempfile.TemporaryDirectory(prefix="review-verify-")
+          if repository_dir is None else nullcontext(repository_dir)) as directory:
         git(["init", "--bare", "--quiet"], directory)
         if fetch_source is None:
             if direct_inputs(request):
@@ -209,71 +205,88 @@ def reconstruct(files, request, fetch_source=None, package_dir=None):
                     last = int(match[3] or match[2])
                     require(int(match[2]) <= last <= len(text.splitlines()),
                             "Consistency citation is outside the frozen source")
-        git(["read-tree", request["frozen_sha"]], directory)
-        parent = request["frozen_sha"]
+        head = request["frozen_sha"]
+        tip = head
+        if bundle:
+            bundle_path = Path(directory, "worker.bundle")
+            bundle_path.write_bytes(bundle)
+            heads = git(["bundle", "list-heads", str(bundle_path)], directory).decode().splitlines()
+            require(len(heads) == 1 and heads[0].endswith(" refs/heads/candidate"),
+                    "Candidate bundle must export only refs/heads/candidate")
+            tip = heads[0].split(" ", 1)[0]
+            require(re.fullmatch(r"[0-9a-f]{40}", tip) and tip != head,
+                    "Candidate bundle has no new commit")
+            git(["bundle", "verify", str(bundle_path)], directory)
+            git(["-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-auto-maintenance",
+                 "--no-tags", str(bundle_path), "refs/heads/candidate:refs/heads/candidate"], directory)
+            git(["merge-base", "--is-ancestor", head, tip], directory)
+        merge = loop_kind(request) == "pr_conflict_resolver"
+        exclusions = ["^" + head]
+        if merge:
+            from loop.conflicts import history
+            incorporated = history(directory, request)
+            require(result["outcome"] == "blocked" or
+                    (result["outcome"] == "no_change") == incorporated,
+                    "Merge outcome contradicts the frozen graph")
+            exclusions.append("^" + request["base_sha"])
+        history = git(["rev-list", "--reverse", tip, *exclusions], directory).decode().splitlines()
+        require(len(history) <= 100 and (not merge or len(history) <= 1),
+                "Candidate contains unexpected commit history")
+        parent = head
         commits, mapping = [], {}
-        for batch, part in zip(result["batches"], parts):
-            records = patch_stats(part, directory)
-            require(records, "Empty code batch")
-            for _, _, path in records:
+        for commit in history:
+            parents = git(["show", "-s", "--format=%P", commit], directory).decode().strip().split()
+            require(parents == ([head, request["base_sha"]] if merge else [parent]),
+                    "Candidate parents differ from the frozen linear or merge history")
+            author = git(["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", commit],
+                         directory).decode().strip().split("\0")
+            require(author == [name, email, name, email], "Candidate commit author differs from launch owner")
+            body = git(["show", "-s", "--format=%B", commit], directory).decode("utf-8").strip()
+            require(body.endswith(TRAILER), "Candidate commit lacks Copilot co-author trailer")
+            subject = body.splitlines()[0]
+            prose(subject, summary=True)
+            tree = git(["rev-parse", commit + "^{tree}"], directory).decode().strip()
+            tree_entries(directory, tree)
+            paths = git(["diff", "--name-only", "--no-renames", "-z", parent, commit],
+                        directory).decode("utf-8").split("\0")[:-1]
+            for path in paths:
                 safe_path(path, request)
-            git(["apply", "--cached", "--check", "--whitespace=error-all", "-"], directory, part)
-            git(["apply", "--cached", "--whitespace=error-all", "-"], directory, part)
-            paths = changed_paths(directory, parent, request)
-            tree = git(["write-tree"], directory).decode().strip()
-            require(tree != git(["rev-parse", parent + "^{tree}"], directory).decode().strip(),
-                    "Empty code batch")
-            subject, text = message(batch, request)
-            commit_object = (
-                f"tree {tree}\nparent {parent}\n"
-                f"author {name} <{email}> {request['frozen_at']} +0000\n"
-                f"committer {name} <{email}> {request['frozen_at']} +0000\n\n"
-            ).encode() + text
-            commit = git(["hash-object", "-t", "commit", "-w", "--stdin"], directory,
-                         commit_object).decode().strip()
-            commits.append({"commit": commit, "tree": tree, "parent": parent,
-                            "subject": subject, "changed_paths": paths,
-                            "patch_sha256": batch["sha256"]})
-            for key in batch.get("findings", []):
-                mapping[key] = commit
+            require(merge or paths, "Empty candidate commit")
+            diff = git(["--attr-source=" + tree, "diff", "--no-ext-diff", "--no-textconv",
+                        "--no-renames", "--binary", parent, commit], directory)
+            entry = {"commit": commit, "tree": tree, "parent": parent,
+                     "subject": subject, "changed_paths": paths,
+                     "patch_sha256": hashlib.sha256(diff).hexdigest()}
+            if merge:
+                entry["parents"] = parents
+            commits.append(entry)
             parent = commit
-        paths = changed_paths(directory, request["frozen_sha"], request)
-        tree = git(["write-tree"], directory).decode().strip()
-        base_tree = git(["rev-parse", request["frozen_sha"] + "^{tree}"], directory).decode().strip()
-        require(not commits or tree != base_tree, "Batches cancel the entire code change")
-        cumulative = git(["--attr-source=" + tree, "diff", "--cached", "--no-ext-diff",
-                          "--no-textconv", "--no-renames", "--binary",
-                          request["frozen_sha"]], directory)
-        commit = parent
-        git(["update-ref", "refs/heads/candidate", commit], directory)
+        require(parent == tip and (result["outcome"] != "blocked" or not commits),
+                "Blocked or unaccounted candidate history")
+        if loop_kind(request) == "copilot_review":
+            for finding in result["findings"]:
+                if finding["disposition"] == "fixed":
+                    require(finding["commit"] <= len(commits), "Finding selects a missing candidate commit")
+                    mapping[finding["key"]] = commits[finding["commit"] - 1]["commit"]
+        tree = git(["rev-parse", tip + "^{tree}"], directory).decode().strip()
+        base_tree = git(["rev-parse", head + "^{tree}"], directory).decode().strip()
+        require(merge or not commits or tree != base_tree, "Candidate commits cancel the entire code change")
+        if merge and commits:
+            from loop.conflicts import resolved_tree
+            resolved_tree(directory, request, tree)
+        git(["read-tree", tree], directory)
+        paths = changed_paths(directory, head, request)
+        cumulative = git(["--attr-source=" + tree, "diff", "--no-ext-diff",
+                          "--no-textconv", "--no-renames", "--binary", head, tip], directory)
+        git(["update-ref", "refs/heads/candidate", tip], directory)
         git(["fsck", "--strict", "--no-reflogs"], directory)
-        candidate = {"commit": commit, "tree": tree, "parent": request["frozen_sha"],
-                     "changed_paths": paths, "changed": tree != base_tree,
-                     "patch_sha256": hashlib.sha256(patch).hexdigest(),
+        candidate = {"commit": tip, "tree": tree, "parent": head,
+                     "changed_paths": paths, "changed": bool(commits),
+                     "patch_sha256": hashlib.sha256(cumulative).hexdigest(),
                      "cumulative_patch_sha256": hashlib.sha256(cumulative).hexdigest(),
-                     "commits": commits, "finding_commits": mapping}
-        return package_candidate(candidate, request, package_dir, directory)
-
-
-def package_candidate(candidate, request, package_dir, directory=None):
-    if package_dir is not None:
-        destination = Path(package_dir).resolve()
-        destination.mkdir(exist_ok=True)
-        bundle = destination / "candidate.bundle"
-        if candidate["commits"]:
-            require(directory is not None, "Code candidate requires a reconstructed Git repository")
-            git(["bundle", "create", str(bundle), "refs/heads/candidate",
-                 "^" + request["frozen_sha"]], directory)
-        else:
-            bundle.write_bytes(b"")
-        candidate["bundle_sha256"] = hashlib.sha256(bundle.read_bytes()).hexdigest()
-        manifest = dict(candidate, schema=2, request_digest=digest(request),
-                        prerequisite=request["frozen_sha"], repo=request["repo"],
-                        repo_id=request["head_repo_id"], head_repo=request["head_repo"],
-                        source_private=private_source(request))
-        (destination / "manifest.json").write_bytes(
-            json.dumps(manifest, sort_keys=True).encode())
-    return candidate
+                     "commits": commits, "finding_commits": mapping,
+                     "bundle_sha256": hashlib.sha256(bundle).hexdigest()}
+        return candidate
 
 
 def verify_diff_source(directory, request):
@@ -316,14 +329,12 @@ def changed_paths(directory, parent, request):
     return paths
 
 
-def verify(payload, request, run, artifact, fetch_source=None, package_dir=None):
+def verify(payload, request, run, artifact, fetch_source=None, *, repository_dir=None):
     require(request["schema"] == 2, "Legacy reports are read-only")
     files = read_zip(payload)
     result = parse_json(files["result.json"])
     worker_result(result, request)
-    if loop_kind(request) == "self_review":
-        require(result["outcome"] != "blocked", "Self-review is blocked or incomplete")
-    candidate = reconstruct(files, request, fetch_source, package_dir)
+    candidate = verify_candidate(files, request, fetch_source, repository_dir=repository_dir)
     candidate_outcome(result, request, candidate)
     return {
         "schema": 2, "request_id": request["request_id"], "request_digest": digest(request),

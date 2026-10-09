@@ -78,7 +78,7 @@ function file(value) {
 const checkpoint = (changes = {}, request = {}) => ({
     schema: 2, stage: "running", phase: id, generation: 3, iteration: 1, expected_sha: sha,
     request: {
-        schema: 2, protocol: "reviewable-v1", repo, head_repo: repo, pr: 12,
+        schema: 2, protocol: "git-candidate-v1", repo, head_repo: repo, pr: 12,
         request_id: id, frozen_at: 1000, frozen_sha: sha,
         loop_kind: "self_review", authorized_actor_id: LAUNCH_OWNER_ID, launch_run: { id: 10 },
         ...request,

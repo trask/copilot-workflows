@@ -42,7 +42,10 @@ export function phaseKey(state) {
 
 export function historical(state) {
     const request = state.request;
-    return state.schema !== 2 || request.schema !== 2 || request.protocol !== "reviewable-v1" ||
+    const supported = request.protocol === "git-candidate-v1" ||
+        request.protocol === "reviewable-v1" && SHA.test(request.workflow_revision) &&
+        request.workflow_ref === `review-loop-revisions/${request.workflow_revision}`;
+    return state.schema !== 2 || request.schema !== 2 || !supported ||
         OLD_STAGES.has(state.stage) || Boolean(state.capability || state.capability_probe ||
             request.publication?.reply_bot_threads || request.publication?.reviewable_retry ||
             state.report?.objective_validation || state.report?.validation_claim);

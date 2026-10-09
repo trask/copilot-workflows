@@ -215,7 +215,6 @@ def current_actions_checks(api, repo, sha, checks, cache, workflow_runs):
         if (run["id"] != run_id or run["head_sha"] != sha
                 or run["repository"]["full_name"] != repo
                 or type(run.get("workflow_id")) is not int or run["workflow_id"] <= 0
-                or re.fullmatch(r"\.github/workflows/[^/\\@?#]+\.ya?ml", path) is None
                 or run.get("check_suite_id") != check.get("check_suite", {}).get("id")
                 or type(run.get("check_suite_id")) is not int):
             return None

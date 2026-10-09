@@ -57,16 +57,10 @@ def audit():
     controller = Path(".github/workflows/coordinator.yml").read_text()
     assert "\n  validate:" not in controller and "objective-validation" not in controller
     assert not Path("loop/validation.py").exists()
-    for job in ("verify", "finalize"):
-        section = re.split(r"\n  [a-z_]+:", controller.split("\n  " + job + ":", 1)[1])[0]
-        if job != "finalize":
-            assert "SOURCE_READ_TOKEN" not in section
-        assert "REVIEW_LOOP_SOURCE_APP_PRIVATE_KEY" not in section
-        assert "create-github-app-token" not in section
-        assert "PUBLISHER_TOKEN" not in section and "PUBLISH_TOKEN" not in section
-        assert "COPILOT_GITHUB_TOKEN" not in section
+    assert re.findall(r"^  ([a-z_]+):$", controller.split("\njobs:", 1)[1], re.MULTILINE) == [
+        "coordinate", "personal_live",
+    ]
     assert "create-github-app-token" not in controller
-    assert "SOURCE_READ_TOKEN" in controller.split("\n  coordinate:", 1)[1].split("\n  verify:", 1)[0]
     assert "REVIEW_LOOP_SOURCE_APP_PRIVATE_KEY" not in controller
     assert "PUBLISH_TOKEN" not in text
     live = controller.split("\n  personal_live:", 1)[1]
@@ -74,13 +68,15 @@ def audit():
     assert "PUBLISHER_TOKEN: ${{ secrets[needs.coordinate.outputs.live_publisher_secret] }}" in live
     assert "PUBLISHER_SECRET_NAME: ${{ needs.coordinate.outputs.live_publisher_secret }}" in live
     assert "PUBLISHER_SECRET_MAP: ${{ vars.PUBLISHER_SECRETS }}" in live
-    coordinate = controller.split("\n  coordinate:", 1)[1].split("\n  verify:", 1)[0]
+    coordinate = controller.split("\n  coordinate:", 1)[1].split("\n  personal_live:", 1)[0]
+    assert "SOURCE_READ_TOKEN" in coordinate
     assert "PUBLISHER_TOKEN:" not in coordinate and "toJSON(secrets)" not in controller
     assert "secrets[steps.publisher.outputs.publisher_secret] != ''" in coordinate
     assert "python3 -m loop.cli select-publisher" in coordinate
     assert "COPILOT_GITHUB_TOKEN" not in live and "loop.validation" not in live
     assert "actions/download-artifact" not in live and "persist-credentials: false" in live
     assert "ref: ${{ needs.coordinate.outputs.live_revision }}" in live
+    assert "path: verification-report.json" in live
     assert "publish" in controller and "fine_grained_pat" in controller
     fast = Path(".github/workflows/validate.yml").read_text()
     assert "\n  push:" in fast and "\n  pull_request:" in fast

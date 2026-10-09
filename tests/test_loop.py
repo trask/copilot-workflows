@@ -1,3 +1,4 @@
+from tests.support import verify
 from tests.support import launch, reconstruct
 from tests.fixtures import (FIXTURE, REPOSITORIES, TARGET)
 import copy
@@ -15,14 +16,14 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from loop.api import API, APIError
-from loop.cli import choose_verification, finalize
+from loop.cli import choose_live
 from loop.coordinator import (cancel, checkpoint, dispatch, due, reconcile, record_result, run_binding)
 from loop.freeze import select_findings, unresolved_ids
 from loop.policy import (AUTHOR_ID, BOT_ID, BOT_NODE, CENTRAL, DEFAULTS, Rejected, bot, checkpoint_name, digest, dispositions, eligible, parse_target, publication_gate, unchanged)
 from loop.state import Conflict, State
 from loop.publication import plan, reconcile_uncertain_push
 from loop.worker_home import prepare_home
-from loop.verify import (FILES, artifact_metadata, git, parse_json, read_zip, safe_path, verify)
+from loop.verify import FILES, artifact_metadata, git, parse_json, read_zip, safe_path
 from loop.source import (SourceAPI, bind_manifest, download_source, gated_request, import_source,
                          package_source, public_fetch, source_api, source_metadata, target_api)
 
@@ -47,7 +48,7 @@ def review(body="A finding", **kwargs):
 
 
 def request():
-    return dict(eligible(pr()), schema=2, protocol="reviewable-v1", request_id="d" * 32, workflow_revision=REVISION,
+    return dict(eligible(pr()), schema=2, protocol="git-candidate-v1", request_id="d" * 32, workflow_revision=REVISION,
                 commit_author={"id": AUTHOR_ID, "login": "launch-owner"},
                 frozen_at=10, frozen_at_iso="1970-01-01T00:00:10Z",
                 budgets=DEFAULTS.copy(),
@@ -383,35 +384,6 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(Rejected):
             run_binding(dict(run(), head_sha="f" * 40), request())
 
-    def test_stale_head_in_finalize_persists_terminal_block(self):
-        req = request()
-        store = MemoryState()
-        state = checkpoint(req)
-        state.update(stage="verify_pending", run={"id": 24, "attempt": 1})
-        store.entries["pr-v2-210933087-1.json"] = state
-        report = {"schema": 2, "request_id": req["request_id"], "generation": 1,
-                  "run_id": 24, "run_attempt": 1, "request_digest": digest(req), "artifacts": [],
-                  "verification": "verified",
-                  "result": verified_result(req)}
-        class Args:
-            pr = "1"
-            repo = TARGET
-            request_id = req["request_id"]
-            generation = "1"
-        live = pr()
-        live["head"]["sha"] = "f" * 40
-        api = FakeAPI()
-        api.call = lambda *_args: live
-        with patch("loop.cli.time.time", return_value=100), \
-                patch("loop.cli.Path.exists", return_value=True), \
-                patch("loop.cli.Path.is_symlink", return_value=False), \
-                patch("loop.cli.Path.stat") as stats, \
-                patch("loop.cli.Path.read_bytes", return_value=json.dumps(report).encode()):
-            stats.return_value.st_size = 100
-            with self.assertRaises(Rejected):
-                finalize(api, store, Args())
-        self.assertEqual("blocked", store.entries["pr-v2-210933087-1.json"]["stage"])
-        self.assertEqual("stale_target", store.entries["pr-v2-210933087-1.json"]["reason"])
 
     def test_state_nonforce_cas_race_and_retry(self):
         class RaceAPI:
@@ -436,62 +408,7 @@ class ProtocolTests(unittest.TestCase):
         tree = [data for path, _, data in api.calls if path.endswith("/trees")][0]
         self.assertEqual(REVISION, tree["base_tree"])
 
-    def test_legacy_verifier_report_is_terminal_and_retains_finalizer_identity(self):
-        req = request()
-        store = MemoryState()
-        state = checkpoint(req)
-        state.update(stage="verify_pending", run={"id": 24, "attempt": 1})
-        store.entries["pr-v2-210933087-1.json"] = state
-        report = {"schema": 2, "request_id": req["request_id"], "generation": 1,
-                  "run_id": 24, "run_attempt": 1, "request_digest": digest(req), "artifacts": [],
-                  "verification": "verified",
-                  "result": {"request_digest": digest(req), "publication_eligible": False,
-                             "validation": "unattested"}}
-        args = Mock(pr="1", request_id=req["request_id"], generation="1", repo=TARGET)
-        api = FakeAPI()
-        api.call = lambda *_args: pr()
-        with patch("loop.cli.time.time", return_value=100), \
-                patch("loop.cli.Path.exists", return_value=True), \
-                patch("loop.cli.Path.is_symlink", return_value=False), \
-                patch("loop.cli.Path.stat") as stats, \
-                patch("loop.cli.Path.read_bytes", return_value=json.dumps(report).encode()), \
-                patch.dict(os.environ, {"GITHUB_RUN_ID": "99", "GITHUB_RUN_ATTEMPT": "1"}):
-            stats.return_value.st_size = 100
-            with self.assertRaises((KeyError, Rejected)):
-                finalize(api, store, args)
-        self.assertEqual("failed", store.entries["pr-v2-210933087-1.json"]["stage"])
-        self.assertEqual("finalization_failed", store.entries["pr-v2-210933087-1.json"]["reason"])
-        self.assertEqual("99", store.entries["pr-v2-210933087-1.json"]["finalizer_run"])
 
-    def test_structural_finalizer_reads_only_verification_report(self):
-        req = request()
-        store = MemoryState()
-        _, state = launch(store, req, "publish", True)
-        req = state["request"]
-        state.update(stage="verify_pending", iteration=1, run={"id": 24, "attempt": 1})
-        name = "pr-v2-210933087-1.json"
-        store.entries[name] = state
-        report = {"schema": 2, "request_id": req["request_id"], "generation": 1,
-                  "run_id": 24, "run_attempt": 1, "request_digest": digest(req), "artifacts": [],
-                  "verification": "verified", "result": verified_result(req)}
-        args = Mock(pr="1", request_id=req["request_id"], generation="1", repo=TARGET)
-        api = FakeAPI()
-        api.call = lambda *_args: pr()
-        with patch("loop.cli.time.time", return_value=100), \
-                patch("loop.cli.Path.exists", return_value=True), \
-                patch("loop.cli.Path.is_symlink", return_value=False), \
-                patch("loop.cli.Path.stat") as stats, \
-                patch("loop.cli.Path.read_bytes", side_effect=[json.dumps(report).encode()]) as read, \
-                patch.dict(os.environ, {"GITHUB_RUN_ID": "99", "GITHUB_RUN_ATTEMPT": "1"}), \
-                patch("loop.cli.summary"):
-            stats.return_value.st_size = 100
-            finalize(api, store, args)
-        read.assert_called_once()
-        self.assertEqual("publish_pending", store.entries[name]["stage"])
-        self.assertEqual("pending_fresh_trusted_personal_acceptance", store.entries[name]["reason"])
-        self.assertEqual(100, store.entries[name]["next_check_at"])
-        self.assertFalse(due(store.entries[name], 99))
-        self.assertTrue(due(store.entries[name], 100))
 
 class PublisherTests(unittest.TestCase):
     def context(self):
@@ -619,8 +536,6 @@ class ArtifactTests(unittest.TestCase):
             git(["init", "--bare", "--quiet"], restored)
             self.assertEqual(self.req["frozen_sha"], baseline(restored))
             git(["bundle", "verify", str(bundle)], restored)
-            # No untrusted bundle is imported by production code. This roundtrip consumes
-            # a trusted packager-created fixture and verifies the published artifact format.
             git(["-c", "protocol.file.allow=always", "fetch", "--quiet", str(bundle),
                  "refs/heads/candidate:refs/heads/restored"], restored)
             candidate = report["candidate"]

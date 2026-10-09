@@ -59,9 +59,10 @@ def ready(api, state, now):
 
 
 def wake(api, state):
-    supported_checkpoint(state)
     request = state["request"]
     ref = execution_ref(state)
+    if not (request.get("protocol") == "reviewable-v1" and ref != "main"):
+        supported_checkpoint(state)
     if ref != "main":
         check_pin(api, ref, execution_revision(state))
     runs = api.pages(f"repos/{CENTRAL}/actions/workflows/coordinator.yml/runs"
@@ -85,9 +86,12 @@ def poll(api, store, now, revision, checked):
         if (not name.startswith("pr-v2-") or state.get("schema") != 2
                 or state["stage"] in TERMINAL):
             continue
+        historical = False
         try:
-            supported_checkpoint(state)
-            pipeline_budget(state)
+            historical = state["request"].get("protocol") == "reviewable-v1" and execution_ref(state) != "main"
+            if not historical:
+                supported_checkpoint(state)
+                pipeline_budget(state)
         except (Rejected, ValueError, KeyError, TypeError) as error:
             print(f"READ ONLY {name}: {type(error).__name__}: {error}", file=sys.stderr)
             continue
@@ -102,7 +106,7 @@ def poll(api, store, now, revision, checked):
                     or now < state["next_check_at"]):
                 continue
             checked[name] = (copy.deepcopy(state), now + PR_POLL_SECONDS)
-            if not busy(api, state) and ready(api, state, now):
+            if historical or not busy(api, state) and ready(api, state, now):
                 wake(api, state)
         except DeadlineReached:
             raise
@@ -115,7 +119,7 @@ def poll(api, store, now, revision, checked):
                          or isinstance(error, APIError) and (
                              error.status == 429 or error.status >= 500))
             _, _, latest = store.snapshot()
-            if not transient and latest.get(name) == state:
+            if not historical and not transient and latest.get(name) == state:
                 summary(cas(store, name, state, stage="blocked", reason="waiter_operation_rejected",
                             error=type(error).__name__ + ": " + str(error)[:1000]))
     checked_keys = set(checked) - set(entries)

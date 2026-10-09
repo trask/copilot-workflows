@@ -1,3 +1,4 @@
+from tests.support import reconstruct
 import copy
 import hashlib
 import json
@@ -7,13 +8,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from loop.candidates import message, patches, semantic
+from loop.candidates import semantic
 from loop.coordinator import cancel, quiescent
 from loop.effects import pending, reply_body
 from loop.live import advance, start
 from loop.policy import AUTHOR_ID, Rejected, digest
 from loop.publication import acceptance, import_candidate
-from loop.verify import git, reconstruct
+from loop.verify import git
 from tests.support import batch, semantic as result
 from tests import test_live as fixtures
 from tests.test_live import Publisher, Read, personal_request, stored
@@ -28,135 +29,6 @@ SECOND = b"""diff --git a/Foo.java b/Foo.java
 """
 
 
-class BatchTests(unittest.TestCase):
-    def request(self):
-        req = personal_request()
-        with tempfile.TemporaryDirectory() as directory:
-            git(["init", "--bare", "--quiet"], directory)
-            req["frozen_sha"] = baseline(directory)
-        return req
-
-    def files(self, req):
-        value = result(req, "fixes", GOOD_PATCH)
-        keys = [finding["key"] for finding in req["findings"]]
-        value["batches"] = [batch(GOOD_PATCH, [keys[0]]),
-                            batch(SECOND, [keys[1]], len(GOOD_PATCH))]
-        return {"candidate.patch": GOOD_PATCH + SECOND, "result.json": json.dumps(value).encode(),
-                "diagnostics.txt": b"Investigated"}, value
-
-    def test_sequential_same_file_chain_messages_mappings_and_independent_import(self):
-        req = self.request()
-        req["findings"][0]["body"] = "First original\n\nUnicode \u00e9\r\n"
-        files, value = self.files(req)
-        with tempfile.TemporaryDirectory() as package, tempfile.TemporaryDirectory() as restored:
-            candidate = reconstruct(files, req, baseline, package)
-            self.assertEqual(2, len(candidate["commits"]))
-            first, second = candidate["commits"]
-            self.assertEqual(req["frozen_sha"], first["parent"])
-            self.assertEqual(first["commit"], second["parent"])
-            self.assertEqual(second["commit"], candidate["commit"])
-            self.assertEqual({"review:12": first["commit"], "inline:20": second["commit"]},
-                             candidate["finding_commits"])
-            self.assertEqual(["Foo.java"], candidate["changed_paths"])
-            import_candidate(restored, Path(package, "candidate.bundle"), req, candidate, baseline)
-            body = git(["cat-file", "commit", first["commit"]], restored)
-            self.assertIn(req["findings"][0]["body"].encode(), body)
-            self.assertIn(b"Address Copilot review comment: Validate input\n", body)
-            self.assertEqual(b"final\n", git(["show", candidate["commit"] + ":Foo.java"], restored))
-            self.assertEqual(candidate, reconstruct(files, req, baseline, package))
-            forged = copy.deepcopy(candidate)
-            forged["commits"][1]["parent"] = req["frozen_sha"]
-            with self.assertRaises(Rejected):
-                import_candidate(restored, Path(package, "candidate.bundle"), req, forged, baseline)
-
-    def test_plural_template_preserves_every_original_comment_and_trailers(self):
-        req = self.request()
-        req["findings"][0]["body"] = "\u00e9" * 600000
-        fields = batch(GOOD_PATCH, [finding["key"] for finding in req["findings"]])
-        fields.update(summary=("Preserve the complete review evidence " * 4).strip(),
-                      analysis=("The complete original comment belongs in the commit.\n" * 100).strip())
-        value = result(req, "fixes", GOOD_PATCH)
-        value["batches"] = [fields]
-        semantic(value, req)
-        subject, body = message(fields, req)
-        self.assertEqual("Address Copilot review comments: " + fields["summary"], subject)
-        self.assertEqual(2, body.count(b"Copilot comment:"))
-        for finding in req["findings"]:
-            self.assertIn(finding["body"].encode(), body)
-        self.assertIn(fields["analysis"].encode(), body)
-        self.assertIn(b"\nAnalysis: ", body)
-        self.assertIn(b"\nUpsides: ", body)
-        self.assertIn(b"\nDownsides: ", body)
-        self.assertIn(b"Co-authored-by: Copilot App", body)
-
-    def test_span_hash_order_and_complete_finding_accounting(self):
-        req = self.request()
-        files, valid = self.files(req)
-        for change in ("gap", "overlap", "reorder", "hash", "duplicate", "foreign",
-                       "unmapped", "control", "summary"):
-            value = copy.deepcopy(valid)
-            if change in {"gap", "overlap"}:
-                value["batches"][1]["offset"] += 1 if change == "gap" else -1
-            elif change == "reorder":
-                value["batches"].reverse()
-            elif change == "hash":
-                value["batches"][0]["sha256"] = "0" * 64
-            elif change == "duplicate":
-                value["batches"][1]["findings"] = ["review:12"]
-            elif change == "foreign":
-                value["findings"][0]["key"] = "inline:999"
-            elif change == "unmapped":
-                value["batches"].pop()
-            elif change == "control":
-                value["batches"][0]["summary"] = "title\x00evil"
-            else:
-                value["batches"][0]["summary"] = "title\nforged header"
-            with self.subTest(change=change), self.assertRaises(Rejected):
-                semantic(value, req)
-                patches(value, files["candidate.patch"])
-        with self.assertRaises(Rejected):
-            patches(valid, files["candidate.patch"] + b"unaccounted")
-
-    def test_no_change_has_no_commit_and_no_bundle_history(self):
-        req = self.request()
-        files = {"candidate.patch": b"", "result.json": json.dumps(
-            result(req, "no_change", disposition="not_warranted")).encode()}
-        with tempfile.TemporaryDirectory() as package, tempfile.TemporaryDirectory() as restored:
-            candidate = reconstruct(files, req, baseline, package)
-            self.assertEqual(req["frozen_sha"], candidate["commit"])
-            self.assertEqual([], candidate["commits"])
-            self.assertEqual({}, candidate["finding_commits"])
-            self.assertEqual(b"", Path(package, "candidate.bundle").read_bytes())
-            import_candidate(restored, Path(package, "candidate.bundle"), req, candidate, baseline)
-
-    def test_batches_cannot_cancel_all_changes(self):
-        req = self.request()
-        undo = GOOD_PATCH.replace(b"-old\n+new\n", b"-new\n+old\n")
-        files, value = self.files(req)
-        value["batches"][1] = batch(undo, ["inline:20"], len(GOOD_PATCH))
-        files.update({"candidate.patch": GOOD_PATCH + undo, "result.json": json.dumps(value).encode()})
-        with self.assertRaisesRegex(Rejected, "cancel"):
-            reconstruct(files, req, baseline)
-
-    def test_self_review_never_fabricates_comments_or_external_mappings(self):
-        req = self.request()
-        req["loop_kind"] = "self_review"
-        req["findings"] = []
-        fields = batch(GOOD_PATCH)
-        subject, body = message(fields, req)
-        self.assertEqual("Validate input", subject)
-        self.assertNotIn(b"Copilot comment:", body)
-        value = result(req, "fixes", GOOD_PATCH)
-        semantic(value, req)
-        value["findings"] = []
-        with self.assertRaises(Rejected):
-            semantic(value, req)
-
-    def test_publisher_rejects_incomplete_or_foreign_finding_mapping(self):
-        state, manifest = fixtures.AcceptanceTests().context()
-        state["report"]["candidate"]["finding_commits"].pop("inline:20")
-        with self.assertRaisesRegex(Rejected, "mapping"):
-            acceptance(state, manifest)
 
 
 class EffectTests(unittest.TestCase):
@@ -180,9 +52,8 @@ class EffectTests(unittest.TestCase):
                                           patch_sha256=hashlib.sha256(SECOND).hexdigest())
             candidate["commits"].insert(0, first)
             candidate["finding_commits"]["inline:20"] = first["commit"]
-            state["report"]["dispositions"]["batches"] = [
-                batch(GOOD_PATCH, ["inline:20"]),
-                batch(SECOND, ["review:12"], len(GOOD_PATCH))]
+            for item in state["report"]["dispositions"]["findings"]:
+                item["commit"] = 1 if item["key"] == "inline:20" else 2
             manifest.update(candidate)
         accepted = acceptance(state, manifest)
         candidate = state["report"]["candidate"]
@@ -208,7 +79,7 @@ class EffectTests(unittest.TestCase):
         state = self.step(store, name, state, read, publisher)
         self.assertEqual("confirmed", state["effects"][0]["reply"]["status"])
         self.assertFalse(read.resolved)
-        self.assertTrue(publisher.posts[0][2]["body"].startswith("No code change.\n\nAnalysis:"))
+        self.assertTrue(publisher.posts[0][2]["body"].startswith("No code change.\n\nInvestigated"))
         self.assertNotIn("Copilot comment:", publisher.posts[0][2]["body"])
         state = self.step(store, name, state, read, publisher)
         self.assertTrue(read.resolved)

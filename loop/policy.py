@@ -25,7 +25,7 @@ DEFAULTS = {
 MAX_ACTIVATION_DISPATCHES = 2
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 ACCOUNT = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\Z")
-PROFILE = "reviewable-v1"
+PROFILE = "git-candidate-v1"
 LOOP_KINDS = {"copilot_review", "self_review", "pr_conflict_resolver", "ci_fix",
               "pr_description", "pr_simplify", "pr_review", "pr_consistency"}
 REPORT_KINDS = {"pr_description", "pr_review"}
@@ -396,7 +396,6 @@ def candidate_outcome(value, request, candidate):
                     and candidate["commit"] == candidate["parent"] == request["frozen_sha"],
                     "Description task contains a source candidate")
     elif kind == "self_review":
-        require(value["outcome"] != "blocked", "Self-review is blocked or incomplete")
         require((value["outcome"] == "fixes") == candidate["changed"],
                 "Self-review outcome contradicts candidate tree")
         if value["outcome"] == "clean":
@@ -405,11 +404,6 @@ def candidate_outcome(value, request, candidate):
     else:
         require((value["outcome"] == "fixes") == candidate["changed"]
                 or value["outcome"] == "blocked", "Outcome contradicts candidate tree")
-        if kind == "pr_consistency" and value["outcome"] == "fixes":
-            avoidable = {item["path"] for item in value["consistency"]
-                         if item["classification"] == "avoidable"}
-            require(set(candidate["changed_paths"]) <= avoidable,
-                    "Consistency candidate changes a path without an avoidable difference")
 
 
 def publication_gate(*_args, **_kwargs):

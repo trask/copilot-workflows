@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from loop.api import APIError
-from loop.cli import choose_live, choose_verification
+from loop.cli import choose_live
 from loop.coordinator import (checkpoint, dispatch, due, reconcile, record_result)
 from loop.freeze import freeze
 from loop.live import publish, start, watch_review
@@ -163,8 +163,9 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual("verify_pending", complete["stage"])
         self.assertEqual(dispatched["iteration"], complete["iteration"])
         with patch("loop.cli.output") as output:
-            self.assertEqual(name, choose_verification(store, 3 * 86400))
-        self.assertIn(("verify", "true"), [call.args for call in output.call_args_list])
+            self.assertEqual(name, choose_live(store, 3 * 86400))
+        self.assertIn(("live", "true"), [call.args for call in output.call_args_list])
+        self.assertIn(("live_stage", "verify_pending"), [call.args for call in output.call_args_list])
         report = verified_result(complete["request"])
         report["verification_run"] = {"id": 99, "attempt": 1}
         accepted = record_result(store, name, complete, report, [], 3 * 86400)
