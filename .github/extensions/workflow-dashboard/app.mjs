@@ -337,20 +337,21 @@ function prCard(pr) {
     for (const [kind, label] of Object.entries(KIND_LABELS)) {
         if (!pr.mine && kind !== "pr_review") continue;
         const presentation = taskPresentation(pr, kind, state.workflowReady, state.actions);
+        const actionLabel = presentation.actionLabel ?? label;
         const button = element("button", null, "task-button");
         button.type = "button";
         button.disabled = presentation.disabled;
         button.setAttribute("data-tone", presentation.tone);
-        button.setAttribute("aria-label", `${label}: ${presentation.label}`);
+        button.setAttribute("aria-label", `${actionLabel}: ${presentation.label}`);
         button.setAttribute("aria-description", presentation.detail);
         button.setAttribute("aria-busy", String(presentation.busy));
         if (presentation.busy) button.append(taskIcon());
-        button.append(element("span", label, "task-name"));
+        button.append(element("span", actionLabel, "task-name"));
         button.addEventListener("click", () => taskAction(pr, kind));
         const detail = presentation.disabled && !presentation.busy && pr.actionBlock
             ? pr.actionBlock : presentation.detail === TASK_EFFECTS[kind] ? null : presentation.detail;
         tasks.append(taskControl(button, presentation.label === "Run" ? null : presentation.label,
-            detail, presentation.disabled ? null : TASK_EFFECTS[kind]));
+            detail, presentation.disabled || presentation.actionLabel ? null : TASK_EFFECTS[kind]));
     }
     const cancelDispatch = pr.dispatch?.operation === "cancel_dispatch" ||
         pr.dispatch?.operation === "launch" && pr.dispatch.status === "accepted";

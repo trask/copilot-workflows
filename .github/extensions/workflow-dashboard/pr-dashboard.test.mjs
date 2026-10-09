@@ -737,7 +737,10 @@ test("historical review metadata does not trigger a body request or imply curren
     };
     assert.equal(taskPresentation(pr, "copilot_review", true).label, "Copilot review outdated");
     assert.equal(taskPresentation(pr, "copilot_review", true).disabled, false);
-    assert.equal(taskPresentation(pr, "copilot_review", true).tone, "needed");
+    assert.equal(taskPresentation(pr, "copilot_review", true).tone, "idle");
+    assert.equal(taskPresentation(pr, "copilot_review", true).actionLabel, "Refresh Copilot review");
+    pr.phase.sha = sha;
+    assert.equal(taskPresentation(pr, "copilot_review", true).label, "Copilot review outdated");
 });
 
 test("an older clean review allows a fresh Copilot launch until the current head is reviewed", async () => {

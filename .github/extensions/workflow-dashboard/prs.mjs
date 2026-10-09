@@ -241,8 +241,10 @@ export function actionEvidence(pr, kind) {
     }
     if (evidence.copilotBodies) return result("Copilot review-body feedback",
         `${evidence.copilotBodies} Copilot ${evidence.copilotBodies === 1 ? "review" : "reviews"} with feedback on the latest PR commit.`, "needed");
-    if (evidence.copilotReviewOutdated) return result("Copilot review outdated",
-        "The latest PR commit has not been reviewed by Copilot. Request a fresh review and address any new findings.", "needed");
+    if (evidence.copilotReviewOutdated) return {
+        ...result("Copilot review outdated", "Copilot reviewed an older commit. Request a review of the latest commit."),
+        actionLabel: "Refresh Copilot review",
+    };
     return result("No Copilot feedback",
         "No Copilot feedback to address. This does not mean the PR is approved.", "idle", true);
 }
@@ -301,7 +303,8 @@ export function taskPresentation(pr, kind, workflowReady, actions = []) {
     }
     if (!workflowReady) return result("Status unavailable", "unknown");
     const idle = () => evidence ? {
-        ...result(evidence.label, evidence.tone), detail: pr.actionBlock ?? evidence.detail,
+        ...result(evidence.label, evidence.tone), actionLabel: evidence.actionLabel,
+        detail: pr.actionBlock ?? evidence.detail,
     } : result("Run");
     if (!phase) return pr.tasks.includes(kind) ? idle() : result(kind === "pr_review" ? "Unavailable" : "Own PRs only");
     if (phase.historical) return result("Historical", "unknown");
@@ -312,7 +315,7 @@ export function taskPresentation(pr, kind, workflowReady, actions = []) {
     }
     const completion = completionPresentation(phase);
     if (completion) {
-        return evidence && (kind !== "copilot_review" || evidence.tone === "needed" || evidence.tone === "unknown")
+        return evidence && (kind !== "copilot_review" || !evidence.disabled)
             ? idle() : result(completion.label, "complete");
     }
     const terminal = {

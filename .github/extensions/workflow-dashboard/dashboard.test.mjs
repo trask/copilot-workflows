@@ -1729,6 +1729,44 @@ test("live action hints use amber, explain effects and disable tasks without act
     assert.match(css, /data-color-mode="dark"/);
 });
 
+test("stale-only Copilot reviews use a neutral refresh button while feedback stays amber", async () => {
+    const state = rendererState();
+    const pr = state.prs[0];
+    pr.evidence = { sha: pr.sha, copilotThreads: 0, copilotBodies: 0, copilotReviewOutdated: true };
+    pr.phase = { kind: "copilot_review", stage: "clean", sha: pr.sha };
+    const launches = [];
+    const { renderer, nodes } = await rendererFixture(async (path, options) => {
+        if (path === "/api/launch") {
+            launches.push(JSON.parse(options.body));
+            return { ok: true, json: async () => ({ status: "accepted", message: "Dispatch accepted" }) };
+        }
+        return { ok: true, json: async () => state };
+    });
+    const button = () => taskButtons(nodes.get("prs").firstChild)[0];
+    assert.equal(button().firstChild.textContent, "Refresh Copilot review");
+    assert.equal(button()["aria-label"], "Refresh Copilot review: Copilot review outdated");
+    assert.equal(button()["data-tone"], "idle");
+    assert.equal(button().disabled, false);
+    assert.deepEqual(tooltipFor(button()).children.map((node) => node.textContent), [
+        "Copilot review outdated", "Copilot reviewed an older commit. Request a review of the latest commit.",
+    ]);
+    for (const feedback of [{ copilotThreads: 1, copilotBodies: 0 }, { copilotThreads: 0, copilotBodies: 1 }]) {
+        Object.assign(pr.evidence, feedback);
+        renderer.render();
+        assert.equal(button().firstChild.textContent, "Address Copilot feedback");
+        assert.equal(button()["data-tone"], "needed");
+        assert.equal(button().disabled, false);
+    }
+    Object.assign(pr.evidence, { copilotBodies: 0, copilotReviewOutdated: false });
+    renderer.render();
+    assert.equal(button().firstChild.textContent, "Address Copilot feedback");
+    assert.equal(button().disabled, true);
+    pr.evidence.copilotReviewOutdated = true;
+    renderer.render();
+    await button().events.click();
+    assert.deepEqual(launches, [{ target, kind: "copilot_review", confirmed: true }]);
+});
+
 test("PR headings put Draft and Approved after the title and the other author's username last", async () => {
     const state = rendererState();
     const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
