@@ -284,6 +284,34 @@ test("CI check selection uses workflow sequence and preserves distinct workflows
     ] }), sha).ci, "passing");
 });
 
+test("Fix CI shows current evidence instead of a terminal repair outcome without rewriting history", () => {
+    const phase = { kind: "ci_fix", sha, stage: "exhausted", reason: "elapsed_deadline" };
+    const pr = { ...normalizePull(pull(), repo, state(), account), tasks: ["ci_fix"], actionBlock: null, phase };
+    for (const [checks, label, disabled] of [
+        [[check()], "CI passing", true],
+        [[check(null, { status: "IN_PROGRESS" })], "CI pending", true],
+        [[check("FAILURE")], "CI failing", false],
+    ]) {
+        pr.evidence = normalizeEvidence(detail({ checks }), sha);
+        const presentation = taskPresentation(pr, "ci_fix", true);
+        assert.equal(presentation.label, label);
+        assert.equal(presentation.disabled, disabled);
+        assert.doesNotMatch(presentation.detail, /elapsed deadline/);
+    }
+    pr.evidence = { sha, error: "CI read failed." };
+    const unknown = taskPresentation(pr, "ci_fix", true);
+    assert.equal(unknown.label, "Status unknown");
+    assert.match(unknown.detail, /CI read failed/);
+    assert.deepEqual(phase, { kind: "ci_fix", sha, stage: "exhausted", reason: "elapsed_deadline" });
+
+    pr.phase = { ...phase, stage: "waiting_ci" };
+    pr.evidence = normalizeEvidence(detail({ checks: [check()] }), sha);
+    pr.actionBlock = "A task is already active on this PR.";
+    const active = taskPresentation(pr, "ci_fix", true);
+    assert.equal(active.label, "Waiting for CI");
+    assert.equal(active.disabled, true);
+});
+
 test("Copilot hints count all unresolved submitted roots by stable bot identity", () => {
     const human = thread({ comments: { nodes: [{
         author: { login: "reviewer", __typename: "User" }, pullRequestReview: { state: "COMMENTED" },

@@ -1159,6 +1159,38 @@ test("tooltips support hover and keyboard focus, dismissal and refresh without d
         requests.push(path);
         return { ok: true, json: async () => state };
     });
+
+    test("Fix CI keeps its button label and explains current CI rather than an exhausted run in its tooltip", async () => {
+        const state = rendererState();
+        const pr = state.prs[0];
+        pr.evidence = { sha: pr.sha, ci: "passing", failing: 0, pending: 0 };
+        pr.phase = { kind: "ci_fix", sha: pr.sha, stage: "exhausted", reason: "elapsed_deadline" };
+        const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
+        const button = () => taskButtons(nodes.get("prs").firstChild)
+            .find((node) => node["aria-label"].startsWith("Fix CI:"));
+        assert.equal(button().disabled, true);
+        assert.equal(button()["aria-label"], "Fix CI: CI passing");
+        assert.equal(button()["data-tone"], "idle");
+        assert.deepEqual(button().children.map((node) => [node.className, node.textContent]), [
+            ["task-name", "Fix CI"],
+        ]);
+        assert.deepEqual(tooltipFor(button()).children.map((node) => node.textContent), [
+            "CI passing", "CI passed for the latest PR commit. Nothing to fix.",
+        ]);
+
+        Object.assign(pr.evidence, { ci: "failing", failing: 1 });
+        renderer.render();
+        assert.equal(button().disabled, false);
+        assert.equal(button()["aria-label"], "Fix CI: CI failing");
+        assert.equal(button().children.length, 1);
+
+        Object.assign(pr.evidence, { ci: "passing", failing: 0 });
+        pr.actionBlock = "A task is already active on this PR.";
+        renderer.render();
+        assert.equal(button().disabled, true);
+        assert.equal(button().children.length, 1);
+        assert.equal(tooltipFor(button()).children[1].textContent, pr.actionBlock);
+    });
     const controls = nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid").children;
     const first = controls[0];
     const tooltip = first.children[1];

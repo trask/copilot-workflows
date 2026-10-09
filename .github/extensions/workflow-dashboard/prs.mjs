@@ -279,7 +279,7 @@ export function taskPresentation(pr, kind, workflowReady, actions = []) {
     if (!phase) return pr.tasks.includes(kind) ? idle() : result(kind === "pr_review" ? "Unavailable" : "Own PRs only");
     if (phase.historical) return result("Historical", "unknown");
     if (phase.unknownStage) return result("Unknown state", "attention");
-    if (phase.sha && phase.sha !== pr.sha &&
+    if ((kind === "ci_fix" || phase.sha && phase.sha !== pr.sha) &&
         ["clean", "complete", "blocked", "failed", "exhausted", "cancelled"].includes(phase.stage)) {
         return evidence ? idle() : result("Previous head", "unknown");
     }
