@@ -172,16 +172,23 @@ export function normalizeEvidence(detail, sha) {
         throw new Error("Live Copilot review-body status is incomplete.");
     }
     let copilotBodies = 0;
+    let copilotReviewed = false;
+    let copilotCurrentReview = false;
     for (const review of reviews.nodes) {
         if (!review || typeof review.state !== "string") throw new Error("Live review state is incomplete.");
+        if (copilot(review.author) && SUBMITTED_REVIEWS.has(review.state) && review.submittedAt) {
+            copilotReviewed = true;
+        }
         if (!currentCopilotReview(review, sha)) continue;
         if (!review.submittedAt || typeof review.body !== "string") {
             throw new Error("Live Copilot review body is incomplete.");
         }
+        copilotCurrentReview = true;
         if (review.state === "CHANGES_REQUESTED" || hasCopilotBodyFeedback(review.body)) copilotBodies++;
     }
     return {
         sha, conflicts, copilotThreads, copilotBodies, failing, pending,
+        copilotReviewOutdated: copilotReviewed && !copilotCurrentReview,
         ci: failing ? "failing" : pending ? "pending" : !total ? "none" : unknown ? "unknown" : "passing",
     };
 }
@@ -215,6 +222,8 @@ export function actionEvidence(pr, kind) {
     }
     if (evidence.copilotBodies) return result("Copilot review-body feedback",
         `${evidence.copilotBodies} Copilot ${evidence.copilotBodies === 1 ? "review" : "reviews"} with feedback on the latest PR commit.`, "needed");
+    if (evidence.copilotReviewOutdated) return result("Copilot review outdated",
+        "The latest PR commit has not been reviewed by Copilot. Request a fresh review and address any new findings.", "needed");
     return result("No Copilot feedback",
         "No Copilot feedback to address. This does not mean the PR is approved.", "idle", true);
 }

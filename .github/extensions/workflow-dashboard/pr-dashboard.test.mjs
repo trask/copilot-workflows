@@ -650,7 +650,37 @@ test("historical review metadata does not trigger a body request or imply curren
     });
     const result = await github.pullEvidence(repo, [{ number: 12, sha }]);
     assert.equal(calls, 1);
-    assert.equal(normalizeEvidence(result.get(12).detail, sha).copilotBodies, 0);
+    const evidence = normalizeEvidence(result.get(12).detail, sha);
+    assert.equal(evidence.copilotBodies, 0);
+    assert.equal(evidence.copilotReviewOutdated, true);
+    const pr = {
+        ...normalizePull(pull(), repo, state(), account), tasks: ["copilot_review"], evidence,
+        phase: { kind: "copilot_review", stage: "clean", sha: "f".repeat(40) },
+    };
+    assert.equal(taskPresentation(pr, "copilot_review", true).label, "Copilot review outdated");
+    assert.equal(taskPresentation(pr, "copilot_review", true).disabled, false);
+    assert.equal(taskPresentation(pr, "copilot_review", true).tone, "needed");
+});
+
+test("an older clean review allows a fresh Copilot launch until the current head is reviewed", async () => {
+    const c = controller();
+    c.github.pullEvidence = async () => new Map([[12, {
+        detail: detail({ reviews: [review({ commit: { oid: "f".repeat(40) } })] }),
+    }]]);
+    const snapshot = await c.canvas.refresh();
+    assert.equal(taskPresentation(snapshot.prs[0], "copilot_review", true).disabled, false);
+    await c.canvas.launch({ target, kind: "copilot_review", confirmed: true });
+    assert.equal(c.calls.find((call) => typeof call === "object").loop_kind, "copilot_review");
+
+    const refreshed = controller();
+    refreshed.github.pullEvidence = c.github.pullEvidence;
+    await refreshed.canvas.refresh();
+    refreshed.github.pullEvidence = async () => new Map([[12, {
+        detail: detail({ reviews: [review({ commit: { oid: "f".repeat(40) } }), review()] }),
+    }]]);
+    await assert.rejects(refreshed.canvas.launch({ target, kind: "copilot_review", confirmed: true }),
+        /No Copilot feedback to address/);
+    assert.equal(refreshed.calls.filter((call) => typeof call === "object").length, 0);
 });
 
 test("body reads bind each review to its PR and head without failing unrelated PRs", async () => {
