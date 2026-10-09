@@ -23,6 +23,13 @@ function element(tag, text, className) {
     return node;
 }
 
+function taskIcon() {
+    const icon = element("span", null, "task-icon");
+    icon.setAttribute("aria-hidden", "true");
+    icon.append(element("span", null, "spinner"));
+    return icon;
+}
+
 function hideTooltip() {
     if (activeTooltip) activeTooltip.hidden = true;
     activeTooltip = null;
@@ -337,12 +344,7 @@ function prCard(pr) {
         button.setAttribute("aria-label", `${label}: ${presentation.label}`);
         button.setAttribute("aria-description", presentation.detail);
         button.setAttribute("aria-busy", String(presentation.busy));
-        if (presentation.busy) {
-            const icon = element("span", null, "task-icon");
-            icon.setAttribute("aria-hidden", "true");
-            icon.append(element("span", null, "spinner"));
-            button.append(icon);
-        }
+        if (presentation.busy) button.append(taskIcon());
         button.append(element("span", label, "task-name"));
         button.addEventListener("click", () => taskAction(pr, kind));
         const detail = presentation.disabled && !presentation.busy && pr.actionBlock
@@ -352,15 +354,21 @@ function prCard(pr) {
     }
     const cancelDispatch = pr.dispatch?.operation === "cancel_dispatch" ||
         pr.dispatch?.operation === "launch" && pr.dispatch.status === "accepted";
-    const cancel = element("button", cancelDispatch ? "Cancel launch" : "Cancel task");
+    const cancelling = ["cancel", "cancel_dispatch"].includes(pr.dispatch?.operation);
+    const cancellationBusy = cancelling && ["pending", "accepted"].includes(pr.dispatch.status);
+    const cancelLabel = cancelDispatch ? "Cancel launch" : "Cancel task";
+    const cancel = element("button", null, "task-button");
     cancel.type = "button";
-    cancel.className = "task-button";
+    cancel.setAttribute("aria-label", cancellationBusy ? `${cancelLabel}: Cancelling` : cancelLabel);
+    cancel.setAttribute("aria-busy", String(cancellationBusy));
+    cancel.setAttribute("data-tone", cancellationBusy ? "active" : "idle");
+    if (cancellationBusy) cancel.append(taskIcon());
+    cancel.append(element("span", cancelLabel, "task-name"));
     cancel.disabled = cancelDispatch
         ? !pr.canCancelDispatch || pr.dispatch.operation !== "launch" || pr.dispatch.status !== "accepted"
         : !pr.canCancel || Boolean(pr.dispatch);
     cancel.addEventListener("click", () => taskAction(pr, pr.dispatch?.kind ?? pr.phase?.kind, true));
     if (pr.canCancel || cancelDispatch || pr.dispatch?.operation === "cancel") {
-        const cancelling = ["cancel", "cancel_dispatch"].includes(pr.dispatch?.operation);
         const detail = cancel.disabled ? cancelling ? "Cancellation is awaiting confirmation."
             : cancelDispatch && !pr.dispatch.runId ? "Refresh to find this launch before cancelling."
                 : "Cancellation is not available yet. Refresh to check its status." : null;

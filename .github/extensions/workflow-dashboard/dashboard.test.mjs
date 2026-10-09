@@ -1477,7 +1477,8 @@ test("ownership toggle defaults to My PRs and shows only Draft review on other a
     assert.equal(active[0]["aria-label"], "Draft review: Running");
     assert.equal(active[0]["aria-busy"], "true");
     assert.equal(active[0].disabled, true);
-    assert.equal(active[1].textContent, "Cancel task");
+    assert.equal(active[1]["aria-label"], "Cancel task");
+    assert.equal(active[1]["aria-busy"], "false");
     assert.equal(active[1].disabled, false);
     assert.ok(nodes.get("troubleshooting-runs").firstChild.children.some((node) => node.tag === "details"));
     assert.equal(buttons(cards()[1]).length, 1);
@@ -1624,13 +1625,57 @@ test("every task dispatches directly on click and locks duplicate and competing 
         const pending = button.events.click();
         assert.deepEqual(launches, [{ target, kind, confirmed: true }]);
         assert.ok(buttons().every((node) => node.disabled));
+        const dispatching = buttons().filter((node) => node["aria-busy"] === "true");
+        assert.equal(dispatching.length, 1);
+        assert.equal(dispatching[0]["aria-label"], `${label}: Dispatching`);
+        assert.equal(dispatching[0].firstChild.firstChild.className, "spinner");
         for (const stale of original) await stale.events.click();
         assert.equal(launches.length, 1);
         assert.match(nodes.get("error").textContent, /Do not submit again/);
         release();
         await pending;
         assert.ok(buttons().every((node) => node.disabled));
-        assert.ok(buttons().some((node) => node["aria-label"] === `${label}: Starting`));
+        const starting = buttons().filter((node) => node["aria-busy"] === "true");
+        assert.equal(starting.length, 1);
+        assert.equal(starting[0]["aria-label"], `${label}: Starting`);
+        assert.equal(starting[0].firstChild.firstChild.className, "spinner");
+    }
+});
+
+test("each task retains its indicator through active or waiting work and removes it on completion", async () => {
+    const state = rendererState();
+    const pr = state.prs[0];
+    const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
+    for (const [kind, stage, status] of [
+        ["copilot_review", "waiting_review", "Waiting for review"],
+        ["self_review", "verify_pending", "Verifying"],
+        ["pr_conflict_resolver", "publish_pending", "Preparing publication"],
+        ["ci_fix", "waiting_ci", "Waiting for CI"],
+        ["pr_description", "task_effect_intent", "Updating PR"],
+        ["pr_simplify", "source_pending", "Preparing source"],
+        ["pr_review", "task_effect_intent", "Updating PR"],
+        ["pr_consistency", "running", "Running"],
+    ]) {
+        Object.assign(pr, {
+            phase: phaseSummary(record(fixture({ stage }, { loop_kind: kind }))),
+            actionBlock: "A task is already active on this PR.",
+        });
+        renderer.render();
+        const buttons = taskButtons(nodes.get("prs").firstChild);
+        const busy = buttons.filter((button) => button["aria-busy"] === "true");
+        assert.equal(busy.length, 1, kind);
+        assert.equal(busy[0]["aria-label"], `${KIND_LABELS[kind]}: ${status}`);
+        assert.equal(busy[0].disabled, true);
+        assert.equal(busy[0].firstChild.className, "task-icon");
+        assert.equal(busy[0].firstChild["aria-hidden"], "true");
+        assert.equal(busy[0].firstChild.firstChild.className, "spinner");
+        assert.equal(tooltipFor(busy[0]).firstChild.textContent, status);
+        assert.ok(buttons.filter((button) => button !== busy[0]).every((button) =>
+            button["aria-busy"] === "false" && button.children.length === 1));
+        Object.assign(pr, { phase: { ...pr.phase, stage: "complete" }, actionBlock: null });
+        renderer.render();
+        assert.ok(taskButtons(nodes.get("prs").firstChild).every((button) =>
+            button["aria-busy"] === "false" && button.children.length === 1));
     }
 });
 
@@ -1921,18 +1966,22 @@ test("Cancel dispatches the exact displayed identity directly and stays locked p
         }
         return { ok: true, json: async () => state };
     });
-    const cancelButton = () => taskButtons(nodes.get("prs").firstChild).find((node) => node.textContent === "Cancel task");
+    const cancelButton = () => taskButtons(nodes.get("prs").firstChild)
+        .find((node) => node["aria-label"]?.startsWith("Cancel task"));
     const button = cancelButton();
     assert.equal(button.disabled, false);
     assert.match(tooltipFor(button).firstChild.textContent, /Published changes stay/);
     const pending = button.events.click();
     assert.deepEqual(cancellations, [{ target, requestId: phase.requestId, generation: phase.generation, confirmed: true }]);
     assert.equal(cancelButton().disabled, true);
+    assert.equal(cancelButton()["aria-busy"], "true");
+    assert.equal(cancelButton().firstChild.firstChild.className, "spinner");
     await button.events.click();
     assert.equal(cancellations.length, 1);
     release();
     await pending;
     assert.equal(cancelButton().disabled, true);
+    assert.equal(cancelButton()["aria-busy"], "true");
     assert.ok(taskButtons(nodes.get("prs").firstChild)
         .some((node) => node["aria-label"] === "Address Copilot feedback: Cancelling"));
     Object.assign(state.prs[0], { phase: { ...phase, stage: "cancelled" },
@@ -1963,20 +2012,27 @@ test("Cancel launch uses the exact accepted run receipt and locks duplicate clic
         return { ok: true, json: async () => state };
     });
     const buttons = () => taskButtons(nodes.get("prs").firstChild);
-    const cancelButton = () => buttons().find((node) => node.textContent === "Cancel launch");
+    const cancelButton = () => buttons().find((node) => node["aria-label"]?.startsWith("Cancel launch"));
     const button = cancelButton();
     assert.equal(button.disabled, false);
     const pending = button.events.click();
     assert.deepEqual(cancellations, [{ target: pr.target, runId: 20, confirmed: true }]);
     assert.equal(cancelButton().disabled, true);
+    assert.equal(cancelButton()["aria-busy"], "true");
+    assert.equal(cancelButton().firstChild.firstChild.className, "spinner");
     await button.events.click();
     assert.equal(cancellations.length, 1);
     release();
     await pending;
     assert.equal(cancelButton().disabled, true);
+    assert.equal(cancelButton()["aria-busy"], "true");
     assert.ok(buttons().some((node) => node["aria-label"] === `${KIND_LABELS.self_review}: Cancelling`));
     const notice = nodes.get("troubleshooting-runs").firstChild.children.find((node) => node.className === "notice");
     assert.equal(notice.children.find((node) => node.tag === "a").href, pr.dispatch.runUrl);
+    pr.dispatch.status = "uncertain";
+    renderer.render();
+    assert.equal(cancelButton()["aria-busy"], "false");
+    assert.equal(cancelButton().children.length, 1);
     Object.assign(pr, { dispatch: null, actionBlock: null });
     renderer.render();
     assert.equal(cancelButton(), undefined);

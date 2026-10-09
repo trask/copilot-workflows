@@ -1489,16 +1489,19 @@ test("task button states distinguish dispatch acceptance, queued workers, execut
     assert.equal(taskPresentation(dispatched, "self_review", true).label, "Starting");
     assert.equal(taskPresentation(dispatched, "self_review", true, [{ id: 42, status: "in_progress" }]).label, "Running");
     for (const [stage, label] of Object.entries({
-        ready: "Starting", source_pending: "Preparing source", verify_pending: "Verifying",
-        publication_intent: "Publishing", waiting_ci: "Waiting for CI", waiting_review: "Waiting for review",
+        ready: "Starting", source_pending: "Preparing source", dispatch_intent: "Starting",
+        dispatched: "Starting", running: "Running", verify_pending: "Verifying",
+        publish_pending: "Preparing publication", publication_intent: "Publishing", published: "Continuing",
+        thread_effects: "Updating threads", threads_settled: "Continuing",
+        waiting_ci: "Waiting for CI", waiting_review: "Waiting for review",
+        review_request_intent: "Requesting review", task_effect_intent: "Updating PR",
         clean: "Clean", complete: "Completed", blocked: "Blocked", failed: "Failed",
         exhausted: "Budget exhausted", cancelled: "Cancelled", unknown: "Unknown state",
     })) {
         const presentation = taskPresentation({ ...pr, phase: { ...pr.phase, stage } }, "self_review", true);
         assert.equal(presentation.label, label);
-        if (["waiting_ci", "waiting_review", "clean", "complete", "blocked", "failed", "cancelled"].includes(stage)) {
-            assert.equal(presentation.busy, false);
-        }
+        assert.equal(presentation.busy,
+            !["clean", "complete", "blocked", "failed", "exhausted", "cancelled", "unknown"].includes(stage));
     }
     assert.equal(taskPresentation({ ...pr, phase: { ...pr.phase, historical: true } }, "self_review", true).label, "Historical");
     assert.equal(taskPresentation({ ...pr, phase: { ...pr.phase, sha: "f".repeat(40) } }, "self_review", true).label, "Running");

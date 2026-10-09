@@ -16,8 +16,8 @@ const ROUTES = {
 };
 
 export const TASK_EFFECTS = {
-    copilot_review: "Fix valid Copilot findings, push changes, and reply to and resolve bot threads. Repeat review until clean with passing CI.",
-    self_review: "Review this PR and push fixes until review and CI are clean.",
+    copilot_review: "Fix valid Copilot findings, push changes, and reply to and resolve bot threads. Repeat review until clean.",
+    self_review: "Review this PR and push fixes until review is clean.",
     pr_conflict_resolver: "Merge the base branch into this PR and push the resolved merge. Does not merge the PR.",
     ci_fix: "Investigate failing checks and push fixes. May rerun failed jobs.",
     pr_description: "Update the PR title and description if needed.",
@@ -300,7 +300,7 @@ export function taskPresentation(pr, kind, workflowReady, actions = []) {
         waiting_ci: "Waiting for CI", waiting_review: "Waiting for review",
         review_request_intent: "Requesting review", task_effect_intent: "Updating PR",
     };
-    if (waiting[phase.stage]) return result(waiting[phase.stage], "waiting");
+    if (waiting[phase.stage]) return result(waiting[phase.stage], "waiting", true);
     const worker = actions.find((run) => run.id === phase.workerId);
     if (["dispatched", "running"].includes(phase.stage) &&
         ["queued", "pending", "requested", "waiting"].includes(worker?.status)) {
