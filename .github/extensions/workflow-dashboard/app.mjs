@@ -47,6 +47,8 @@ function showLinkMenu(event, node) {
     hideTooltip();
     contextLink = node;
     const menu = $("link-menu");
+    const dialog = $("task-details");
+    (dialog.open && dialog.contains(node) ? dialog : document.body).append(menu);
     menu.hidden = false;
     const bounds = node.getBoundingClientRect();
     const { width, height } = menu.getBoundingClientRect();
@@ -95,7 +97,9 @@ $("link-menu").addEventListener("focusout", (event) => {
 });
 window.addEventListener("blur", () => hideLinkMenu());
 
-function taskControl(button, status, detail, action) {
+$("close-task-details").addEventListener("click", () => $("task-details").close());
+
+function taskControl(button, status, detail, action, runUrl) {
     const control = element("span", null, "task-control");
     const tooltip = element("span", null, "task-tooltip");
     tooltip.id = `task-tooltip-${++tooltipId}`;
@@ -107,10 +111,26 @@ function taskControl(button, status, detail, action) {
     button.setAttribute("aria-describedby", tooltip.id);
     if (button.disabled) {
         control.tabIndex = 0;
-        control.setAttribute("role", "group");
-        control.setAttribute("aria-disabled", "true");
-        control.setAttribute("aria-label", button.getAttribute("aria-label") ?? button.textContent);
+        control.setAttribute("role", "button");
+        control.setAttribute("aria-haspopup", "dialog");
+        control.setAttribute("aria-label", `Show details for ${button.getAttribute("aria-label") ?? button.textContent}`);
         control.setAttribute("aria-describedby", tooltip.id);
+        const showDetails = () => {
+            hideTooltip();
+            hideLinkMenu();
+            $("task-details-title").textContent = button.querySelector(".task-name").textContent;
+            $("task-details-status").textContent = status ?? "Unavailable";
+            $("task-details-message").textContent = detail ?? "";
+            $("task-details-links").replaceChildren();
+            if (runUrl) $("task-details-links").append(link("Open workflow run", runUrl));
+            $("task-details").showModal();
+        };
+        control.addEventListener("click", showDetails);
+        control.addEventListener("keydown", (event) => {
+            if (!["Enter", " "].includes(event.key)) return;
+            event.preventDefault();
+            showDetails();
+        });
     }
     control.append(button, tooltip);
     let hovered = false;
@@ -393,7 +413,9 @@ function prCard(pr) {
         const detail = presentation.disabled && !presentation.busy && pr.actionBlock
             ? pr.actionBlock : presentation.detail === TASK_EFFECTS[kind] ? null : presentation.detail;
         tasks.append(taskControl(button, presentation.label === "Run" ? null : presentation.label,
-            detail, presentation.disabled || presentation.actionLabel ? null : TASK_EFFECTS[kind]));
+            detail, presentation.disabled || presentation.actionLabel ? null : TASK_EFFECTS[kind],
+            presentation.tone === "attention"
+                ? pr.dispatch?.runUrl ?? pr.phase?.coordinatorUrl ?? pr.phase?.runUrl : null));
     }
     const cancelDispatch = pr.dispatch?.operation === "cancel_dispatch" ||
         pr.dispatch?.operation === "launch" && pr.dispatch.status === "accepted";

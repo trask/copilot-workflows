@@ -286,9 +286,12 @@ export function taskPresentation(pr, kind, workflowReady, actions = []) {
         pr.dispatch.operation === "cancel" && phase) ? pr.dispatch : null;
     const evidence = actionEvidence(pr, kind);
     const disabled = Boolean(!workflowReady || pr.actionBlock || pr.dispatch || evidence?.disabled) || !pr.tasks.includes(kind);
+    const reason = phase?.reason === "unknown_fresh_review_body"
+        ? "The workflow stopped because it could not interpret Copilot's latest review summary."
+        : phase?.reason?.replaceAll("_", " ");
     const result = (label, tone = "idle", busy = false) => ({
         label, tone, busy, disabled,
-        detail: dispatch?.message ?? (phase ? completionPresentation(phase)?.detail ?? phase.error ?? phase.reason?.replaceAll("_", " ") : null) ??
+        detail: dispatch?.message ?? (phase ? completionPresentation(phase)?.detail ?? phase.error ?? reason : null) ??
             pr.actionBlock ?? TASK_EFFECTS[kind],
     });
     if (dispatch) {

@@ -1323,12 +1323,18 @@ async function rendererFixture(fetch, timers = { setInterval() {}, clearInterval
             this.tag = tag; this.children = []; this.events = {}; this.style = {}; this.value = ""; this.isConnected = true;
         }
         append(...nodes) {
-            for (const node of nodes) node.parentElement = this;
+            for (const node of nodes) {
+                if (node.parentElement) node.parentElement.children = node.parentElement.children.filter((child) => child !== node);
+                node.parentElement = this;
+            }
             this.children.push(...nodes);
         }
         replaceChildren(...nodes) { this.children = nodes; }
         get firstChild() { return this.children[0]; }
+        querySelector(selector) { return this.children.find((node) => `.${node.className}` === selector); }
         addEventListener(name, action) { this.events[name] = action; }
+        showModal() { this.open = true; }
+        close() { this.open = false; }
         setAttribute(name, value) { this[name] = value; }
         getAttribute(name) { return this[name] ?? null; }
         contains(node) { return this === node || this.children.some((child) => child.contains(node)); }
@@ -1344,11 +1350,11 @@ async function rendererFixture(fetch, timers = { setInterval() {}, clearInterval
         }
     }
     const html = await readFile(new URL("index.html", import.meta.url), "utf8");
-    assert.doesNotMatch(html, /<dialog\b|method="dialog"|id="troubleshooting"/);
     const nodes = new Map(Array.from(html.matchAll(/\bid="([^"]+)"/g), (match) => [match[1], new Node()]));
     nodes.get("link-menu").className = "link-menu";
     nodes.get("link-menu").hidden = true;
     nodes.get("link-menu").append(nodes.get("copy-link"));
+    nodes.get("task-details").append(nodes.get("task-details-links"));
     for (const [input] of html.matchAll(/<input\b[^>]*>/g)) {
         const id = input.match(/\bid="([^"]+)"/)?.[1];
         if (id) nodes.get(id).checked = /\bchecked\b/.test(input);
@@ -1423,7 +1429,7 @@ test("right-click Copy link copies the selected PR URL without navigating or dis
     assert.equal(clipboard, state.prs[0].url);
     assert.equal(nodes.get("link-menu").hidden, true);
     assert.equal(document.activeElement, prLink);
-    assert.equal(document.body.children.length, 0);
+    assert.equal(document.body.children.some((node) => node.tag === "textarea"), false);
     assert.equal(prLink.target, "_blank");
     assert.deepEqual(calls, ["/api/visibility?visible=true", "/api/state"]);
 });
@@ -1571,14 +1577,14 @@ test("Copy link falls back to the Clipboard API and surfaces denied clipboard ac
     open();
     await nodes.get("copy-link").events.click();
     assert.equal(clipboard, prLink.href);
-    assert.equal(document.body.children.length, 0);
+    assert.equal(document.body.children.some((node) => node.tag === "textarea"), false);
     denied = true;
     open();
     await nodes.get("copy-link").events.click();
     assert.equal(nodes.get("error").hidden, false);
     assert.equal(nodes.get("error").textContent, "Could not copy link. Permission denied.");
     assert.equal(nodes.get("link-menu").hidden, true);
-    assert.equal(document.body.children.length, 0);
+    assert.equal(document.body.children.some((node) => node.tag === "textarea"), false);
 });
 
 test("compact run-log rows show PR titles and exact changes regardless of author or search filters", async () => {
@@ -1760,9 +1766,9 @@ test("task tooltips separate status from effects and explain disabled controls w
         const disabled = button(kind);
         assert.equal(disabled.disabled, true);
         assert.equal(disabled.parentElement.tabIndex, 0);
-        assert.equal(disabled.parentElement.role, "group");
-        assert.equal(disabled.parentElement["aria-disabled"], "true");
-        assert.equal(disabled.parentElement["aria-label"], disabled["aria-label"]);
+        assert.equal(disabled.parentElement.role, "button");
+        assert.equal(disabled.parentElement["aria-haspopup"], "dialog");
+        assert.equal(disabled.parentElement["aria-label"], `Show details for ${disabled["aria-label"]}`);
         assert.equal(tooltipFor(disabled).children.some((node) => node.className === "tooltip-action"), false);
     }
     for (const control of nodes.get("prs").firstChild.children.find((node) => node.className === "task-grid").children) {
@@ -1779,6 +1785,58 @@ test("task tooltips separate status from effects and explain disabled controls w
     assert.deepEqual(tooltipFor(button("pr_review")).children.map((node) => node.textContent), [
         "No findings", "Another task is running.",
     ]);
+});
+
+test("disabled red tasks open readable details and the recorded run without dispatching", async () => {
+    const state = rendererState();
+    const pr = state.prs[0];
+    pr.evidence = { sha: pr.sha, conflicts: "no", ci: "passing", copilotThreads: 0, copilotBodies: 0 };
+    pr.phase = {
+        kind: "copilot_review", sha: pr.sha, stage: "blocked", reason: "unknown_fresh_review_body",
+        runUrl: `https://github.com/${CENTRAL}/actions/runs/10`,
+        coordinatorUrl: `https://github.com/${CENTRAL}/actions/runs/11`,
+    };
+    const calls = [];
+    const { renderer, nodes, html } = await rendererFixture(async (path) => {
+        calls.push(path);
+        return { ok: true, json: async () => state };
+    });
+    assert.match(html, /<dialog\b[^>]*aria-labelledby="task-details-title"/);
+    const button = () => taskButtons(nodes.get("prs").firstChild)[0];
+    assert.equal(button().disabled, true);
+    assert.equal(button()["data-tone"], "attention");
+    button().parentElement.events.click();
+    assert.equal(nodes.get("task-details").open, true);
+    assert.equal(nodes.get("task-details-title").textContent, "Address Copilot feedback");
+    assert.equal(nodes.get("task-details-status").textContent, "Blocked");
+    assert.equal(nodes.get("task-details-message").textContent,
+        "The workflow stopped because it could not interpret Copilot's latest review summary. No Copilot feedback to address.");
+    const run = nodes.get("task-details-links").firstChild;
+    assert.equal(run.href, pr.phase.coordinatorUrl);
+    run.events.contextmenu({ preventDefault() {}, stopPropagation() {}, clientX: 100, clientY: 100 });
+    assert.equal(nodes.get("link-menu").hidden, false);
+    assert.equal(nodes.get("link-menu").parentElement, nodes.get("task-details"));
+    nodes.get("close-task-details").events.click();
+    assert.equal(nodes.get("task-details").open, false);
+
+    for (const key of ["Enter", " "]) {
+        let prevented = false;
+        button().parentElement.events.keydown({ key, preventDefault() { prevented = true; } });
+        assert.equal(prevented, true);
+        assert.equal(nodes.get("task-details").open, true);
+        nodes.get("close-task-details").events.click();
+    }
+    button().parentElement.events.keydown({ key: "Tab" });
+    assert.equal(nodes.get("task-details").open, false);
+
+    renderer.render();
+    assert.equal(nodes.get("task-details").open, false);
+    const conflicts = taskButtons(nodes.get("prs").firstChild)[2];
+    assert.equal(conflicts.disabled, true);
+    conflicts.parentElement.events.click();
+    assert.equal(nodes.get("task-details-status").textContent, "No conflicts");
+    assert.equal(nodes.get("task-details-links").children.length, 0);
+    assert.ok(calls.every((path) => !["/api/launch", "/api/cancel"].includes(path)));
 });
 
 test("Fix CI keeps its button label and explains current CI rather than an exhausted run in its tooltip", async () => {

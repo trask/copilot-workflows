@@ -48,6 +48,13 @@
       <div id="run-log" aria-busy="false"></div>
     </section>
   </main>
+  <dialog id="task-details" class="task-details" aria-labelledby="task-details-title" aria-describedby="task-details-status task-details-message">
+    <h2 id="task-details-title"></h2>
+    <p id="task-details-status" class="title"></p>
+    <p id="task-details-message"></p>
+    <p id="task-details-links"></p>
+    <button id="close-task-details" type="button" autofocus>Close</button>
+  </dialog>
   <div id="link-menu" class="link-menu" role="menu" aria-label="Link actions" hidden>
     <button id="copy-link" type="button" role="menuitem">Copy link</button>
   </div>

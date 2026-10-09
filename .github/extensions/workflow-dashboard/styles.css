@@ -43,6 +43,10 @@ code { font: 12px var(--font-mono, Consolas, monospace); overflow-wrap: anywhere
 .run-log-meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; margin-top: 2px; font-size: 12px; }
 .task-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
 .task-control { display: flex; flex: 0 1 auto; min-width: min-content; max-width: 100%; border-radius: 6px; }
+.task-control[role="button"] { cursor: pointer; }
+.task-details { width: min(480px, calc(100vw - 32px)); padding: 20px; border: 1px solid var(--border-color-default, #d1d9e0); border-radius: 8px; background: var(--background-color-default, #fff); color: var(--text-color-default, #1f2328); overflow-wrap: anywhere; }
+.task-details::backdrop { background: #0006; }
+.task-details h2 { margin: 0 0 12px; }
 .task-tooltip { position: fixed; z-index: 100; display: flex; flex-direction: column; gap: 6px; width: max-content; max-width: min(320px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow: auto; padding: 10px 12px; border: 1px solid var(--border-color-default, #d1d9e0); border-radius: 6px; background: var(--background-color-default, #fff); color: var(--text-color-default, #1f2328); box-shadow: 0 4px 12px #0002; font-size: 12px; line-height: 18px; white-space: normal; overflow-wrap: anywhere; }
 .tooltip-status { font-weight: var(--font-weight-semibold, 600); }
 .tooltip-detail { color: var(--text-color-muted, #59636e); }
