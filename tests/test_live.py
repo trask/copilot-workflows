@@ -264,6 +264,8 @@ class Publisher(PublisherAPI):
             raise APIError(503, "Simulated interrupted response")
         if path.endswith("/requested_reviewers"):
             self.read.pr["requested_reviewers"] = [BOT.copy()]
+        elif method == "PATCH":
+            self.read.pr.update(data)
         elif path.endswith("/replies"):
             reply = {"id": max(comment["id"] for comment in self.read.comments) + 1,
                      "in_reply_to_id": int(path.split("/")[-2]), "body": data["body"],

@@ -14,7 +14,7 @@ The sandbox permits Mise's version metadata service at `mise-versions.jdx.dev` a
 
 | Display name | `loop_kind` | Completion |
 | --- | --- | --- |
-| Address Copilot feedback | `copilot_review` | Existing findings, warranted fixes, mandatory bot-thread handling and fresh external review until no findings remain |
+| Address Copilot feedback | `copilot_review` | Existing findings, warranted source or description corrections, mandatory bot-thread handling and fresh external review until no findings remain |
 | Review and fix | `self_review` | Full-PR review/fix passes until an explicit later clean pass |
 | Resolve conflicts | `pr_conflict_resolver` | One merge of the launch-time base snapshot into the frozen PR head, with head first and base second. Never lands the PR. An incorporated base uses no worker or empty commit |
 | Fix CI | `ci_fix` | Diagnose exact-head failures, repair only PR-attributable causes, then observe resulting CI. One evidence-based failed-jobs rerun per Actions run, including manual retries |
@@ -48,6 +48,10 @@ Upstream commits do not invalidate a frozen task. PR-head changes and retargetin
 Conflict resolution can add new files when needed to preserve both sides' intent, such as moving incoming release notes into changelog fragments. Existing nonconflicting paths must match Git's automatic merge exactly, including deletions. A conflict-free merge cannot include extra changes.
 
 PR Description records the original title/body and PR head, then downloads the GitHub diff on the worker runner. Binary-file markers are retained as input. It needs no separate changed-file inventory, added-line anchors, base-tip freeze, source bundle, repository checkout or Git-tree reconstruction. Before editing metadata, the publisher rechecks the exact PR head, acquired diff hash and original title/body. A changed base tip alone does not stop it when the actual diff is unchanged. Worker artifacts and title/body-only publication still require trusted verification.
+
+Address Copilot feedback also freezes the original title/body. Descriptions and reviewer claims are evidence, not requirements: workers use explicit user direction, repository instructions, source and commit history to establish intended behavior. A mismatch with stale prose alone is not a reason to change working code or preserve an unnecessary implementation detail. If intent remains unclear, the pass blocks.
+
+When a finding is a description error rather than a code defect, the worker returns `description_updated` with an unchanged title and a complete corrected body. Description-only passes use `no_change` and push no commit; a pass can also include warranted source fixes. After confirming the candidate head, the publisher checks that the original title/body are unchanged, records a durable metadata intent, and confirms the correction before replying to threads or requesting fresh review. Concurrent metadata edits stop publication rather than being overwritten; interrupted PATCH requests reconcile without retrying. Existing phases remain pinned to their launch revision.
 
 ## Launch
 
@@ -103,7 +107,7 @@ Without the variable, only effects in repositories owned by the central owner se
 
 Published commits use `Trask Stalnaker` as both author and committer display name, with the launch owner's verified numeric-ID noreply email. The account identity is frozen from GitHub PR metadata, bound to the candidate before verification and checked against the authenticated publisher by ID and login. For Copilot-authored PRs, the owner's account is verified through GitHub's author search and frozen separately from the bot author. Workers create ordinary Git commits and credit Copilot in the co-author trailer. Push credentials alone do not determine Git commit authorship.
 
-Only description can update title/body, and only conflict resolution can publish a two-parent base update. Landing PRs, changing draft state, forced pushes, top-level comments, submitted reviews and human-rooted thread replies remain outside the protocol.
+PR Description can update title/body; Address Copilot feedback can correct description errors identified in its findings while preserving the title. Only conflict resolution can publish a two-parent base update. Landing PRs, changing draft state, forced pushes, top-level comments, submitted reviews and human-rooted thread replies remain outside the protocol.
 
 ## Reviewable commits and thread handling
 
@@ -117,7 +121,7 @@ Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>
 
 The worker returns a small semantic result alongside its native Git bundle. Copilot findings select their fixing commit by its 1-based history index; the trusted publisher derives the actual SHA from Git.
 
-Only the trusted publisher handles threads. Fixed replies start `Addressed in <commit sha>.`; supported no-code decisions start `No code change.` Both include the finding's concrete explanation, without repeating the original comment. No-code decisions push no empty commit. Body-only findings receive no invented inline or top-level comment.
+Only the trusted publisher handles threads. Fixed replies start `Addressed in <commit sha>.`; description corrections start `PR description updated. No code change.` after the metadata update is confirmed; other supported no-code decisions start `No code change.` Each includes the finding's concrete explanation, without repeating the original comment. No-code decisions push no empty commit. Body-only findings receive no invented inline or top-level comment.
 
 The publisher confirms the exact branch ref and PR head before replying, confirms the reply before resolving, and confirms resolution before requesting fresh review. Human intervention or changed conversation prevents automatic handling of that thread and records the reason. Already resolved threads are explicitly skipped. An outdated or already-addressed comment still gets an explanatory reply and resolution; a fixed thread gets its mapped-commit reply. An outdated thread alone does not establish review clearance.
 

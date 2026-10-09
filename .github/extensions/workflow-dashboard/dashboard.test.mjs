@@ -71,6 +71,21 @@ test("merge parents, pending reviews and CI reruns retain separate saved evidenc
     assert.equal(item.ciWarnings[0].analysis, "Pre-existing failure");
 });
 
+test("Copilot feedback exposes confirmed description corrections separately from source changes", () => {
+    const proposal = { title: "Images", body: "Use ZIP archives." };
+    const s = fixture({
+        stage: "waiting_review",
+        report: { dispositions: { outcome: "no_change", proposal } },
+        task_intent: { kind: "metadata", status: "confirmed" },
+    });
+    const item = targetHistory([record(s)], target).phases[0].iterations[0];
+    assert.deepEqual(item.proposal, proposal);
+    assert.equal(item.taskEffect.kind, "metadata");
+    assert.equal(item.taskEffect.status, "confirmed");
+    assert.equal(item.candidateSha, null);
+    assert.match(TASK_EFFECTS.copilot_review, /stale PR description/);
+});
+
 test("PR review results distinguish new comments from existing findings and retain pending-review evidence", () => {
     const comments = [{ path: "src/example.js", line: 12, side: "RIGHT", body: "Missing input guard" }];
     const s = fixture({

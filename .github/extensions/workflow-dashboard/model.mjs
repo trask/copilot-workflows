@@ -228,7 +228,8 @@ function iteration(record, publication) {
         } : null,
         ci: s.ci ? { decision: s.ci.decision, sha: s.ci.sha, checks: s.ci.checks ?? [] } : null,
         task: s.task_completion ?? null,
-        proposal: r.loop_kind === "pr_description" ? s.report?.dispositions?.proposal ?? null : null,
+        proposal: ["copilot_review", "pr_description"].includes(r.loop_kind ?? "copilot_review")
+            ? s.report?.dispositions?.proposal ?? null : null,
         taskEffect: s.task_intent ? {
             kind: s.task_intent.kind, status: s.task_intent.status,
             reviewUrl: Number.isSafeInteger(s.task_intent.review_id) && s.task_intent.review_id > 0

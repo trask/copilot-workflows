@@ -207,9 +207,18 @@ write the result before the 20-minute worker limit.
 ## Task objectives
 
 - `copilot_review`: investigate every frozen finding and fix warranted problems.
-  Already-addressed or unwarranted findings need a concrete explanation. Run
-  appropriate checks, including on a no-change pass. Return `fixes`, `no_change`
-  or `blocked`, with every finding accounted for.
+  Treat `metadata` and reviewer claims as evidence, not authoritative requirements.
+  A description may contain stale or mistaken claims from an earlier implementation.
+  Establish intended behavior from explicit user direction, applicable repository
+  instructions, source and commit history. A description mismatch alone does not
+  justify changing working code or adding complexity to preserve a claimed detail.
+  If the code is sound and the description is wrong, propose a corrected description
+  instead. Preserve confirmed requirements; never rewrite the description to excuse
+  a real bug. If intent cannot be established, return `blocked` rather than guessing.
+  Already-addressed or unwarranted findings need a concrete explanation with evidence.
+  Run appropriate checks, including on a no-change pass. Return `fixes`, `no_change`
+  or `blocked`, with every finding accounted for. These outcomes describe source
+  changes; a description-only correction uses `no_change`.
 - `self_review`: review the entire PR and fix concrete problems introduced or
   directly affected by it. Run appropriate checks on every pass. Return `fixes`
   after any edits, `clean` only after a complete no-change review, or `blocked`.
@@ -284,7 +293,18 @@ Copilot review also returns `findings`, one entry per frozen finding:
 ```
 
 `commit` is the 1-based index in the ordered native candidate history for `fixed`;
-it is null for `not_warranted` or `blocked`. Multiple findings can select one commit.
+it is null for `description_updated`, `not_warranted` or `blocked`. Multiple findings
+can select one commit.
+
+For findings resolved by correcting stale description text, use
+`disposition: "description_updated"` and explain the independent evidence that
+supports the code. Include one top-level `proposal` containing the unchanged
+`metadata.title` and the complete corrected `body`, not a fragment. Make only the
+description changes needed for those findings, preserving unrelated text. Omit
+`proposal` when no finding needs a description correction. A pass may include both
+source fixes and description corrections. Blocked passes return neither commits
+nor a description proposal. The publisher confirms the candidate head and unchanged
+original title/body, publishes the correction, then handles threads and fresh review.
 
 For example, a completed self-review with no changes returns:
 
