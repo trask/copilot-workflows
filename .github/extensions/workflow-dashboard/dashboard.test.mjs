@@ -1778,6 +1778,11 @@ test("stale-only Copilot reviews use a neutral refresh button while feedback sta
     renderer.render();
     assert.equal(button().firstChild.textContent, "Address Copilot feedback");
     assert.equal(button().disabled, true);
+    assert.equal(button()["data-tone"], "complete");
+    assert.equal(button()["aria-label"], "Address Copilot feedback: Clean");
+    const css = await readFile(new URL("styles.css", import.meta.url), "utf8");
+    assert.match(css.match(/^\.task-button:disabled \{([^}]+)\}/m)?.[1], /opacity: \.6;/);
+    assert.doesNotMatch(css.match(/^\.task-button\[data-tone="complete"\] \{([^}]+)\}/m)?.[1] ?? "", /opacity:/);
     pr.evidence.copilotReviewOutdated = true;
     renderer.render();
     await button().events.click();

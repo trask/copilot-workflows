@@ -49,7 +49,6 @@ code { font: 12px var(--font-mono, Consolas, monospace); overflow-wrap: anywhere
 .task-name { min-width: 0; font-size: 14px; line-height: 20px; font-weight: var(--font-weight-semibold, 600); }
 .task-button[data-tone="active"], .task-button[data-tone="waiting"] { border-color: var(--true-color-blue, #0969da); background: var(--true-color-blue-muted, #ddf4ff); opacity: 1; }
 .task-button[data-tone="active"] .task-icon, .task-button[data-tone="waiting"] .task-icon { color: var(--true-color-blue, #0969da); }
-.task-button[data-tone="complete"] { opacity: 1; }
 .task-button[data-tone="attention"] { border-color: var(--true-color-red, #cf222e); opacity: 1; }
 .task-button[data-tone="needed"] { border-color: var(--workflow-needed-color); background: color-mix(in srgb, var(--workflow-needed-color) 12%, var(--background-color-default, #fff)); opacity: 1; }
 .task-icon .spinner { width: 14px; height: 14px; border: 2px solid currentColor; border-radius: 50%; border-right-color: transparent; animation: task-spin 1s linear infinite; }
