@@ -39,7 +39,8 @@
     <section aria-labelledby="run-log-title">
       <h2 id="run-log-title">Workflow run log <span id="run-log-count" class="badge" hidden></span></h2>
       <div class="row">
-        <p class="muted">Past 24 hours in the selected repository. Loaded only on request.</p>
+        <label>Hours back <input id="run-log-hours" type="number" min="1" step="1" value="2"></label>
+        <p class="muted">Finished tasks in the selected repository. Loads after the PRs.</p>
         <button id="load-run-log" type="button">Load run log</button>
       </div>
       <p id="run-log-error" class="error" role="alert" hidden></p>

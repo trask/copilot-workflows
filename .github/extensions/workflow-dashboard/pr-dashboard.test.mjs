@@ -97,6 +97,9 @@ function controller({ records = [], pulls = [pull()], dashboardState = state(), 
         get: async (path) => {
             calls.push(path); github.requests++; github.counted++;
             if (path === "user") return { data: viewerAccount };
+            const completionRun = /\/actions\/runs\/(10|11|12|13)$/.exec(path);
+            if (completionRun) return { data: { id: Number(completionRun[1]), status: "completed",
+                updated_at: new Date(1300000).toISOString() } };
             if (path === `repos/${CENTRAL}/actions/runs/20`) return { data: structuredClone(currentRun) };
             if (path === dashboardPath(repo) || REPOSITORIES.slice(1).some((r) => path === dashboardPath(r))) {
                 if (supplement instanceof Error) throw supplement;
@@ -1852,6 +1855,8 @@ test("extension declares shared task handlers and closes checkpoint storage with
     assert.equal((await declaration.actions[0].handler()).runLogLoadedAt, null);
     assert.equal(canvas.state().workflowReady, true);
     canvas.github.recentCoordinators = recentCoordinators;
+    assert.equal(loadLog.inputSchema.properties.hours.minimum, 1);
+    assert.equal((await loadLog.handler({ input: { hours: 6 } })).runLogHours, 6);
     const first = { instanceId: "first", input: {} };
     const second = { instanceId: "second", input: {} };
     t.after(async () => {

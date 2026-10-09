@@ -186,7 +186,7 @@ async function api(path, method = "GET", input) {
             state = value;
             render();
         }
-        throw new Error((path === "/api/run-log" ? value.runLogError : value.prError) ||
+        throw new Error((path.startsWith("/api/run-log") ? value.runLogError : value.prError) ||
             value.error || `Canvas request failed with HTTP ${response.status}.`);
     }
     return value;
@@ -262,6 +262,8 @@ function renderRunLog() {
     const loading = !switching && Boolean(state.runLogLoading || runLogRequest?.repository === state.repository);
     log.setAttribute("aria-busy", String(loading));
     $("load-run-log").disabled = loading || busy || Boolean(state.loading);
+    $("run-log-hours").disabled = $("load-run-log").disabled;
+    $("run-log-hours").value = state.runLogHours ?? 2;
     $("load-run-log").textContent = loading ? "Loading run log..."
         : state.runLogLoadedAt ? "Refresh run log" : "Load run log";
     $("run-log-error").hidden = switching || !state.runLogError;
@@ -273,7 +275,7 @@ function renderRunLog() {
     $("run-log-count").textContent = $("run-log-count").hidden ? "" : (state.runLog ?? []).length;
     log.replaceChildren();
     if (switching) {
-        log.append(element("p", `Select Load run log to view tasks in ${loadingRepository}.`, "empty"));
+        log.append(element("p", `Run log will load after PRs in ${loadingRepository}.`, "empty"));
         return;
     }
     for (const task of state.runLog ?? []) {
@@ -287,7 +289,7 @@ function renderRunLog() {
         heading.append(badge);
         const detail = element("div", null, "run-log-meta muted");
         detail.append(element("span", KIND_LABELS[task.kind] ?? words(task.kind)),
-            element("span", date(task.started)));
+            element("span", `Finished ${date(task.finished)}`));
         for (const range of task.changeRanges) {
             if (range.url) {
                 const changes = link(`Changes · ${range.commits} commit${range.commits === 1 ? "" : "s"}`, range.url);
@@ -303,7 +305,8 @@ function renderRunLog() {
         log.append(row);
     }
     if (!log.children.length) log.append(element("p", loading ? "Loading run log..." : state.runLogLoadedAt
-        ? "No PR tasks ran in the past 24 hours." : "Select Load run log to view the past 24 hours.", "empty"));
+        ? `No PR tasks finished in the past ${state.runLogHours ?? 2} hours.`
+        : "Run log will load after the PRs.", "empty"));
 }
 
 async function taskAction(pr, kind, cancel = false) {
@@ -446,20 +449,22 @@ async function load(path, repository = null) {
         render();
         if (failureMessage) error(failureMessage);
     }
+    if (!failureMessage && !state?.runLogLoadedAt && !state?.runLogError) void loadRunLog();
 }
 
 function refresh() {
     return load("/api/refresh");
 }
 
-async function loadRunLog() {
-    if (!state || busy || state.loading || state.runLogLoading ||
+async function loadRunLog(hours = state?.runLogHours ?? 2) {
+    if (!state?.loadedAt || !state.prLoadedAt || busy || state.loading || state.runLogLoading ||
         runLogRequest?.repository === state.repository) return;
     const request = { repository: state.repository, version: stateVersion };
+    state = { ...state, runLogHours: hours };
     runLogRequest = request;
     renderRunLog();
     try {
-        const next = await api("/api/run-log", "POST");
+        const next = await api(`/api/run-log?hours=${hours}`, "POST");
         if (request.version !== stateVersion || next.repository !== request.repository) return;
         state = next;
     } catch (failure) {
@@ -471,7 +476,16 @@ async function loadRunLog() {
 }
 
 $("refresh").addEventListener("click", refresh);
-$("load-run-log").addEventListener("click", loadRunLog);
+$("load-run-log").addEventListener("click", () => loadRunLog());
+$("run-log-hours").addEventListener("change", () => {
+    const hours = Number($("run-log-hours").value);
+    if (!Number.isSafeInteger(hours) || hours < 1) {
+        state = { ...state, runLogError: "Run log hours must be a positive whole number." };
+        renderRunLog();
+        return;
+    }
+    void loadRunLog(hours);
+});
 $("auto").addEventListener("change", async () => {
     const version = stateVersion;
     try {
@@ -516,4 +530,5 @@ if (typeof IntersectionObserver !== "undefined") {
 }
 setInterval(heartbeat, 15000);
 await heartbeat();
-if (!state?.loadedAt) await refresh();
+if (!state?.loadedAt || !state?.prLoadedAt || state.loading) await refresh();
+if (!state?.runLogLoadedAt && !state?.runLogError) void loadRunLog();

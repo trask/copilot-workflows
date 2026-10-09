@@ -39,7 +39,7 @@ await joinSession({
     canvases: [createCanvas({
         id: "workflow-dashboard",
         displayName: "PR workflows",
-        description: "Browse open PRs, run or cancel tasks, and inspect the past 24 hours of tasks and their pushed commit ranges.",
+        description: "Browse open PRs, run or cancel tasks, and inspect recently finished tasks and their pushed commit ranges.",
         inputSchema: { type: "object", properties: { repo: { type: "string", enum: REPOSITORIES } }, additionalProperties: false },
         actions: [
             {
@@ -56,10 +56,10 @@ await joinSession({
             },
             {
                 name: "load_run_log",
-                description: "Load the past 24 hours of tasks for the selected repository on request.",
-                inputSchema: emptyInput,
-                handler: async () => {
-                    const state = await dashboard.refreshRunLog();
+                description: "Load tasks finished in the last two hours, or a longer hours window, for the selected repository.",
+                inputSchema: { type: "object", properties: { hours: { type: "integer", minimum: 1 } }, additionalProperties: false },
+                handler: async (ctx) => {
+                    const state = await dashboard.refreshRunLog(ctx?.input?.hours);
                     if (state.runLogError) throw new CanvasError("run_log_load_failed", state.runLogError);
                     return state;
                 },

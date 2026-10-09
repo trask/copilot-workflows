@@ -265,7 +265,8 @@ export class GitHub {
             if (!Array.isArray(data.workflow_runs) || data.workflow_runs.length > 100 ||
                 !Number.isSafeInteger(data.total_count) || data.total_count < 0 ||
                 data.workflow_runs.some((run) => !Number.isSafeInteger(run?.id) || run.id < 1 ||
-                    !Number.isFinite(Date.parse(run.created_at)))) {
+                    !Number.isFinite(Date.parse(run.created_at)) ||
+                    run.status === "completed" && !Number.isFinite(Date.parse(run.updated_at)))) {
                 throw new GitHubError("GitHub returned an invalid recent task run listing.");
             }
             for (const run of data.workflow_runs) {

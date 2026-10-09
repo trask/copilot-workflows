@@ -1,6 +1,6 @@
 import { GitHub, CENTRAL } from "./github.mjs";
 import { Checkpoints } from "./state.mjs";
-import { phaseSummary, targetHistory, actionSummary, recentTaskLog, RUN_LOG_WINDOW } from "./model.mjs";
+import { phaseSummary, targetHistory, actionSummary, recentTaskLog, TERMINAL } from "./model.mjs";
 
 export class Dashboard {
     constructor(github = new GitHub(), now = () => Date.now()) {
@@ -19,6 +19,7 @@ export class Dashboard {
             phases: [], actions: [], warnings: [], loadedAt: null, error: null, loading: false,
             snapshot: null, latency: null, cost: null,
             runLog: [], runLogLoadedAt: null, runLogError: null, runLogWarnings: [], runLogLoading: false,
+            runLogHours: 2,
         };
     }
 
@@ -135,31 +136,64 @@ export class Dashboard {
             runLogWarnings: [], runLogLoading: false };
     }
 
-    refreshRunLog() {
+    refreshRunLog(hours = this.value.runLogHours) {
+        if (!Number.isSafeInteger(hours) || hours < 1 || !Number.isSafeInteger(hours * 3600000)) {
+            throw new Error("Run log hours must be a positive whole number.");
+        }
+        if (hours !== this.value.runLogHours) {
+            this.resetRunLog();
+            this.value.runLogHours = hours;
+        }
         const version = this.runLogVersion;
         if (this.runLogPending) {
             return this.runLogRequestVersion === version ? this.runLogPending
-                : this.runLogPending.then(() => this.refreshRunLog());
+                : this.runLogPending.then(() => this.refreshRunLog(hours));
         }
         this.runLogRequestVersion = version;
         this.value.runLogLoading = true;
-        this.runLogPending = this.updateRunLog(version).finally(() => {
+        this.runLogPending = this.updateRunLog(version, hours).finally(() => {
             if (version === this.runLogVersion) this.value.runLogLoading = false;
             this.runLogPending = null;
         }).then(() => this.state());
         return this.runLogPending;
     }
 
-    async updateRunLog(version) {
+    async updateRunLog(version, hours) {
         const started = this.now();
+        const window = hours * 3600000;
         try {
             const reads = await Promise.allSettled([
                 this.checkpoints.load({ updateSnapshot: false }).then((snapshot) => this.checkpoints.history(snapshot)),
-                this.github.recentCoordinators(started - RUN_LOG_WINDOW),
+                this.github.recentCoordinators(started - window),
             ]);
             const failure = reads.find((read) => read.status === "rejected");
             if (failure) throw failure.reason;
-            const log = recentTaskLog(reads[0].value, reads[1].value, started);
+            const records = reads[0].value;
+            const runs = new Map(reads[1].value.map((run) => [run.id, run]));
+            const ids = new Set();
+            for (const record of records) {
+                let phase;
+                try {
+                    phase = phaseSummary(record);
+                } catch {
+                    continue; // Malformed checkpoints are reported by recentTaskLog.
+                }
+                if (!TERMINAL.has(phase.stage) || phase.cancelled !== null) continue;
+                const id = phase.coordinatorId ?? phase.verificationId ?? phase.workerId ?? phase.launchId;
+                if (id && !runs.has(id)) ids.add(id);
+            }
+            const completions = await Promise.allSettled([...ids].map(async (id) => {
+                const run = (await this.github.get(`repos/${CENTRAL}/actions/runs/${id}`)).data;
+                if (run?.id !== id) throw new Error("GitHub returned a different task completion run.");
+                actionSummary(run, []);
+                if (run.status === "completed" && !Number.isFinite(Date.parse(run.updated_at))) {
+                    throw new Error("GitHub returned an invalid task finish time.");
+                }
+                runs.set(id, run);
+            }));
+            const completionFailure = completions.find((read) => read.status === "rejected");
+            if (completionFailure) throw completionFailure.reason;
+            const log = recentTaskLog(records, [...runs.values()], started, window);
             if (version === this.runLogVersion) {
                 this.value = { ...this.value, runLog: log.entries, runLogWarnings: log.warnings,
                     runLogLoadedAt: started, runLogError: null };

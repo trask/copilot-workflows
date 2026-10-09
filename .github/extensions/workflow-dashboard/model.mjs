@@ -165,6 +165,7 @@ export function phaseSummary(record) {
         iteration: s.iteration, maximum: ["pr_conflict_resolver", "pr_description", "pr_simplify",
             "pr_review", "pr_consistency"].includes(r.loop_kind) ? 1 : r.budgets?.max_iterations ?? null,
         started: time(r.publication?.authorized_at ?? r.frozen_at),
+        cancelled: time(s.cancelled_at),
         deadline: time(r.deadline), nextCheck: time(s.next_check_at),
         sha: s.expected_sha ?? r.frozen_sha, headRepo: r.head_repo ?? r.repo,
         url: `https://github.com/${r.repo}/pull/${r.pr}`,
@@ -335,15 +336,19 @@ function publicationRanges(publications, request) {
     return ranges;
 }
 
-export const RUN_LOG_WINDOW = 24 * 60 * 60 * 1000;
+export const RUN_LOG_WINDOW = 2 * 60 * 60 * 1000;
 
-export function recentTaskLog(records, runs, now) {
-    const since = now - RUN_LOG_WINDOW;
+export function recentTaskLog(records, runs, now, window = RUN_LOG_WINDOW) {
+    const since = now - window;
+    const byRun = new Map(runs.map((run) => [run.id, run]));
+    const finished = (run) => run?.status === "completed" ? Date.parse(run.updated_at) : NaN;
     const targets = new Map();
+    const checkpointLaunches = new Set();
     const warnings = [];
     for (const record of records) {
         try {
             checkedRecord(record);
+            if (record.state.request.launch_run?.id) checkpointLaunches.add(record.state.request.launch_run.id);
             const target = `${record.state.request.repo}#${record.state.request.pr}`;
             if (!targets.has(target)) targets.set(target, []);
             targets.get(target).push(record);
@@ -354,16 +359,18 @@ export function recentTaskLog(records, runs, now) {
     const entries = new Map();
     for (const [target, items] of targets) {
         for (const phase of targetHistory(items, target).phases) {
-            const activity = items.filter((item) => phaseKey(item.state) === phase.phase).flatMap(({ state: s }) => [
-                time(s.request.frozen_at), time(s.intent?.recorded_at), time(s.cancelled_at),
-                ...(s.publications ?? []).map((publication) => time(publication.confirmed_at)),
-            ]);
-            const lastActivity = Math.max(phase.started ?? 0, ...activity.filter(Number.isFinite));
-            if (lastActivity < since && !["active", "waiting"].includes(phase.category)) continue;
+            if (!TERMINAL.has(phase.stage)) continue;
+            const completion = phase.cancelled ?? finished(byRun.get(
+                phase.coordinatorId ?? phase.verificationId ?? phase.workerId ?? phase.launchId));
+            if (!Number.isFinite(completion)) {
+                warnings.push(`${phase.target}: Task finish time is unavailable.`);
+                continue;
+            }
+            if (completion < since || completion > now) continue;
             entries.set(phase.launchId ?? phase.id, {
                 id: phase.id, phase: phase.phase, target: phase.target, url: phase.url,
                 kind: phase.kind, stage: phase.stage, category: phase.category,
-                started: phase.started, lastActivity, reason: phase.reason, error: phase.error,
+                started: phase.started, finished: completion, reason: phase.reason, error: phase.error,
                 historical: phase.historical, unknownStage: phase.unknownStage,
                 outcome: phase.outcome, pendingReviewUrl: phase.pendingReviewUrl,
                 reviewCommentCount: phase.reviewCommentCount, changeRanges: phase.changeRanges,
@@ -372,7 +379,8 @@ export function recentTaskLog(records, runs, now) {
         }
     }
     for (const run of runs) {
-        if (!run.display_title?.startsWith("Review loop launch ") || Date.parse(run.created_at) < since) continue;
+        if (!run.display_title?.startsWith("Review loop launch ") ||
+            !Number.isFinite(finished(run)) || finished(run) < since || finished(run) > now) continue;
         const action = actionSummary(run, []);
         const match = /^Review loop launch (\S+) ([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([1-9][0-9]{0,7})$/.exec(run.display_title);
         const entry = entries.get(run.id);
@@ -381,18 +389,19 @@ export function recentTaskLog(records, runs, now) {
             entry.runUrl = action.url;
             continue;
         }
+        if (checkpointLaunches.has(run.id)) continue;
         const [, kind, repo, number] = match ?? [];
         entries.set(run.id, {
             id: `launch:${run.id}`, kind: kind ?? null,
             target: match ? `${repo}#${number}` : null,
             url: match && repository(repo) ? `https://github.com/${repo}/pull/${number}` : null,
-            title: action.title, started: Date.parse(run.created_at),
+            title: action.title, started: Date.parse(run.created_at), finished: finished(run),
             runUrl: action.url, stage: run.status, conclusion: run.conclusion,
             category: run.status === "completed" ? "attention" : "active",
             changeRanges: [], evidence: false,
         });
     }
-    return { entries: [...entries.values()].sort((a, b) => b.started - a.started), warnings };
+    return { entries: [...entries.values()].sort((a, b) => b.finished - a.finished), warnings };
 }
 
 export function actionSummary(run, summaries) {

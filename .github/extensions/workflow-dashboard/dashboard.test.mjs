@@ -372,7 +372,7 @@ test("rate limits stop queued CLI reads and preserve the longest concurrent back
     assert.equal(github.readQueue.length, 0);
 });
 
-test("the run log paginates past polling runs and stops at the 24-hour boundary", async () => {
+test("the run log paginates past polling runs and stops at the requested boundary", async () => {
     const since = Date.parse("2026-10-08T02:44:33Z");
     const calls = [];
     const github = new GitHub(async (args) => {
@@ -711,7 +711,10 @@ test("missing snapshots retain confirmed publication links without inventing ite
 const launch = (changes = {}) => ({
     id: 202, run_attempt: 1, status: "completed", conclusion: "success",
     display_title: `Review loop launch self_review ${target}`,
-    created_at: new Date(1000000).toISOString(), ...changes,
+    created_at: new Date(1000000).toISOString(), updated_at: new Date(1300000).toISOString(), ...changes,
+});
+const completion = (changes = {}) => ({
+    id: 101, status: "completed", updated_at: new Date(1300000).toISOString(), ...changes,
 });
 
 test("the run log combines confirmed batches across worker passes and retains separate launches", () => {
@@ -731,15 +734,15 @@ test("the run log combines confirmed batches across worker passes and retains se
         loop_kind: "self_review", launch_run: { id: 202 },
         request_id: requestId("c"), frozen_sha: sha("d"), frozen_at: 1250,
     });
-    const later = fixture({ phase: requestId("e"), stage: "complete" }, {
+    const later = fixture({ phase: requestId("e"), stage: "complete", coordinator_run: { id: 203 } }, {
         request_id: requestId("d"), loop_kind: "pr_description", launch_run: { id: 203 },
         publication: { authorized_at: 1500 }, frozen_at: 1500, frozen_sha: sha("d"),
     });
     const log = recentTaskLog([
         record(first, `request-${requestId("a")}.json`),
         record(latest, `request-${requestId("c")}.json`), record(later),
-    ], [launch(), launch({ id: 203, display_title: `Review loop launch pr_description ${target}`,
-        created_at: new Date(1500000).toISOString() })], 2000000);
+    ], [completion(), launch(), launch({ id: 203, display_title: `Review loop launch pr_description ${target}`,
+        created_at: new Date(1500000).toISOString(), updated_at: new Date(1600000).toISOString() })], 2000000);
     assert.equal(log.entries.length, 2);
     assert.deepEqual(log.warnings, []);
     const task = log.entries[1];
@@ -753,38 +756,51 @@ test("the run log combines confirmed batches across worker passes and retains se
     assert.deepEqual(log.entries[0].changeRanges, []);
 });
 
-test("the 24-hour log includes boundary launches, ongoing tasks and recent pushes, not unpublished candidates", () => {
+test("the two-hour log filters and sorts by finish time, excludes ongoing tasks and can extend further back", () => {
     const now = RUN_LOG_WINDOW + 2000000;
-    const old = fixture({ stage: "complete" });
+    const old = fixture({ stage: "complete", coordinator_run: { id: 401 } });
     const boundary = fixture({ phase: requestId("b"), stage: "complete",
+        coordinator_run: { id: 402 },
         report: { candidate: { commit: sha("c"), parent: sha("a"), changed: true } } }, {
         request_id: requestId("b"), publication: { authorized_at: 2000 }, frozen_at: 2000,
     });
     const recentPush = fixture({ phase: requestId("c"), stage: "failed", publications: [
         { request_id: requestId("c"), sha: sha("b"), effect: "push", confirmed_at: 2100,
             candidate: { parent: sha("a") } },
-    ] }, { request_id: requestId("c") });
+    ], coordinator_run: { id: 403 } }, { request_id: requestId("c") });
     const ongoing = fixture({ phase: requestId("d"), stage: "waiting_ci" }, {
         request_id: requestId("d"), launch_run: { id: 204 },
     });
-    const log = recentTaskLog([
+    const records = [
         record(old, "request-old.json"), record(boundary, "request-boundary.json"),
         record(recentPush, "request-recent.json"), record(ongoing, "pr-ongoing.json"),
-    ], [
-        launch({ id: 301, created_at: new Date(2000000).toISOString(), conclusion: "failure" }),
-        launch({ id: 302, created_at: new Date(1999999).toISOString() }),
+    ];
+    const runs = [
+        completion({ id: 401, updated_at: new Date(1999999).toISOString() }),
+        completion({ id: 402, updated_at: new Date(2000000).toISOString() }),
+        completion({ id: 403, updated_at: new Date(2100000).toISOString() }),
+        launch({ id: 301, created_at: new Date(0).toISOString(),
+            updated_at: new Date(2200000).toISOString(), conclusion: "failure" }),
+        launch({ id: 302, updated_at: new Date(1999999).toISOString() }),
         launch({ id: 303, created_at: new Date(2100000).toISOString(), display_title: "Review loop tick abc" }),
-    ], now);
-    assert.equal(log.entries.length, 4);
+        launch({ id: 204, status: "completed", updated_at: new Date(2300000).toISOString() }),
+    ];
+    const log = recentTaskLog(records, runs, now);
+    assert.equal(log.entries.length, 3);
     assert.equal(log.entries.some((entry) => entry.phase === old.phase), false);
     assert.deepEqual(log.entries.find((entry) => entry.phase === boundary.phase).changeRanges, []);
     assert.equal(log.entries.find((entry) => entry.phase === recentPush.phase).changeRanges.length, 1);
-    assert.equal(log.entries.find((entry) => entry.phase === ongoing.phase).runUrl,
-        `https://github.com/${CENTRAL}/actions/runs/204/attempts/1`);
+    assert.equal(log.entries.some((entry) => entry.phase === ongoing.phase), false);
+    assert.deepEqual(log.entries.map((entry) => entry.finished), [2200000, 2100000, 2000000]);
     const failed = log.entries.find((entry) => !entry.evidence);
     assert.equal(failed.conclusion, "failure");
     assert.equal(failed.target, target);
     assert.deepEqual(failed.changeRanges, []);
+    const extended = recentTaskLog(records, runs, now, 6 * 3600000);
+    assert.equal(extended.entries.some((entry) => entry.phase === old.phase), true);
+    assert.equal(extended.entries.some((entry) => entry.phase === ongoing.phase), false);
+    const cancelled = recentTaskLog([record(fixture({ stage: "cancelled", cancelled_at: 2300 }))], [], now);
+    assert.equal(cancelled.entries[0].finished, 2300000);
 });
 
 test("missing and discontinuous publication boundaries do not invent a cumulative range", () => {
@@ -793,7 +809,7 @@ test("missing and discontinuous publication boundaries do not invent a cumulativ
         { request_id: requestId("b"), sha: sha("d"), effect: "push", candidate: { parent: sha("c") } },
         { request_id: requestId("c"), sha: sha("e"), effect: "push" },
     ];
-    const log = recentTaskLog([record(fixture({ stage: "complete", publications }))], [], 2000000);
+    const log = recentTaskLog([record(fixture({ stage: "complete", publications }))], [completion()], 2000000);
     const ranges = log.entries[0].changeRanges;
     assert.equal(ranges.length, 3);
     assert.equal(ranges[0].url, `https://github.com/example/project/pull/12/changes/${sha("a")}..${sha("b")}`);
@@ -817,8 +833,8 @@ function fakeDashboard(now = () => 2000000) {
         requests: 0, counted: 0, cacheHits: 0, rate: { limit: 5000, remaining: 4990, reset: 9000000 },
         get: async (path) => {
             github.requests++; github.counted++;
-            assert.equal(path, `repos/${CENTRAL}/actions/runs/101`);
-            return { data: { id: 101, status: "in_progress" } };
+            assert.ok([101, 102].some((id) => path === `repos/${CENTRAL}/actions/runs/${id}`));
+            return { data: path.endsWith("/102") ? completion({ id: 102 }) : { id: 101, status: "in_progress" } };
         },
         recentCoordinators: async () => [],
     };
@@ -874,9 +890,9 @@ test("refresh coalesces, keeps stale data on failure, and respects manual/low-ca
     assert.equal((await initialFailure.refresh()).loadedAt, null);
 });
 
-test("run-log reads are on demand, coalesce, stay stale on failure and retry without pausing PR refresh", async () => {
+test("run-log reads coalesce, stay stale on failure and retry without pausing PR refresh", async () => {
     const dashboard = fakeDashboard();
-    const archived = fixture({ phase: requestId("b"), stage: "complete" }, {
+    const archived = fixture({ phase: requestId("b"), stage: "complete", run: { id: 102 } }, {
         request_id: requestId("b"), launch_run: { id: 202 },
     });
     let archives = 0;
@@ -900,7 +916,7 @@ test("run-log reads are on demand, coalesce, stay stale on failure and retry wit
     assert.equal(dashboard.state().runLogLoading, true);
     assert.equal(dashboard.state().loading, false);
     const first = await pending;
-    assert.equal(first.runLog.length, 3);
+    assert.equal(first.runLog.length, 2);
     assert.equal(first.runLogLoadedAt, 2000000);
     assert.equal(first.runLogError, null);
     assert.equal(first.phases.length, 1);
@@ -924,7 +940,7 @@ test("run-log reads are on demand, coalesce, stay stale on failure and retry wit
     dashboard.checkpoints.history = history;
     const recovered = await dashboard.refreshRunLog();
     assert.equal(recovered.runLogError, null);
-    assert.equal(recovered.runLog.length, 3);
+    assert.equal(recovered.runLog.length, 2);
     assert.equal(archives, 2);
     assert.equal(runs, 3);
 });
@@ -940,6 +956,53 @@ test("PR refresh does not wait for an in-flight on-demand run log", { timeout: 2
     assert.equal(state.phases.length, 1);
     release([]);
     assert.equal((await pending).runLogLoading, false);
+});
+
+test("run-log hours extend the completion cutoff for tasks launched before the listing window", async () => {
+    const now = 30000000;
+    const dashboard = fakeDashboard(() => now);
+    dashboard.checkpoints.snapshot.current = [record(fixture({
+        stage: "complete", run: { id: 102 },
+    }))];
+    const cutoffs = [];
+    dashboard.github.recentCoordinators = async (since) => { cutoffs.push(since); return []; };
+    dashboard.github.get = async (path) => {
+        assert.equal(path, `repos/${CENTRAL}/actions/runs/102`);
+        return { data: completion({ id: 102, updated_at: new Date(now - 3 * 3600000).toISOString() }) };
+    };
+    const initial = await dashboard.refreshRunLog();
+    assert.equal(initial.runLogHours, 2);
+    assert.equal(initial.runLog.length, 0);
+    const extended = await dashboard.refreshRunLog(6);
+    assert.equal(extended.runLogHours, 6);
+    assert.equal(extended.runLog.length, 1);
+    assert.equal(extended.runLog[0].finished, now - 3 * 3600000);
+    assert.deepEqual(cutoffs, [now - 2 * 3600000, now - 6 * 3600000]);
+    assert.equal((await dashboard.refreshRunLog()).runLogHours, 6);
+    assert.throws(() => dashboard.refreshRunLog(1.5), /positive whole number/);
+    assert.throws(() => dashboard.refreshRunLog(0), /positive whole number/);
+});
+
+test("failed completion reads settle before releasing the run-log lock", async () => {
+    const dashboard = fakeDashboard();
+    dashboard.checkpoints.snapshot.current = [
+        record(fixture({ stage: "complete", run: { id: 102 } })),
+        record(fixture({ stage: "complete", run: { id: 103 } }, { pr: 13 })),
+    ];
+    let release;
+    dashboard.github.get = async (path) => {
+        if (path.endsWith("/102")) throw new Error("Completion unavailable");
+        await new Promise((resolve) => release = resolve);
+        return { data: completion({ id: 103 }) };
+    };
+    const pending = dashboard.refreshRunLog();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(dashboard.state().runLogLoading, true);
+    assert.equal(pending, dashboard.refreshRunLog());
+    release();
+    const result = await pending;
+    assert.equal(result.runLogLoading, false);
+    assert.match(result.runLogError, /Completion unavailable/);
 });
 
 test("worker reads deduplicate active run IDs and preserve queued, running and completed evidence", async () => {
@@ -1156,6 +1219,12 @@ test("loopback serves assets and read-only endpoints; cross-origin data reads an
     assert.equal(dashboard.state().runLogLoadedAt, null);
     assert.equal((await fetch(new URL("api/run-log", server.url), { method: "POST" })).status, 200);
     assert.equal(dashboard.state().runLogLoadedAt, 2000000);
+    const extendedLog = await fetch(new URL("api/run-log?hours=6", server.url), { method: "POST" });
+    assert.equal(extendedLog.status, 200);
+    assert.equal((await extendedLog.json()).runLogHours, 6);
+    const invalidWindow = await fetch(new URL("api/run-log?hours=1.5", server.url), { method: "POST" });
+    assert.equal(invalidWindow.status, 400);
+    assert.match((await invalidWindow.json()).error, /positive whole number/);
     dashboard.github.recentCoordinators = async () => { throw new Error("Run log unavailable"); };
     const failedLog = await fetch(new URL("api/run-log", server.url), { method: "POST" });
     assert.equal(failedLog.status, 502);
@@ -1237,6 +1306,7 @@ function rendererState(repository = "example/project") {
         error: null, prError: null, pauseReason: null, warnings: [], prWarnings: [],
         cost: 0, rate: null, metrics: { requests: 10, cacheHits: 10 },
         workflowReady: true, viewer: { login: "trask" }, phases: [], actions: [],
+        runLogHours: 2, runLog: [], runLogLoadedAt: 2000000,
         prs: [{
             target: `${repository}#12`, number: 12, title: `PR in ${repository}`,
             url: `https://github.com/${repository}/pull/12`, author: "trask", mine: true,
@@ -1354,7 +1424,7 @@ test("compact run-log rows show PR titles and exact changes regardless of author
                 { commit: sha("b"), subject: "First" }, { commit: sha("c"), subject: "Second" },
             ] } },
     ] }, { loop_kind: "self_review", launch_run: { id: 202 } }))],
-    [], 2000000).entries[0];
+    [completion()], 2000000).entries[0];
     state.runLog = [pushed, ...recentTaskLog([], [launch({ conclusion: "failure" })], 2000000).entries]
         .map((task) => ({ ...task, number: 12, title: state.prs[0].title }));
     const { renderer, nodes } = await rendererFixture(async () => ({ ok: true, json: async () => state }));
@@ -1386,24 +1456,23 @@ test("compact run-log rows show PR titles and exact changes regardless of author
     assert.equal(nodes.get("run-log").children.length, 2);
 });
 
-test("run-log controls fetch only on demand, leave PR controls usable and retry locally", async () => {
+test("run log loads automatically after PR rendering, leaves PR controls usable and retries locally", async () => {
     let current = { ...rendererState(), runLog: [], runLogLoadedAt: null, runLogError: null, runLogLoading: false };
     let release;
     let reads = 0;
     const { renderer, nodes, html } = await rendererFixture(async (path) => {
-        if (path === "/api/run-log") {
+        if (path.startsWith("/api/run-log")) {
             reads++;
             return new Promise((resolve) => release = resolve);
         }
         return { ok: true, json: async () => structuredClone(current) };
     });
-    assert.equal(reads, 0);
-    assert.equal(nodes.get("load-run-log").textContent, "Load run log");
+    assert.equal(reads, 1);
+    assert.equal(nodes.get("prs").firstChild.firstChild.firstChild.textContent, "#12 PR in example/project");
+    assert.equal(nodes.get("load-run-log").textContent, "Loading run log...");
     assert.equal(nodes.get("run-log-count").textContent, "");
     assert.equal(nodes.get("run-log-count").hidden, true);
     assert.match(html, /<span id="run-log-count"[^>]*\bhidden\b/);
-    const pending = nodes.get("load-run-log").events.click();
-    assert.equal(reads, 1);
     await nodes.get("load-run-log").events.click();
     assert.equal(reads, 1);
     assert.equal(nodes.get("load-run-log").disabled, true);
@@ -1415,7 +1484,7 @@ test("run-log controls fetch only on demand, leave PR controls usable and retry 
     for (const id of ["repo", "refresh", "auto"]) assert.notEqual(nodes.get(id).disabled, true);
     current = { ...current, runLogLoadedAt: 2000000 };
     release({ ok: true, json: async () => structuredClone(current) });
-    await pending;
+    await new Promise((resolve) => setImmediate(resolve));
     assert.equal(nodes.get("load-run-log").disabled, false);
     assert.equal(nodes.get("load-run-log").textContent, "Refresh run log");
     assert.equal(nodes.get("run-log-count").hidden, false);
@@ -1440,11 +1509,52 @@ test("run-log controls fetch only on demand, leave PR controls usable and retry 
     assert.equal(nodes.get("run-log-error").hidden, true);
 });
 
+test("initial run-log loading waits for the main refresh and Hours back reloads the selected window", async () => {
+    let current = { ...rendererState(), loadedAt: null, prLoadedAt: null, runLogLoadedAt: null };
+    let releaseMain;
+    let mainStarted;
+    const started = new Promise((resolve) => mainStarted = resolve);
+    const logWindows = [];
+    const fixturePending = rendererFixture(async (path) => {
+        if (path === "/api/refresh") {
+            mainStarted();
+            await new Promise((resolve) => releaseMain = resolve);
+            current = { ...rendererState(), runLogLoadedAt: null };
+        }
+        if (path.startsWith("/api/run-log")) {
+            assert.ok(current.prLoadedAt);
+            assert.ok(current.loadedAt);
+            const hours = Number(new URL(path, "http://127.0.0.1").searchParams.get("hours"));
+            logWindows.push(hours);
+            current = { ...current, runLogLoadedAt: 2000000, runLogHours: hours };
+        }
+        return { ok: true, json: async () => structuredClone(current) };
+    });
+    await started;
+    assert.deepEqual(logWindows, []);
+    releaseMain();
+    const { nodes } = await fixturePending;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(logWindows, [2]);
+    assert.equal(nodes.get("prs").firstChild.firstChild.firstChild.textContent, "#12 PR in example/project");
+    nodes.get("run-log-hours").value = "6";
+    nodes.get("run-log-hours").events.change();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(logWindows, [2, 6]);
+    assert.equal(nodes.get("run-log-hours").value, 6);
+    assert.equal(nodes.get("run-log").firstChild.textContent, "No PR tasks finished in the past 6 hours.");
+});
+
 test("a late run-log response cannot replace a repository switch", async () => {
     let current = { ...rendererState(), runLog: [], runLogLoadedAt: 2000000 };
     let release;
     const { nodes } = await rendererFixture(async (path) => {
-        if (path === "/api/run-log") return new Promise((resolve) => release = resolve);
+        if (path.startsWith("/api/run-log")) {
+            if (current.repository === "example/other") return { ok: true, json: async () => ({
+                ...current, runLogLoadedAt: 2000000,
+            }) };
+            return new Promise((resolve) => release = resolve);
+        }
         if (path === "/api/repository") current = rendererState("example/other");
         return { ok: true, json: async () => structuredClone(current) };
     });
@@ -1458,10 +1568,10 @@ test("a late run-log response cannot replace a repository switch", async () => {
     await log;
     assert.equal(nodes.get("repo").value, "example/other");
     assert.equal(nodes.get("prs").firstChild.firstChild.firstChild.textContent, "#12 PR in example/other");
-    assert.equal(nodes.get("load-run-log").textContent, "Load run log");
+    assert.equal(nodes.get("load-run-log").textContent, "Refresh run log");
     assert.equal(nodes.get("load-run-log").disabled, false);
-    assert.equal(nodes.get("run-log-count").hidden, true);
-    assert.match(nodes.get("run-log").firstChild.textContent, /Select Load run log/);
+    assert.equal(nodes.get("run-log-count").hidden, false);
+    assert.match(nodes.get("run-log").firstChild.textContent, /No PR tasks finished/);
 });
 
 test("task tooltips separate status from effects and explain disabled controls without an action", async () => {
@@ -2140,7 +2250,7 @@ test("repository selection shows loading before its response and hides old cards
     assert.equal(nodes.get("prs")["aria-busy"], "true");
     assert.equal(nodes.get("prs").children.length, 1);
     assert.equal(nodes.get("prs").firstChild.textContent, "Loading open PRs for example/other...");
-    assert.equal(nodes.get("run-log").firstChild.textContent, "Select Load run log to view tasks in example/other.");
+    assert.equal(nodes.get("run-log").firstChild.textContent, "Run log will load after PRs in example/other.");
     assert.equal(nodes.get("pr-count").textContent, "Loading...");
     assert.equal(nodes.get("refresh").textContent, "Loading...");
     for (const id of ["repo", "refresh", "auto"]) assert.equal(nodes.get(id).disabled, true);

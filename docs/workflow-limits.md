@@ -150,7 +150,7 @@ These affect launching and observing workflows, not the worker's task budget.
 | Saved reviewer-dashboard file | 1 MiB, maximum 10,000 PR records |
 | Cached read responses | 100 entries |
 | Failed-launch listing | 20 runs per read |
-| Workflow run log | Tasks launched or active in the past 24 hours; coordinator runs read in pages of 100 back to the cutoff |
+| Workflow run log | Tasks finished in the past 2 hours by default; adjustable Hours back; coordinator runs read in pages of 100 back to the cutoff, with exact recorded final runs read for older launches |
 
 Sources: [GitHub client](../.github/extensions/workflow-dashboard/github.mjs), [workflow dashboard](../.github/extensions/workflow-dashboard/dashboard.mjs), [PR dashboard](../.github/extensions/workflow-dashboard/pr-dashboard.mjs), [state reader](../.github/extensions/workflow-dashboard/state.mjs), [loopback server](../.github/extensions/workflow-dashboard/server.mjs), [browser app](../.github/extensions/workflow-dashboard/app.mjs).
 

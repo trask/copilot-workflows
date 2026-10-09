@@ -79,7 +79,8 @@ export async function startServer(dashboard) {
                 const state = await dashboard.refresh();
                 json(state.error || state.prError ? 502 : 200, state);
             } else if (req.method === "POST" && url.pathname === "/api/run-log") {
-                const state = await dashboard.refreshRunLog();
+                const hours = url.searchParams.get("hours");
+                const state = await dashboard.refreshRunLog(hours === null ? undefined : Number(hours));
                 json(state.runLogError ? 502 : 200, state);
             } else if (req.method === "POST" && url.pathname === "/api/visibility") {
                 const visible = url.searchParams.get("visible");

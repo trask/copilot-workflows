@@ -75,6 +75,7 @@ export class PrDashboard extends Dashboard {
             prWarnings: this.prWarnings, workflowReady,
             runLogLoadedAt: this.value.runLogLoadedAt, runLogError: this.value.runLogError,
             runLogLoading: this.value.runLogLoading,
+            runLogHours: this.value.runLogHours,
             runLog: this.value.runLog.filter((task) => task.target?.startsWith(`${this.repository}#`))
                 .map((task) => ({
                     ...task, number: targetParts(task.target).number,
@@ -214,8 +215,8 @@ export class PrDashboard extends Dashboard {
         this.runLogTitleWarnings = [];
     }
 
-    async updateRunLog(version) {
-        await super.updateRunLog(version);
+    async updateRunLog(version, hours) {
+        await super.updateRunLog(version, hours);
         if (version === this.runLogVersion && !this.value.runLogError) await this.loadRunLogTitles(version);
     }
 
