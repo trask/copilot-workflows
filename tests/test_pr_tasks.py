@@ -1171,6 +1171,32 @@ class MergeGitTests(unittest.TestCase):
                         candidate_outcome(value, req, candidate)
 
 class CIRepairTests(unittest.TestCase):
+    def test_publisher_collects_ci_logs_on_disk_with_the_target_credential(self):
+        req, read = self.context()
+        upstream_token = "github_pat_" + "upstream_not_a_token" * 3
+        publisher = PublisherAPI(TEST_TOKEN, req, "fine_grained_pat", target_token=upstream_token)
+        publisher.call = read.call
+        publisher.pages = read.pages
+
+        def download(path, limit=None, *, log_windows=(), token=None, destination=None):
+            self.assertEqual(f"repos/{FIXTURE}/actions/jobs/333/logs", path)
+            self.assertEqual(upstream_token, token)
+            self.assertEqual([("2026-10-07T01:00:00Z", "2026-10-07T01:01:00Z")], log_windows)
+            destination.write_bytes(read.log)
+            return destination
+
+        read.jobs[0]["steps"] = [{
+            "conclusion": "failure", "started_at": "2026-10-07T01:00:00Z",
+            "completed_at": "2026-10-07T01:01:00Z"}]
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(API, "_signed_download", side_effect=download) as transport:
+            evidence = collect(publisher, req, [CI_CHECK], log_dir=directory)
+            failure = evidence["failures"][0]
+            self.assertEqual(read.log, Path(failure["log_path"]).read_bytes())
+            self.assertEqual("failed_step_log_excerpt", failure["availability"])
+            transport.assert_called_once()
+        self.assertEqual(TEST_TOKEN, publisher.token)
+
     def test_direct_ci_logs_stay_on_disk_and_quotes_are_independently_checked(self):
         req, read = self.context()
         read.log = b"x" * (2 * 1024 * 1024 - 7) + b"temporary runner network outage\n"

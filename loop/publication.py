@@ -51,9 +51,8 @@ class PublisherAPI(API):
     def call(self, path, method="GET", data=None, **kwargs):
         return super().call(path, method, data, token=self.request_token(path), **kwargs)
 
-    def signed_download(self, path, limit=None, *, log_windows=()):
-        return super().signed_download(path, limit, log_windows=log_windows,
-                                       token=self.request_token(path))
+    def signed_download(self, path, limit=None, **kwargs):
+        return super().signed_download(path, limit, token=self.request_token(path), **kwargs)
 
     def bind_effect(self, intent):
         if intent is not None:

@@ -84,6 +84,8 @@ The publisher authenticates as the launch owner. Source effects require actual f
 
 The default loop starts from unresolved comments in existing submitted, verified Copilot reviews, including older reviews and outdated threads. It also investigates nonempty review bodies at the current PR head. If all reviews are on older commits and no findings remain, it requests a fresh current-head review directly without consuming a worker pass. It does not request a first-ever review or probe Copilot permissions. After publication and thread handling it requests a fresh review; a rejected request stops the loop with the publication evidence retained.
 
+Fresh-review clearance uses explicit finding counts, body-only findings such as Previously missed, and GitHub's actual thread-resolution state. Headings, badges, resolved-summary links and footers do not establish or prevent clearance. A zero-finding body cannot clear unresolved Copilot threads; missing or ambiguous zero-finding counts remain unknown.
+
 Self-review needs no existing Copilot review and never requests one:
 
 ```bash

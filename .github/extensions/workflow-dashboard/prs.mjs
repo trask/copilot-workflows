@@ -90,15 +90,11 @@ export function taskChoices(pr, viewer) {
 
 function hasCopilotBodyFeedback(body) {
     if (!body.trim()) return false;
-    const summary = body.replaceAll("\r\n", "\n")
-        .replace(/\n\n---\n\nGive feedback about Copilot approvals in \[this survey\]\(https:\/\/[^\s()<>]+\) to enter a drawing for a \$[0-9]+ gift card\.\n?$/, "")
-        .replace(/\n\n---\n\n\u{1f4a1} <a [^<>\n]+>Add a `code-review` agent skill<\/a> or configure MCP servers for context-aware, tailored reviews\. <a [^<>\n]+>Learn more in the docs\.<\/a>\n?$/u, "")
-        .replace(/\n\n\u{1f9e0} \*\*Review effort:\*\* Balanced\n?$/u, "")
-        .replace(/\n\n<details>\n<summary><strong>What changed in this PR<\/strong><\/summary>\n\n(?:(?!<\/?details[>\s])[\s\S])+\n<\/details>(?=\n|$)/, "")
-        .replace(/\n\n<details>\n<summary><strong>(?:Resolved since last review \([1-9][0-9]*\)|[1-9][0-9]* resolved since last review)<\/strong><\/summary>\n\n(?:- (?:<picture>(?:<source [^<>\n]+>)+<img [^<>\n]+><\/picture> )?\[[^\[\]<>\n]+\]\(#discussion_r[1-9][0-9]*\)\n)+<\/details>\n?$/, "");
-    const heading = String.raw`### (?:\u{1f7e2} Approval recommended|\u{1f535} Needs a closer look)\n\n[^\n<>#*]+\n\n`;
-    const noFindings = new RegExp(String.raw`^<!-- ccr-overview-v2 -->\n\n(?:${heading}\*\*0 open findings\*\*|## Copilot review overview\n\n${heading}\*\*Review effort:\*\* Balanced  \n\*\*Findings:\*\* None)\n?$`, "u");
-    return !noFindings.test(summary);
+    const summary = body.replace(/\*\*|<\/?strong>/g, "");
+    const counts = [...summary.matchAll(/\bFindings:\s*(None|[0-9]+)\b|\b([0-9]+) open findings?\b/g)]
+        .map((match) => match[1] ?? match[2]);
+    return counts.length !== 1 || counts.some((count) => count !== "None" && Number(count) > 0) ||
+        /Previously missed|Open \([1-9]|New \([1-9]/.test(summary);
 }
 
 function ciEvidence(rollup, summaryCI) {

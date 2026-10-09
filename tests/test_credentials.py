@@ -308,7 +308,7 @@ class PublisherCredentialTests(unittest.TestCase):
             self.assertEqual(b"logs", publisher.signed_download(
                 f"repos/{req['repo']}/actions/jobs/42/logs", 60000))
             download.assert_called_once_with(f"repos/{req['repo']}/actions/jobs/42/logs", 60000,
-                                             log_windows=(), token=upstream_token)
+                                             token=upstream_token)
         self.assertEqual(TEST_TOKEN, publisher.token)
 
     def test_both_fork_and_upstream_tokens_must_authenticate_as_the_launch_owner(self):

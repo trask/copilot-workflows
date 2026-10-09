@@ -505,7 +505,7 @@ test("Copilot hints count all unresolved submitted roots by stable bot identity"
 
 test("zero-finding Copilot summaries and informational sections do not enable feedback tasks", () => {
     const changed = "\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nSimplifies configuration tests.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| test.js | Preserves supported behavior. |\n</details>";
-    const resolved = "\n\n<details>\n<summary><strong>1 resolved since last review</strong></summary>\n\n- [Input guard](#discussion_r42)\n</details>";
+    const resolved = `\n\n<details>\n<summary><strong>1 resolved since last review</strong></summary>\n\n- [Input guard](https://github.com/${repo}/pull/12#discussion_r42)\n</details>`;
     const footer = "\n\n---\n\nGive feedback about Copilot approvals in [this survey](https://survey.example.com/copilot) to enter a drawing for a $150 gift card.";
     const legacy = "<!-- ccr-overview-v2 -->\n\n## Copilot review overview\n\n### \u{1f535} Needs a closer look\n\nHuman validation is recommended.\n\n**Review effort:** Balanced  \n**Findings:** None\n";
     const bodies = [cleanBody, cleanBody.replace("\n\n\u{1f9e0}", changed + resolved + "\n\n\u{1f9e0}") + footer, legacy, ""];
@@ -534,7 +534,7 @@ test("only submitted verified current-head review bodies count, and unknown text
     assert.equal(taskPresentation(pr, "copilot_review", true).disabled, false);
     assert.equal(taskPresentation(pr, "copilot_review", true).tone, "needed");
     for (const reviewBody of [
-        review({ body: cleanBody + "\nUnexpected finding" }),
+        review({ body: cleanBody + "\n**Findings:** 1" }),
         review({ body: cleanBody + "\n\n<details><summary>Previously missed (1)</summary>\nMissing guard\n</details>" }),
         review({ state: "CHANGES_REQUESTED" }),
     ]) assert.equal(normalizeEvidence(detail({ reviews: [reviewBody] }), sha).copilotBodies, 1);
@@ -555,7 +555,7 @@ test("the code-review skill footer does not turn a zero-finding review into feed
         reviews: [review({ body: body.replace("**0 open findings**", "**1 open finding**") })],
     }), sha).copilotBodies, 1);
     assert.equal(normalizeEvidence(detail({
-        reviews: [review({ body: body + "\nUnexpected finding" })],
+        reviews: [review({ body: body + "\n**Findings:** None" })],
     }), sha).copilotBodies, 1);
 });
 

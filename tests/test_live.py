@@ -1114,10 +1114,8 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(first, missed_fingerprints(findings * 2))
         for body in (NONCLEAN, NONCLEAN + MISSED.replace("(1)", "(2)"),
                      NONCLEAN + MISSED.replace("</details>", "", 1),
-                     NONCLEAN + MISSED + "unparsed feedback",
                      NONCLEAN + MISSED.replace("Schedule a wake-up at the earliest notBefore time.",
-                                               "<details>nested finding</details>"),
-                     (NONCLEAN + MISSED).replace("<!-- ccr-overview-v2 -->", "")):
+                                               "<details>nested finding</details>")):
             with self.subTest(body=body):
                 self.assertEqual([], missed_fingerprints([{"kind": "body", "body": body}]))
 
@@ -1348,66 +1346,18 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual("ready", store.entries[name]["stage"])
         self.assertFalse(any(method == "POST" for _, method, _ in api.calls))
 
-    def test_clean_grammar_is_narrow_and_hidden_finding_never_clears_review(self):
+    def test_finding_counts_and_body_only_feedback_determine_body_classification(self):
         self.assertEqual("clean", body_classification(CLEAN))
-        self.assertEqual("findings", body_classification(NONCLEAN))
-        self.assertEqual("findings", body_classification(
-            CLEAN + "<details><strong>Previously missed (1)</strong> bug</details>"))
-        for body in ["", "**Findings:** None", CLEAN + "<details>unknown</details>",
-                     CLEAN.replace("Approval recommended", "Looks good"),
-                     CLEAN + "<strong>Unknown</strong>",
-                     CLEAN + "**Findings:** None"]:
+        self.assertEqual("clean", body_classification(CURRENT_CLEAN_RESOLVED))
+        for body in (NONCLEAN, CURRENT_NONCLEAN, CURRENT_CLEAN + MISSED,
+                     CLEAN + "<details><strong>Open (1)</strong> bug</details>",
+                     CURRENT_CLEAN + "\n**Findings:** 1"):
+            with self.subTest(body=body):
+                self.assertEqual("findings", body_classification(body))
+        for body in (None, "", "Fix the missing input guard.",
+                     CURRENT_CLEAN + "\n**Findings:** None"):
             with self.subTest(body=body):
                 self.assertEqual("unknown", body_classification(body))
-
-    def test_current_summary_recognizes_open_counts_and_the_effort_footer(self):
-        self.assertEqual("clean", body_classification(CURRENT_CLEAN))
-        self.assertEqual("clean", body_classification(CURRENT_CLEAN_RESOLVED))
-        self.assertEqual("findings", body_classification(CURRENT_NONCLEAN))
-        self.assertEqual("unknown", body_classification(CURRENT_CLEAN.replace(
-            "\n\n\U0001f9e0 **Review effort:** Balanced", "")))
-        self.assertEqual("unknown", body_classification(CURRENT_CLEAN_RESOLVED.replace(
-            "1 resolved since last review", "2 resolved since last review")))
-        self.assertEqual("unknown", body_classification(CURRENT_CLEAN + "\nUnexpected finding"))
-
-    def test_native_approval_feedback_footer_does_not_hide_review_findings(self):
-        footer = ("\n\n---\n\nGive feedback about Copilot approvals in [this survey]"
-                  "(https://survey.alchemer.com/s3/9011660/CCR-Public-Preview-Autoapprove-feedback-survey)"
-                  " to enter a drawing for a $150 gift card.")
-        self.assertEqual("clean", body_classification(CURRENT_CLEAN + footer))
-        self.assertEqual("clean", body_classification(CURRENT_CLEAN_RESOLVED + footer))
-        self.assertEqual("findings", body_classification(CURRENT_NONCLEAN + footer))
-        self.assertEqual("unknown", body_classification(CURRENT_CLEAN + footer + "\nUnexpected finding"))
-        read, req = Read(), personal_request()
-        read.reviews.append(review(id=13, body=CURRENT_CLEAN_RESOLVED + footer, submitted_at=iso(200)))
-        self.assertEqual("findings", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
-        read.resolved = True
-        self.assertEqual("clean", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
-
-    def test_code_review_skill_footer_and_change_summary_preserve_review_findings(self):
-        changed = ("\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\n"
-                   "Retains invalid span links with metadata.\n\n"
-                   "| File | Description |\r\n| ---- | ----------- |\r\n"
-                   "| SdkSpan.java | Retains qualifying runtime links. |\n</details>")
-        footer = (
-            '\n\n---\n\n\U0001f4a1 <a href="/open-telemetry/opentelemetry-java/new/main'
-            '?filename=.github/skills/code-review/SKILL.md" class="Link--inTextBlock"'
-            ' target="_blank" rel="noopener noreferrer">Add a `code-review` agent skill</a>'
-            ' or configure MCP servers for context-aware, tailored reviews. '
-            '<a href="https://docs.github.com/copilot/how-tos/use-copilot-agents/request-a-code-review/'
-            'use-code-review?tool=webui#mcp-servers-and-agent-skills" class="Link--inTextBlock"'
-            ' target="_blank" rel="noopener noreferrer">Learn more in the docs.</a>')
-        body = CURRENT_CLEAN_RESOLVED.replace(
-            "\n\n\U0001f9e0", changed + "\n\n\U0001f9e0") + footer
-        self.assertEqual("clean", body_classification(body))
-        self.assertEqual("findings", body_classification(
-            body.replace("**0 open findings**", "**1 open finding**")))
-        self.assertNotEqual("clean", body_classification(body + "\nUnexpected finding"))
-        read, req = Read(), personal_request()
-        read.reviews.append(review(id=13, body=body, submitted_at=iso(200)))
-        self.assertEqual("findings", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
-        read.resolved = True
-        self.assertEqual("clean", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
 
     def test_resolved_summary_keeps_missed_findings_before_native_footers(self):
         body = CURRENT_CLEAN_RESOLVED.replace(
@@ -1442,21 +1392,15 @@ class ReviewTests(unittest.TestCase):
                 store, name = stored(continued)
                 self.assertEqual("repeated_findings", watch_review(
                     store, name, continued, read, 800)["reason"])
-        self.assertEqual([], missed_fingerprints(
-            [{"kind": "body", "body": body + footer + "\nUnexpected finding"}]))
 
-    def test_current_resolved_summary_requires_closed_verified_roots(self):
+    def test_absolute_resolved_summary_links_use_actual_thread_resolution(self):
         read, req = Read(), personal_request()
-        read.reviews.append(review(id=13, body=CURRENT_CLEAN_RESOLVED, submitted_at=iso(200)))
+        body = CURRENT_CLEAN_RESOLVED.replace(
+            "(#discussion_r20)", f"(https://github.com/{FIXTURE}/pull/1#discussion_r20)")
+        read.reviews.append(review(id=13, body=body, submitted_at=iso(200)))
         self.assertEqual("findings", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
         read.resolved = True
         self.assertEqual("clean", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
-        read.reviews[-1]["body"] = CURRENT_CLEAN_RESOLVED.replace(
-            "#discussion_r20", "#discussion_r99")
-        self.assertEqual("unknown", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
-        read.reviews[-1]["body"] = CURRENT_CLEAN_RESOLVED
-        read.comments[0]["user"] = {"id": AUTHOR_ID, "type": "User"}
-        self.assertEqual("unknown", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
 
     def test_verified_new_inline_finding_advances_with_current_or_unknown_overview(self):
         state = live_state(stage="waiting_review")
@@ -1481,61 +1425,7 @@ class ReviewTests(unittest.TestCase):
                 self.assertEqual("ready", result["stage"])
                 self.assertIn("inline:21", {f["key"] for f in result["request"]["findings"]})
 
-    def test_no_finding_human_review_uses_the_same_bounded_clean_grammar(self):
-        self.assertEqual("clean", body_classification(HUMAN_REVIEW))
-        two = RESOLVED.replace("(1)", "(2)").replace(
-            "#discussion_r20", "#discussion_r4175448985").replace(
-            "\n</details>",
-            "\n- [Cross-PR publisher recovery is blocked by scope check]"
-            "(#discussion_r4171051071)\n</details>")
-        self.assertEqual("clean", body_classification(HUMAN_REVIEW + two))
-        for body in (HUMAN_REVIEW.replace("Needs a closer look", "Looks good"),
-                     HUMAN_REVIEW.replace("\U0001f535", "\U0001f7e2"),
-                     HUMAN_REVIEW.replace("Balanced", "Unknown"),
-                     HUMAN_REVIEW.replace("**Findings:** None", "**Findings:** 0"),
-                     HUMAN_REVIEW + "<details>Unknown finding</details>",
-                     HUMAN_REVIEW + "\nUnexpected finding",
-                     HUMAN_REVIEW + "**Findings:** None",
-                     HUMAN_REVIEW + two.replace("(2)", "(1)"),
-                     HUMAN_REVIEW + two.replace("#discussion_r4171051071",
-                                                "#discussion_r4175448985")):
-            with self.subTest(body=body):
-                self.assertNotEqual("clean", body_classification(body))
-        for extra in (MISSED, "<details><strong>Open (1)</strong> bug</details>",
-                      "[Another finding](#discussion_r21)"):
-            with self.subTest(extra=extra):
-                self.assertEqual("findings", body_classification(HUMAN_REVIEW + extra))
-        self.assertEqual("findings", body_classification(HUMAN_REVIEW.replace(
-            "**Findings:** None", "**Findings:** 1") + two))
-
-    def test_clean_review_accepts_only_a_complete_resolved_section(self):
-        for resolved in (RESOLVED, RESOLVED + "\n", RESOLVED.replace(
-                RESOLVED.splitlines()[4].split(" [", 1)[0], "-")):
-            with self.subTest(resolved=resolved):
-                self.assertEqual("clean", body_classification(CLEAN + resolved))
-        two = RESOLVED.replace("(1)", "(2)").replace(
-            "\n</details>", "\n- [Another fixed finding](#discussion_r21)\n</details>")
-        self.assertEqual("clean", body_classification(CLEAN + two))
-        for resolved in (RESOLVED.replace("(1)", "(2)"), RESOLVED.replace("(1)", "(0)"),
-                         RESOLVED.replace("</details>", "<details>hidden finding</details></details>"),
-                         RESOLVED.replace("#discussion_r20", "https://example.com/discussion_r20"),
-                         RESOLVED.replace("</details>", ""),
-                         RESOLVED.replace("[Loop omits", "unexpected text [Loop omits"),
-                         RESOLVED.replace("\n</details>", "\nNew finding\n</details>"),
-                         two.replace("#discussion_r21", "#discussion_r20"),
-                         RESOLVED + RESOLVED, RESOLVED + "\nUnexpected finding"):
-            with self.subTest(resolved=resolved):
-                self.assertNotEqual("clean", body_classification(CLEAN + resolved))
-        for extra in ("<details><strong>Previously missed (1)</strong> bug</details>",
-                      "<details><strong>Open (1)</strong> bug</details>",
-                      "[Another finding](#discussion_r21)"):
-            with self.subTest(extra=extra):
-                self.assertEqual("findings", body_classification(CLEAN + extra + RESOLVED))
-        self.assertEqual("unknown", body_classification(CLEAN + "**Findings:** None" + RESOLVED))
-        self.assertEqual("findings", body_classification(CLEAN.replace(
-            "**Findings:** None", "**Findings:** 1") + RESOLVED))
-
-    def test_resolved_summary_requires_verified_original_bot_threads_to_be_closed(self):
+    def test_zero_finding_review_requires_closed_consistent_bot_threads(self):
         read, req = Read(), personal_request()
         read.reviews.append(review(id=13, body=CLEAN + RESOLVED, submitted_at=iso(200)))
         read.comments[0]["commit_id"] = REVISION
@@ -1544,20 +1434,10 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual("findings", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
         read.resolved = True
         self.assertEqual("clean", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
-        for mutation in ({"user": {"id": AUTHOR_ID, "type": "User"}},
-                         {"in_reply_to_id": 19},
-                         {"pull_request_review_id": 99}):
-            changed = copy.deepcopy(read)
-            changed.comments[0].update(mutation)
-            with self.subTest(mutation=mutation):
-                self.assertEqual("unknown", fresh_collection(
-                    changed, req, [12], 100, SHA, 400)["decision"])
         changed = copy.deepcopy(read)
         changed.comments[0]["original_commit_id"] = REVISION
         with self.assertRaisesRegex(Rejected, "Inconsistent|inconsistent"):
             fresh_collection(changed, req, [12], 100, SHA, 400)
-        read.reviews[-1]["body"] = CLEAN + RESOLVED.replace("#discussion_r20", "#discussion_r99")
-        self.assertEqual("unknown", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
 
     def test_resolved_summary_cannot_hide_an_open_thread_or_an_earlier_finding(self):
         read, req = Read(), personal_request()
@@ -1576,7 +1456,9 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual("findings", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
 
     def test_watcher_finishes_resolved_clean_review_without_another_pipeline(self):
-        for body in (CLEAN + RESOLVED, HUMAN_REVIEW + RESOLVED, CURRENT_CLEAN_RESOLVED):
+        absolute = CURRENT_CLEAN_RESOLVED.replace(
+            "(#discussion_r20)", f"(https://github.com/{FIXTURE}/pull/1#discussion_r20)")
+        for body in (CLEAN + RESOLVED, HUMAN_REVIEW + RESOLVED, absolute):
             with self.subTest(body=body):
                 state = live_state(stage="waiting_review")
                 state["review_request"] = {"recorded_at": 100, "baseline_review_ids": [12]}
@@ -1600,9 +1482,6 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual("clean", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
         read.reviews[-1]["state"] = "CHANGES_REQUESTED"
         self.assertEqual("findings", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
-        read.reviews[-1]["state"] = "COMMENTED"
-        read.comments[0]["user"] = {"id": AUTHOR_ID, "type": "User"}
-        self.assertEqual("unknown", fresh_collection(read, req, [12], 100, SHA, 400)["decision"])
 
         state = live_state(stage="waiting_review")
         state["review_request"] = {"recorded_at": 100, "baseline_review_ids": [12]}

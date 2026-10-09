@@ -7,69 +7,16 @@ from loop.policy import (DEFAULTS, bot, canonical, digest, require,
                          timestamp, unchanged)
 
 def body_classification(body):
-    """Only complete CCR v2 zero-finding summaries can establish a clean body."""
-    return _body_classification(body)[0]
-
-
-def _without_review_footer(body):
-    body = re.sub(
-        r"\n\n---\n\nGive feedback about Copilot approvals in \[this survey\]"
-        r"\(https://[^\s()<>]+\) to enter a drawing for a \$[0-9]+ gift card\.\n?\Z",
-        "", body)
-    body = re.sub(
-        r"\n\n---\n\n\U0001f4a1 <a [^<>\n]+>Add a `code-review` agent skill</a>"
-        r" or configure MCP servers for context-aware, tailored reviews\. "
-        r"<a [^<>\n]+>Learn more in the docs\.</a>\n?\Z", "", body)
-    effort = re.search(r"\n\n\U0001f9e0 \*\*Review effort:\*\* Balanced\n?\Z", body)
-    return (body[:effort.start()], True) if effort is not None else (body, False)
-
-
-def _body_classification(body):
+    """Classify finding counts and body-only feedback, independently of presentation."""
     if not isinstance(body, str):
-        return "unknown", []
-    if body.count("<!-- ccr-overview-v2 -->") != 1:
-        return "unknown", []
-    body, effort = _without_review_footer(body.replace("\r\n", "\n"))
-    body = re.sub(
-        r"\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\n"
-        r"(?:(?!</?details[>\s]).)+\n</details>(?=\n|\Z)", "", body, count=1, flags=re.DOTALL)
-    counts = re.findall(r"\*\*Findings:\*\*\s*(None|[0-9]+)\b", body)
-    counts += re.findall(r"(?:\*\*|<strong>)([0-9]+) open findings?(?:\*\*|</strong>)", body)
-    if len(counts) != 1:
-        return "unknown", []
-    if counts[0] != "None" and int(counts[0]) > 0:
-        return "findings", []
-    if re.search(r"Previously missed|Open \([1-9]|New \([1-9]", body):
-        return "findings", []
-    resolved_ids = []
-    resolved = re.search(
-        r"\n\n<details>\n<summary><strong>(?:Resolved since last review "
-        r"\(([1-9][0-9]*)\)|([1-9][0-9]*) resolved since last review)"
-        r"</strong></summary>\n\n(.+)\n</details>\n?\Z",
-        body, re.DOTALL)
-    if resolved is not None:
-        entry = (r"- (?:<picture>(?:<source [^<>\n]+>)+<img [^<>\n]+></picture> )?"
-                 r"\[[^\[\]<>\n]+\]\(#discussion_r([1-9][0-9]{0,19})\)")
-        for line in resolved[3].splitlines():
-            item = re.fullmatch(entry, line)
-            if item is None:
-                return "unknown", []
-            resolved_ids.append(int(item[1]))
-        if (len(resolved_ids) != int(resolved[1] or resolved[2])
-                or len(set(resolved_ids)) != len(resolved_ids)):
-            return "unknown", []
-        body = body[:resolved.start()]
-    if re.search(r"discussion_r[0-9]+", body):
-        return "findings", []
-    heading = (r"### (?:\U0001f7e2 Approval recommended|\U0001f535 Needs a closer look)"
-               r"\n\n[^\n<>#*]+\n\n")
-    clean = (r"<!-- ccr-overview-v2 -->\n\n" + heading + r"\*\*0 open findings\*\*\n?"
-             if effort else
-             r"<!-- ccr-overview-v2 -->\n\n## Copilot review overview\n\n" + heading
-             + r"\*\*Review effort:\*\* Balanced  \n\*\*Findings:\*\* None\n?")
-    if counts[0] in {"None", "0"} and re.fullmatch(clean, body):
-        return "clean", resolved_ids
-    return "unknown", []
+        return "unknown"
+    summary = re.sub(r"\*\*|</?strong>", "", body)
+    counts = re.findall(r"\bFindings:\s*(None|[0-9]+)\b", summary)
+    counts += re.findall(r"\b([0-9]+) open findings?\b", summary)
+    if (any(count != "None" and count.lstrip("0") for count in counts)
+            or re.search(r"Previously missed|Open \([1-9]|New \([1-9]", summary)):
+        return "findings"
+    return "clean" if len(counts) == 1 else "unknown"
 
 
 def finding_fingerprint(findings):
@@ -84,19 +31,18 @@ def inline_fingerprints(findings):
 
 
 def missed_fingerprints(findings):
-    """Identify body-only findings in a complete counted CCR v2 missed section."""
+    """Identify body-only findings in a complete counted missed section."""
     fingerprints = set()
     section = (r"\n\n<details>\n<summary><strong>Previously missed "
                r"\(([1-9][0-9]{0,3})\)</strong></summary>\n\n"
-               r"In code that hasn't changed since last review\n\n(.+)\n</details>\n?\Z")
+               r"In code that hasn't changed since last review\n\n(.+)\n</details>")
     entry = re.compile(
         r"<details>\n<summary>([^\n]+)</summary>\n\n"
         r"((?:(?!</?details[>\s]).)+)\n</details>", re.DOTALL)
     for finding in findings:
         if finding["kind"] != "body" or body_classification(finding["body"]) != "findings":
             continue
-        body, _ = _without_review_footer(finding["body"])
-        missed = re.search(section, body, re.DOTALL)
+        missed = re.search(section, finding["body"].replace("\r\n", "\n"), re.DOTALL)
         if missed is None:
             continue
         items = list(entry.finditer(missed[2]))
@@ -131,19 +77,12 @@ def fresh_collection(api, request, baseline, requested_at, expected_sha, now):
                 and c["original_commit_id"] == submitted[c["pull_request_review_id"]]["commit_id"]
                 and not c.get("in_reply_to_id") and c["id"] in roots
                 and not roots[c["id"]]["resolved"]]
-    parsed = {r["id"]: _body_classification(r.get("body")) for r in fresh}
-    classifications = {review_id: value[0] for review_id, value in parsed.items()}
-    resolved_ids = {root for _, linked in parsed.values() for root in linked}
-    original_bot_roots = {c["id"] for c in comments if bot(c.get("user"))
-                          and c["pull_request_review_id"] in submitted
-                          and c["original_commit_id"] == submitted[c["pull_request_review_id"]]["commit_id"]
-                          and not c.get("in_reply_to_id")}
+    classifications = {r["id"]: body_classification(r.get("body")) for r in fresh}
     classification = classifications[latest["id"]]
     if (relevant or "findings" in classifications.values()
             or any(r["state"] == "CHANGES_REQUESTED" for r in fresh)):
         decision = "findings"
-    elif ("unknown" in classifications.values()
-          or not resolved_ids <= roots.keys() & original_bot_roots):
+    elif "unknown" in classifications.values():
         decision = "unknown"
     else:
         decision = "clean"
