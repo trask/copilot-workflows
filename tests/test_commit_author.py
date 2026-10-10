@@ -3,19 +3,40 @@ import copy
 import os
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from loop.cli import prepare
 from loop.freeze import freeze
 from loop.policy import AUTHOR_ID, Rejected, commit_author, digest
 from loop.publication import PublisherAPI
 from loop.verify import git
-from tests.test_live import FIXTURE, TEST_TOKEN, Read, personal_request
-from tests.test_loop import GOOD_PATCH, REVISION, baseline, request
+from tests.test_live import FIXTURE, TEST_TOKEN, Read, live_state, personal_request, stored
+from tests.test_loop import GOOD_PATCH, REVISION, baseline, request, run
 from tests.test_self_review import SelfRead
 
 
 class CommitAuthorTests(unittest.TestCase):
+    def test_preparation_exports_frozen_owner_identity_for_worker_startup(self):
+        req = personal_request()
+        store, _ = stored(live_state(req, "running"))
+        api = Mock()
+        api.pages.return_value = [run()]
+        with tempfile.TemporaryDirectory() as directory:
+            outputs = Path(directory, "outputs.txt")
+            with patch.dict(os.environ, {
+                    "GITHUB_RUN_ID": "24", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": REVISION,
+                    "GITHUB_OUTPUT": str(outputs)}), \
+                    patch("loop.cli.target_api", return_value=Read(req)), \
+                    patch("loop.cli.acquire_inputs", return_value=req), patch("loop.cli.Path"):
+                prepare(api, store, Namespace(pr=req["pr"], repo=req["repo"],
+                                              request_id=req["request_id"]))
+            self.assertEqual([
+                "digest=" + digest(req), "git_name=Trask Stalnaker",
+                "git_email=218610+launch-owner@users.noreply.github.com",
+            ], outputs.read_text(encoding="utf-8").splitlines())
+
     def test_both_loop_kinds_freeze_verified_pr_author_account(self):
         for kind, read in (("copilot_review", Read()), ("self_review", SelfRead())):
             with self.subTest(kind=kind):

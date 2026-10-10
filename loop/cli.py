@@ -14,7 +14,7 @@ from loop.control import busy as coordinator_busy, claim as claim_coordinator, o
 from loop.publisher_auth import publisher_secret
 from loop.freeze import freeze
 from loop.policy import (CENTRAL, LOOP_KINDS, REQUEST, TERMINAL, Rejected, attributed_owner, canonical,
-                         check_target, checkpoint_name, digest, effect_repository, eligible, loop_kind, parse_target,
+                         check_target, checkpoint_name, commit_author, digest, effect_repository, eligible, loop_kind, parse_target,
                          staged_source, publication_gate,
                          pipeline_budget, require, supported_checkpoint)
 from loop.state import State
@@ -135,9 +135,12 @@ def prepare(api, store, args):
         source = download_source(api, state, "frozen-source")
         output("source_bundle", str(source / "source.bundle"))
     request = acquire_inputs(target_api(api, request["repo"], request["head_repo"]), request, Path.cwd())
+    name, email = commit_author(request)
     Path("frozen-request.json").write_bytes(canonical(request))
     Path("frozen-digest.txt").write_text(digest(request), encoding="ascii")
     output("digest", digest(request))
+    output("git_name", name)
+    output("git_email", email)
 
 
 def verify_pending(api, store, args, directory=None, read=None):

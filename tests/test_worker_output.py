@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import runpy
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,11 +55,7 @@ class WorkerOutputTests(unittest.TestCase):
             with self.assertRaisesRegex(Rejected, "Unknown worker outcome"):
                 worker_output.check_output(req, Path(directory))
 
-    def test_documented_merge_commit_uses_owner_despite_inherited_bot_identity(self):
-        worker = (Path(__file__).resolve().parents[1] /
-                  ".github" / "workflows" / "copilot-worker.md").read_text(encoding="utf-8")
-        recipe = worker.split("## Return native commits and a small result", 1)[1]
-        recipe = recipe.split("```python\n", 1)[1].split("\n```", 1)[0]
+    def test_ordinary_merge_commit_inherits_startup_owner_over_repository_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             repository, output = Path(directory, "target"), Path(directory, "output")
             repository.mkdir()
@@ -74,16 +71,20 @@ class WorkerOutputTests(unittest.TestCase):
             git(["config", "user.name", "github-actions[bot]"], repository)
             git(["config", "user.email", "github-actions[bot]@users.noreply.github.com"], repository)
             git(["merge", "--no-commit", "--no-ff", base], repository)
+            name, email = commit_author(req)
             with patch.dict(os.environ, {
-                    "GIT_AUTHOR_NAME": "github-actions[bot]",
-                    "GIT_AUTHOR_EMAIL": "github-actions[bot]@users.noreply.github.com",
-                    "GIT_COMMITTER_NAME": "github-actions[bot]",
-                    "GIT_COMMITTER_EMAIL": "github-actions[bot]@users.noreply.github.com"}):
-                exec(recipe, {"request": req, "target": repository})
+                    "GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
+                    "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email}):
+                subprocess.run(
+                    ["git", "-c", "core.hooksPath=" + os.devnull, "commit", "--quiet", "-m",
+                     "Resolve conflicts with the frozen base\n\n"
+                     "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"],
+                    cwd=repository, check=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
                 (output / "result.json").write_bytes(canonical(result(req, "merge")))
                 (output / "diagnostics.txt").write_bytes(b"Preserved both frozen histories.")
                 worker_output.package(req, repository, output)
-            name, email = commit_author(req)
             self.assertEqual([name, email, name, email],
                              git(["show", "-s", "--format=%an%n%ae%n%cn%n%ce",
                                   "HEAD"], repository).decode().splitlines())

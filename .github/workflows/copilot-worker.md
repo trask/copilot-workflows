@@ -50,6 +50,10 @@ engine:
     GRADLE_USER_HOME: /tmp/review-loop-worker-home/.gradle
     COPILOT_PROVIDER_MODEL_ID: gpt-6.1-sol
     COPILOT_PROVIDER_WIRE_API: responses
+    GIT_AUTHOR_NAME: ${{ steps.prepare.outputs.git_name }}
+    GIT_AUTHOR_EMAIL: ${{ steps.prepare.outputs.git_email }}
+    GIT_COMMITTER_NAME: ${{ steps.prepare.outputs.git_name }}
+    GIT_COMMITTER_EMAIL: ${{ steps.prepare.outputs.git_email }}
 sandbox:
   agent:
     version: v0.28.49
@@ -94,6 +98,15 @@ jobs:
     permissions:
       issues: none
 safe-outputs:
+  threat-detection:
+    engine:
+      id: copilot
+      version: "1.0.93"
+      env:
+        GIT_AUTHOR_NAME: github-actions[bot]
+        GIT_AUTHOR_EMAIL: github-actions[bot]@users.noreply.github.com
+        GIT_COMMITTER_NAME: github-actions[bot]
+        GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
   github-token: ${{ secrets.GITHUB_TOKEN }}
   activation-comments: false
   report-failure-as-issue: false
@@ -114,6 +127,7 @@ steps:
       ref: ${{ github.sha }}
       persist-credentials: false
   - name: Validate task and download local diff and CI logs
+    id: prepare
     env:
       GH_TOKEN: ${{ github.token }}
       REQUEST_ID: ${{ inputs.request_id }}
@@ -263,25 +277,9 @@ No task may invent a change to avoid a no-change result.
 ## Return native commits and a small result
 
 For source changes, create ordinary local Git commits, grouping related changes
-and separating unrelated causes. Stage new files too. Use the frozen launch owner's
-name and email for author and committer, not a target-repository Git identity:
-
-```python
-from loop.policy import commit_author
-from loop.source import git
-
-name, email = commit_author(request)
-message = "Resolve conflicts with the frozen base\n\n" + (
-    "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"
-)
-git(["-c", "user.name=" + name, "-c", "user.email=" + email,
-     "commit", "--quiet", "-m", message], target)
-```
-
-Use this sanitized Git wrapper for every commit, with a subject appropriate to the
-change. Repository-local `user.name` and `user.email` alone do not override inherited
-Git author/committer environment variables. The wrapper removes those overrides,
-and the command-level configuration selects the frozen identity.
+and separating unrelated causes. Stage new files too. The inherited Git author
+and committer environment already uses the frozen launch owner's name and email;
+ordinary `git commit` commands preserve that identity.
 
 Each commit needs a useful subject and the final trailer:
 

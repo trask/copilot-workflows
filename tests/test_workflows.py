@@ -10,6 +10,27 @@ from loop.policy import Rejected
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_worker_startup_identity_uses_trusted_outputs_without_leaking_detector_references(self):
+        compiled = (Path(__file__).resolve().parents[1] / ".github" / "workflows" /
+                    "copilot-worker.lock.yml").read_text(encoding="utf-8")
+        sections = dict(re.findall(
+            r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
+            compiled.split("\njobs:\n", 1)[1], re.MULTILINE | re.DOTALL))
+        for role in ("AUTHOR", "COMMITTER"):
+            for field, output in (("NAME", "git_name"), ("EMAIL", "git_email")):
+                variable = "GIT_" + role + "_" + field
+                with self.subTest(variable=variable):
+                    self.assertEqual(["${{ steps.prepare.outputs." + output + " }}"],
+                                     re.findall(r"^\s+" + variable + r": (.+)$",
+                                                sections["agent"], re.MULTILINE))
+                    self.assertEqual([
+                        "github-actions[bot]" if field == "NAME"
+                        else "github-actions[bot]@users.noreply.github.com"],
+                        re.findall(r"^\s+" + variable + r": (.+)$",
+                                   sections["detection"], re.MULTILINE))
+        self.assertLess(sections["agent"].index("id: prepare"),
+                        sections["agent"].index("id: agentic_execution"))
+
     def test_worker_and_threat_detection_use_canonical_model_and_transport(self):
         root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
         frontmatter = (root / "copilot-worker.md").read_text(
