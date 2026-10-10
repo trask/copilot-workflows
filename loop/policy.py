@@ -266,6 +266,8 @@ def attributed_owner(api, pr, repo, actor_id, owner=None):
     require(type(owner.get("id")) is int and owner["id"] == actor_id
             and isinstance(owner.get("login"), str) and ACCOUNT.fullmatch(owner["login"]),
             "Invalid GitHub PR owner identity")
+    if pr["user"]["login"].casefold() != "copilot":
+        return {"id": owner["id"], "login": owner["login"]}
     result = api.graphql("""
 query($owner:String!, $name:String!, $searchQuery:String!) {
   repository(owner:$owner, name:$name) { nameWithOwner }

@@ -146,7 +146,7 @@ export class PrDashboard extends Dashboard {
             }
             const prs = pulls.map((raw) => {
                 const pr = normalizePull(raw, this.repository, dashboard, account.value);
-                pr.mine ||= ownPulls.value.has(pr.number);
+                if (!pr.bot) pr.mine ||= ownPulls.value.has(pr.number);
                 return pr;
             });
             const incomplete = prs.filter((pr) => !["current", "draft"].includes(pr.dashboardStatus)).length;
@@ -157,11 +157,11 @@ export class PrDashboard extends Dashboard {
                 this.prWarnings = warnings;
             }
             const [liveStatus] = await Promise.allSettled([
-                this.github.pullEvidence(this.repository, prs.filter((pr) => pr.mine), { summaryCI: true }),
+                this.github.pullEvidence(this.repository, prs.filter((pr) => pr.mine || pr.bot), { summaryCI: true }),
                 workflow,
             ]);
             for (const pr of prs) {
-                if (!pr.mine) continue;
+                if (!pr.mine && !pr.bot) continue;
                 const read = liveStatus.status === "fulfilled" ? liveStatus.value.get(pr.number) : null;
                 try {
                     if (!read?.detail) throw new Error(read?.error ??
@@ -337,7 +337,7 @@ export class PrDashboard extends Dashboard {
         const phases = snapshot.current.map(phaseSummary).filter((phase) => phase.target.toLowerCase() === target.toLowerCase());
         if (phases.length > 1) throw new Error("Multiple checkpoints exist for this PR. Inspect central state before dispatching.");
         const normalized = normalizePull(pr, repo, null, account);
-        if (!normalized.mine) normalized.mine = (await this.github.ownPullNumbers(repo)).has(number);
+        if (!normalized.mine && !normalized.bot) normalized.mine = (await this.github.ownPullNumbers(repo)).has(number);
         return { pr: normalized, viewer: account, phase: phases[0] };
     }
 

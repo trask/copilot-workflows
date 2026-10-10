@@ -1008,7 +1008,7 @@ test("all open rows include drafts, bots and missing dashboard data; routing use
     assert.equal(draft.dashboardStatus, "draft");
     assert.equal(missing.dashboardStatus, "missing");
     assert.deepEqual(filterPulls([matching, draft, missing]), [matching, draft]);
-    assert.deepEqual(filterPulls([matching, draft, missing], { mine: false }), [missing]);
+    assert.deepEqual(filterPulls([matching, draft, missing], { ownership: "bots" }), [missing]);
     assert.deepEqual(filterPulls([matching, draft, missing], { reviewers: true }), [matching]);
     for (const record of [
         cached({ pr_number: 20 }), cached({ pr_url: "https://evil.test/" }), cached({ failed: true }),
@@ -1054,28 +1054,28 @@ test("refresh uses the latest saved routing and facts while ownership and tasks 
     assert.equal(pr.draft, false);
     assert.equal(pr.approved, true);
     assert.equal(pr.mine, false);
-    assert.deepEqual(pr.tasks, ["pr_review"]);
-    assert.deepEqual(filterPulls(first.prs, { mine: false, reviewers: true }), [pr]);
+    assert.deepEqual(pr.tasks, Object.keys(KIND_LABELS));
+    assert.deepEqual(filterPulls(first.prs, { ownership: "bots", reviewers: true }), [pr]);
     c.setDashboard(state(cached({ route: "author", facts: facts({ ci_pending_count: 0 }) })));
     const next = await c.canvas.refresh();
     assert.deepEqual(next.prWarnings, []);
     assert.equal(next.prs[0].routeLabel, "Waiting on authors");
     assert.equal(next.prs[0].ciPending, 0);
     assert.equal(next.prs[0].approved, false);
-    assert.deepEqual(filterPulls(next.prs, { mine: false, reviewers: true }), []);
+    assert.deepEqual(filterPulls(next.prs, { ownership: "bots", reviewers: true }), []);
 });
 
 test("ownership views are disjoint and compose with reviewer and case-insensitive search filters", () => {
     const mine = normalizePull(pull({ user: { ...account, login: "TrAsK", type: "User" } }), repo, state(), account);
     const other = normalizePull(pull({ user: { login: "someone", id: 22, type: "User" } }),
         repo, state(cached({ facts: facts({ author: "someone" }) })), account);
-    assert.deepEqual(filterPulls([mine, other], { mine: true, reviewers: true, search: "UNTRUSTED" }), [mine]);
-    assert.deepEqual(filterPulls([mine, other], { mine: true, search: "someone" }), []);
+    assert.deepEqual(filterPulls([mine, other], { ownership: "mine", reviewers: true, search: "UNTRUSTED" }), [mine]);
+    assert.deepEqual(filterPulls([mine, other], { ownership: "mine", search: "someone" }), []);
     assert.deepEqual(filterPulls([mine, other]), [mine]);
-    assert.deepEqual(filterPulls([mine, other], { mine: false }), [other]);
+    assert.deepEqual(filterPulls([mine, other], { ownership: "others" }), [other]);
     assert.deepEqual(filterPulls([mine, other], { reviewers: true }), [mine]);
-    assert.deepEqual(filterPulls([mine, other], { mine: false, reviewers: true, search: "SOMEONE" }), [other]);
-    assert.deepEqual(filterPulls([mine, other], { mine: false, search: "trask" }), []);
+    assert.deepEqual(filterPulls([mine, other], { ownership: "others", reviewers: true, search: "SOMEONE" }), [other]);
+    assert.deepEqual(filterPulls([mine, other], { ownership: "others", search: "trask" }), []);
     assert.deepEqual(taskChoices(mine, account), Object.keys(KIND_LABELS));
     assert.deepEqual(taskChoices(other, account), ["pr_review"]);
     assert.deepEqual(taskChoices(mine, { ...account, id: 99 }), []);
@@ -1088,6 +1088,7 @@ test("My PRs includes GitHub-attributed Copilot PRs with all owner task buttons"
             pull(),
             pull({ number: 13, user: { login: "Copilot", id: 21, type: "Bot" } }),
             pull({ number: 14, user: { login: "Copilot", id: 21, type: "Bot" } }),
+            pull({ number: 15, user: { login: "dependabot[bot]", id: 22, type: "Bot" }, draft: true }),
         ],
         ownNumbers: [12, 13],
     });
@@ -1099,11 +1100,15 @@ test("My PRs includes GitHub-attributed Copilot PRs with all owner task buttons"
     };
     const result = await c.canvas.refresh();
     assert.deepEqual(filterPulls(result.prs).map((pr) => pr.number), [12, 13]);
-    assert.deepEqual(filterPulls(result.prs, { mine: false }).map((pr) => pr.number), [14]);
-    assert.deepEqual(evidenceNumbers, [12, 13]);
+    assert.deepEqual(filterPulls(result.prs, { ownership: "others" }).map((pr) => pr.number), [14]);
+    assert.deepEqual(filterPulls(result.prs, { ownership: "bots" }).map((pr) => pr.number), [15]);
+    assert.deepEqual(filterPulls(result.prs, { ownership: "bots", reviewers: true }), []);
+    assert.deepEqual(filterPulls(result.prs, { ownership: "bots", search: "DEPENDABOT" }).map((pr) => pr.number), [15]);
+    assert.deepEqual(evidenceNumbers, [12, 13, 15]);
     assert.deepEqual(result.prs[0].tasks, Object.keys(KIND_LABELS));
     assert.deepEqual(result.prs[1].tasks, Object.keys(KIND_LABELS));
     assert.deepEqual(result.prs[2].tasks, ["pr_review"]);
+    assert.deepEqual(result.prs[3].tasks, Object.keys(KIND_LABELS));
     c.github.ownPullNumbers = async () => new Set();
     await assert.rejects(c.canvas.launch({ target: `${repo}#13`, kind: "pr_description", confirmed: true }), /not eligible/);
     c.github.ownPullNumbers = async () => new Set([12, 13]);
@@ -1344,25 +1349,41 @@ test("PR Reviewer is enabled on the owner's PR and dispatches a review task", as
     }]);
 });
 
-test("PR Reviewer accepts bot-authored PRs without authorizing owner-only tasks", async () => {
-    const c = controller({ pulls: [pull({ user: { login: "dependabot[bot]", id: 21, type: "Bot" } })] });
-    const snapshot = await c.canvas.refresh();
-    assert.equal(snapshot.prs[0].actionBlock, null);
-    assert.deepEqual(snapshot.prs[0].tasks, ["pr_review"]);
-    const presentation = taskPresentation(snapshot.prs[0], "pr_review", snapshot.workflowReady);
-    assert.equal(presentation.label, "Run");
-    assert.equal(presentation.disabled, false);
-    for (const kind of Object.keys(KIND_LABELS).filter((value) => value !== "pr_review")) {
-        assert.equal(taskPresentation(snapshot.prs[0], kind, snapshot.workflowReady).disabled, true);
-        await assert.rejects(c.canvas.launch({ target, kind, confirmed: true }), /not eligible/);
+test("bot PRs offer all eight tasks and launch them with live evidence", async () => {
+    for (const kind of Object.keys(KIND_LABELS)) {
+        const c = controller({ pulls: [pull({ user: { login: "dependabot[bot]", id: 21, type: "Bot" } })] });
+        c.github.pullEvidence = async () => new Map([[12, {
+            detail: detail({ checks: [check("FAILURE")], ciState: "FAILURE", threads: [thread()] }),
+        }]]);
+        const snapshot = await c.canvas.refresh();
+        assert.equal(snapshot.prs[0].actionBlock, null);
+        assert.deepEqual(snapshot.prs[0].tasks, Object.keys(KIND_LABELS));
+        assert.equal(taskPresentation(snapshot.prs[0], kind, snapshot.workflowReady).disabled, false);
+        await c.canvas.launch({ target, kind, confirmed: true });
+        assert.deepEqual(c.calls.filter((call) => typeof call === "object"), [{
+            operation: "launch", target, loop_kind: kind, publication_auth: "fine_grained_pat",
+        }]);
     }
-    await c.canvas.launch({ target, kind: "pr_review", confirmed: true });
-    assert.deepEqual(c.calls.filter((call) => typeof call === "object"), [{
-        operation: "launch", target, loop_kind: "pr_review", publication_auth: "fine_grained_pat",
-    }]);
     for (const type of ["Organization", "unknown", null]) {
         assert.throws(() => normalizePull(pull({ user: { ...account, type } }), repo, state(), account), /invalid/);
     }
+});
+
+test("bot launches recheck human ownership and current action evidence", async () => {
+    const c = controller({ pulls: [pull({ user: { login: "renovate[bot]", id: 21, type: "Bot" } })] });
+    await c.canvas.refresh();
+    for (const user of [
+        { login: "someone", id: 22, type: "User" }, { login: "Copilot", id: 23, type: "Bot" },
+    ]) {
+        c.setPulls([pull({ user })]);
+        await assert.rejects(c.canvas.launch({ target, kind: "self_review", confirmed: true }), /not eligible/);
+    }
+    c.setPulls([pull({ user: { login: "renovate[bot]", id: 21, type: "Bot" } })]);
+    c.github.pullEvidence = async () => new Map([[12, { detail: detail({ checks: [check()] }) }]]);
+    await assert.rejects(c.canvas.launch({ target, kind: "ci_fix", confirmed: true }), /Nothing to fix/);
+    c.setViewer({ login: "someone", id: 22 });
+    await assert.rejects(c.canvas.launch({ target, kind: "self_review", confirmed: true }), /personal owner/);
+    assert.equal(c.calls.filter((call) => typeof call === "object").length, 0);
 });
 
 test("cancellation uses the exact rendered identity and rejects stale generations instead of adopting them", async () => {

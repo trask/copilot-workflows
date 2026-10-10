@@ -18,7 +18,7 @@ from loop.coordinator import cancel, checkpoint, dispatch, quiescent
 from loop.freeze import freeze, probe_target
 from loop.inputs import acquire
 from loop.live import advance, start, watch_ci_fix, watch_single
-from loop.policy import (AUTHOR_ID, CENTRAL, LOOP_KINDS, Rejected, candidate_outcome, check_target,
+from loop.policy import (AUTHOR_ID, BOT_IDENTITY_PATH, CENTRAL, LOOP_KINDS, Rejected, candidate_outcome, check_target,
                          canonical, digest, effect_repository, eligible, pipeline_budget)
 from loop.policy import iso, pipeline_limit, staged_source
 from loop.publication import PublisherAPI, acceptance, authenticated_push, evidence, import_candidate
@@ -31,7 +31,7 @@ from loop.worker_output import check_output
 from tests.fixtures import CI_CHECK, FIXTURE
 from tests.support import REASONING, batch, native_files
 from tests.test_live import Publisher, personal_pr, personal_request, stored, zipped, TEST_TOKEN
-from tests.test_loop import FakeAPI, MemoryState, REVISION, SHA, GOOD_PATCH, run
+from tests.test_loop import BOT, FakeAPI, MemoryState, REVISION, SHA, GOOD_PATCH, review, run
 from tests.test_self_review import BASE, MERGE_BASE, SelfRead, accepted_state, self_request
 
 
@@ -244,7 +244,7 @@ class TaskContractsTests(unittest.TestCase):
         with self.assertRaisesRegex(Rejected, "Target changed after freeze"):
             check_target(read, frozen)
 
-    def test_reviewer_freezes_bot_authors_without_granting_owner_only_task_access(self):
+    def test_reviewer_freezes_bot_authors_and_rechecks_identity(self):
         req = task_request("pr_review")
         read = TaskRead(req)
         read.pr["user"].update(type="Bot", login="dependabot[bot]")
@@ -253,20 +253,39 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(req["commit_author"], frozen["commit_author"])
         self.assertEqual(req["pr_diff"], collect_diff(read, frozen))
         check_target(read, frozen)
-        for kind in LOOP_KINDS - {"pr_review"}:
-            with self.subTest(kind=kind), self.assertRaisesRegex(Rejected, "Wrong author"):
-                eligible(read.pr, FIXTURE, AUTHOR_ID, kind)
         for author_type in ("Organization", "unknown", None):
             read.pr["user"]["type"] = author_type
             with self.subTest(author_type=author_type), self.assertRaisesRegex(Rejected, "Wrong author"):
                 eligible(read.pr, FIXTURE, AUTHOR_ID, "pr_review")
         read.pr["user"]["type"] = "Bot"
         read.pr["user"]["id"] = AUTHOR_ID
-        for kind in LOOP_KINDS - {"pr_review"}:
-            with self.subTest(kind=kind), self.assertRaisesRegex(Rejected, "Wrong author"):
-                eligible(read.pr, FIXTURE, AUTHOR_ID, kind)
         with self.assertRaisesRegex(Rejected, "Target changed after freeze"):
             check_target(read, frozen)
+
+    def test_bot_tasks_freeze_owner_commit_identity_and_recheck_bot_author(self):
+        for kind in LOOP_KINDS:
+            req = task_request(kind)
+            read = TaskRead(req)
+            read.pr["user"].update(id=999, type="Bot", login="dependabot[bot]")
+            if kind == "copilot_review":
+                call = read.call
+                read.call = lambda path, *args, **kwargs: (
+                    BOT.copy() if path == BOT_IDENTITY_PATH else call(path, *args, **kwargs))
+                read.reviews = [review()]
+                read.graphql = Mock(return_value={"repository": {"pullRequest": {
+                    "reviewThreads": {"nodes": [], "pageInfo": {"hasNextPage": False}}}}})
+            with self.subTest(kind=kind):
+                frozen = freeze(read, 1, REVISION, 100, FIXTURE, loop_kind=kind)
+                self.assertEqual(999, frozen["pr_author_id"])
+                self.assertEqual(req["commit_author"], frozen["commit_author"])
+                check_target(read, frozen)
+                read.pr["user"]["id"] = 1000
+                with self.assertRaisesRegex(Rejected, "Target changed after freeze"):
+                    check_target(read, frozen)
+                read.pr["user"].update(id=999, type="User")
+                if kind != "pr_review":
+                    with self.assertRaisesRegex(Rejected, "Wrong author"):
+                        check_target(read, frozen)
 
     def test_copilot_pr_attributed_to_owner_freezes_owner_identity_and_rechecks_ownership(self):
         for kind in ("self_review", "pr_description"):

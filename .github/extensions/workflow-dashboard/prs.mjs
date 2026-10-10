@@ -61,6 +61,7 @@ export function normalizePull(pr, repo, dashboard, viewer) {
         url: `https://github.com/${repo}/pull/${pr.number}`, author: pr.user.login,
         authorId: pr.user.id, authorType: pr.user.type,
         mine: pr.user.login.toLowerCase() === viewer.login.toLowerCase(),
+        bot: pr.user.type === "Bot" && pr.user.login.toLowerCase() !== "copilot",
         draft: pr.draft, approved: count("approval_count") > 0,
         sha: pr.head.sha, headAvailable: Boolean(pr.head.repo),
         updated: pr.updated_at, dashboardStatus: status, route,
@@ -76,16 +77,16 @@ export function normalizePull(pr, repo, dashboard, viewer) {
     };
 }
 
-export function filterPulls(prs, { mine = true, reviewers = false, search = "" } = {}) {
+export function filterPulls(prs, { ownership = "mine", reviewers = false, search = "" } = {}) {
     const query = search.trim().toLowerCase();
-    return prs.filter((pr) => pr.mine === mine &&
+    return prs.filter((pr) => (ownership === "bots" ? pr.bot : !pr.bot && pr.mine === (ownership === "mine")) &&
         (!reviewers || !pr.draft && pr.dashboardStatus === "current" && pr.route === "approver") &&
         [pr.title, pr.target, pr.author].join(" ").toLowerCase().includes(query));
 }
 
 export function taskChoices(pr, viewer) {
     if (!viewer || viewer.id !== LAUNCH_OWNER_ID) return [];
-    return Object.keys(KIND_LABELS).filter((kind) => kind === "pr_review" || pr.mine);
+    return Object.keys(KIND_LABELS).filter((kind) => kind === "pr_review" || pr.mine || pr.bot);
 }
 
 function hasCopilotBodyFeedback(body) {

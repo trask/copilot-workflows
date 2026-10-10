@@ -254,7 +254,8 @@ function renderPulls() {
         cards.replaceChildren(element("p", `Loading open PRs for ${loadingRepository}...`, "empty"));
         return;
     }
-    const rows = filterPulls(state.prs, { mine: $("mine").checked, reviewers: $("reviewers").checked, search: $("search").value });
+    const rows = filterPulls(state.prs, { ownership: $("bots").checked ? "bots" : $("mine").checked ? "mine" : "others",
+        reviewers: $("reviewers").checked, search: $("search").value });
     $("pr-count").textContent = `${rows.length} / ${state.prs.length}`;
     cards.replaceChildren();
     for (const pr of rows) cards.append(prCard(pr));
@@ -397,7 +398,7 @@ function prCard(pr) {
     tasks.setAttribute("role", "group");
     tasks.setAttribute("aria-label", `Workflow tasks for ${pr.target}`);
     for (const [kind, label] of Object.entries(KIND_LABELS)) {
-        if (!pr.mine && kind !== "pr_review") continue;
+        if (!pr.mine && !pr.bot && kind !== "pr_review") continue;
         const presentation = taskPresentation(pr, kind, state.workflowReady, state.actions);
         const actionLabel = presentation.actionLabel ?? label;
         const button = element("button", null, "task-button");
@@ -530,7 +531,7 @@ $("auto").addEventListener("change", async () => {
         error(failure.message);
     }
 });
-for (const id of ["mine", "others", "reviewers", "search"]) $(id).addEventListener("input", render);
+for (const id of ["mine", "others", "bots", "reviewers", "search"]) $(id).addEventListener("input", render);
 $("repo").addEventListener("change", () => load("/api/repository", $("repo").value));
 
 async function readState(version = stateVersion) {
